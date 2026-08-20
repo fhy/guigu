@@ -1,0 +1,10 @@
+[package]
+name = "guigu"
+version = "0.1.0"
+edition = "2024"
+
+description = "A lightweight Rust-native AI Agent runtime"
+license = "MIT"
+repository = "https://github.com/fhy/guigu"
+
+[dependencies]
