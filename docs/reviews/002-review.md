@@ -200,3 +200,77 @@
 ## 复审指引
 
 修复问题 1/2（AC 硬性项）+ 问题 3/4 有结论后回复 `[Fix] Task 002` 申请复审。问题 1 已连续三轮未修，请 worker 优先处理。
+
+---
+
+# 复审 #3（2026-08-21）
+
+- 结论: **REJECT（第四次打回）**
+- 审查对象: commit 45acda9（Fix task 002: Message/Event 数据结构修复）
+- 验证方式: 四项门禁实跑 + /tmp 探针项目实测 StopReason 行为（未动仓库代码）
+
+## 门禁结果
+
+| Gate | 结果 |
+|------|------|
+| cargo check | ✓ |
+| cargo clippy -D warnings | ✓ 0 warning |
+| cargo test | ✗ **编译失败**（E0603，0 个测试运行） |
+| cargo fmt --check | ✓ |
+
+## 上次问题修复情况
+
+| 上次问题 | 状态 |
+|----------|------|
+| P0-1 StopReason 兜底 | ⚠ 重写了自定义 Serialize/Deserialize，但**引入回归**（见新问题 2，兜底依然失效） |
+| P0-2 MessageUpdate 覆盖 | ✓ 已补（tests/message.rs:137，AssistantEvent 单元结构体直接构造） |
+| P1-3 ToolResult 双重定义 | ⚠ 已合并到 tool.rs，但 event.rs 私有导入导致测试编译失败（见新问题 1） |
+| P1-4 Arc 偏差未裁定 | ✗ 连续三轮未裁定 |
+| P2-5 文档注释 | ✗ 连续四轮缺失 |
+| P2-6 依赖超范围 | ✗ 未收敛 |
+| P2-7 ThinkingLevel serde 策略 | ✗ 未改 |
+| P2-8 use serde_json 冗余 | ✗ 仍在（tests/message.rs:7） |
+
+## 本轮问题清单
+
+### P0 — 门禁硬伤（测试无法编译）
+
+1. **src/core/event.rs:4 — `use crate::core::tool::ToolResult;` 为私有导入**，tests/message.rs:2 引用 `guigu::core::event::ToolResult` 报 E0603（struct is private），cargo test 直接编译失败。
+   → 改为 `pub use crate::core::tool::ToolResult;`（re-export，符合规格"供事件与 Tool trait 复用"）；或测试统一走 `guigu::core::ToolResult` 并删除第 2 行的重复别名导入（第 1 行已有同一类型）。
+
+### P0 — StopReason 回归（上轮问题的错误修法）
+
+2. **src/core/message.rs:96-150 — 序列化与反序列化表示不对称，roundtrip 断裂 + 兜底仍失效**。探针实测（原样复制的实现）：
+   - `serialize(Completed)` 输出纯字符串 `"completed"`；
+   - 但反序列化该输出报错：`invalid type: string "completed", expected internally tagged enum` —— **自己产出的 JSON 自己吃不下**。`test_assistant_message_roundtrip`（用了 `StopReason::Completed`）一旦编译通过必然失败；
+   - 未知值兜底依旧失效：`{"type":"some_future_reason"}` 与 `"some_future_reason"` 均报错，不会落入 `Other`（AC 第 5 条第四轮未满足）；`test_stop_reason_unknown_variant` 必然失败。
+   根因：Serialize 按字符串、Deserialize 的 Helper 按 internally-tagged 对象，两种 wire format 不一致；且带 payload 的 `Other { reason }` 无法用 `#[serde(other)]` 兜底。
+   → **建议放弃 tagged-object 方案，改纯字符串表示**（与 Pi 一致，Pi 的 stop reason 就是字符串）：
+   ```rust
+   // Serialize: Completed => "completed", ..., Other(s) => s
+   // Deserialize: 收 String，match 已知值映射具名变体，其余 => Other(s)
+   ```
+   一个方案同时解决 roundtrip 断裂与未知值兜底，且代码量减半。补测试：每个具名变体 roundtrip + 未知字符串 → Other。
+
+### P1 — 待裁定（连续三轮遗留）
+
+3. **AgentEvent 未使用 Arc**。规格 Design Notes 明确 `Vec<Arc<Message>>` / `Arc<AssistantMessage>` / `Arc<Message>`；实现全为裸类型，Cargo.toml serde `rc` feature 空挂。高频 MessageUpdate 场景丢 Arc 意味每次事件深拷贝整条消息。→ 请 PM 裁定：按规格补 Arc，或修订规格放弃 Arc 并记录决策。**此项不宜再拖**。
+
+### P2 — 建议性改进（不阻塞）
+
+4. 全部 pub 类型缺 `///` 文档注释（conventions 要求，连续四轮遗留）。
+5. 依赖超范围：tokio/tokio-util/tracing/futures/async-trait/thiserror 本任务零使用。
+6. ThinkingLevel 无 serde 策略，序列化为 `"Medium"`（PascalCase），与其余类型 snake_case 不一致。
+7. tests/message.rs:7 `use serde_json;` 冗余。
+
+## 体量与规范核查
+
+- 文件行数：message.rs 161 / event.rs 49 / tool.rs 10 / tests 217 ✓（≤400）
+- 测试数量 9 ≤ 30 ✓；src/ 无 unwrap() ✓；测试 expect + assert_eq ✓
+- 合理偏差维持认可：内容段 struct variant、AssistantEvent 占位放 event.rs、ToolResult 定于 tool.rs
+
+## 复审指引
+
+1. 修问题 1（一行 re-export）+ 问题 2（换纯字符串方案）后四项门禁必须全绿——注意当前 cargo test 编译失败掩盖了至少 2 个必挂测试，修复后以真实运行为准；
+2. 问题 3 请 PM 给出裁定结论；
+3. 完成后回复 `[Fix] Task 002` 申请复审。
