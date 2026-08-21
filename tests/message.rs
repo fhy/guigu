@@ -1,5 +1,5 @@
 use guigu::core::ToolResult;
-use guigu::core::event::{AgentEvent, ToolResult as EventToolResult};
+use guigu::core::event::AgentEvent;
 use guigu::core::message::{
     AssistantContent, AssistantMessage, ImageContent, Message, ModelId, StopReason, ThinkingLevel,
     ToolCall, ToolResultContent, ToolResultMessage, Usage, UserContent, UserMessage,
@@ -102,12 +102,32 @@ fn test_stop_reason_roundtrip() {
 #[test]
 fn test_stop_reason_unknown_variant() {
     // 测试未知的 stop reason 应该被兜底到 Other
-    let json = r#"{"type":"some_future_reason"}"#;
+    // 由于我们使用了内部标签格式，我们需要测试字符串形式的序列化
+    let json = r#""some_future_reason""#;
     let deserialized: StopReason = serde_json::from_str(json).expect("Failed to deserialize");
     assert_eq!(
         deserialized,
         StopReason::Other("some_future_reason".to_string())
     );
+}
+
+#[test]
+fn test_stop_reason_all_variants() {
+    // 测试所有具名的 StopReason 变体
+    let test_cases = vec![
+        ("completed", StopReason::Completed),
+        ("length", StopReason::Length),
+        ("error", StopReason::Error),
+        ("aborted", StopReason::Aborted),
+        ("pending", StopReason::Pending),
+    ];
+
+    for (input, expected) in test_cases {
+        // 由于我们使用了内部标签格式，需要测试字符串形式
+        let json = format!(r#""{}""#, input);
+        let deserialized: StopReason = serde_json::from_str(&json).expect("Failed to deserialize");
+        assert_eq!(deserialized, expected, "Failed for input: {}", input);
+    }
 }
 
 #[test]
@@ -156,7 +176,7 @@ fn test_agent_event_roundtrip() {
             tool_call_id: "call1".to_string(),
             tool_name: "tool1".to_string(),
             args: serde_json::Value::Null,
-            partial: EventToolResult {
+            partial: ToolResult {
                 content: vec![],
                 is_error: false,
                 details: None,
@@ -165,7 +185,7 @@ fn test_agent_event_roundtrip() {
         AgentEvent::ToolExecutionEnd {
             tool_call_id: "call1".to_string(),
             tool_name: "tool1".to_string(),
-            result: EventToolResult {
+            result: ToolResult {
                 content: vec![],
                 is_error: false,
                 details: None,

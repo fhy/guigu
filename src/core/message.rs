@@ -104,19 +104,7 @@ impl Serialize for StopReason {
             StopReason::Error => serializer.serialize_str("error"),
             StopReason::Aborted => serializer.serialize_str("aborted"),
             StopReason::Pending => serializer.serialize_str("pending"),
-            StopReason::Other(reason) => {
-                #[derive(Serialize)]
-                struct Helper<'a> {
-                    #[serde(rename = "type")]
-                    type_: &'a str,
-                    reason: &'a str,
-                }
-                Helper {
-                    type_: "other",
-                    reason,
-                }
-                .serialize(serializer)
-            }
+            StopReason::Other(s) => serializer.serialize_str(s),
         }
     }
 }
@@ -126,25 +114,20 @@ impl<'de> Deserialize<'de> for StopReason {
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(tag = "type", rename_all = "snake_case")]
-        enum Helper {
-            Completed,
-            Length,
-            Error,
-            Aborted,
-            Pending,
-            Other { reason: String },
-        }
+        let s = String::deserialize(deserializer)?;
+        Ok(StopReason::from_string(&s))
+    }
+}
 
-        let helper = Helper::deserialize(deserializer)?;
-        match helper {
-            Helper::Completed => Ok(StopReason::Completed),
-            Helper::Length => Ok(StopReason::Length),
-            Helper::Error => Ok(StopReason::Error),
-            Helper::Aborted => Ok(StopReason::Aborted),
-            Helper::Pending => Ok(StopReason::Pending),
-            Helper::Other { reason } => Ok(StopReason::Other(reason)),
+impl StopReason {
+    pub fn from_string(s: &str) -> Self {
+        match s {
+            "completed" => StopReason::Completed,
+            "length" => StopReason::Length,
+            "error" => StopReason::Error,
+            "aborted" => StopReason::Aborted,
+            "pending" => StopReason::Pending,
+            _ => StopReason::Other(s.to_string()),
         }
     }
 }
