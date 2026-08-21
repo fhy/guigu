@@ -331,3 +331,53 @@
 ## 复审指引
 
 落地 Arc 二选一并提交后回复 `[Fix] Task 002`，本轮只需验证该单项，预计快速 PASS。
+
+---
+
+# 复审 #5（2026-08-21）
+
+- 结论: **REJECT（第六次打回）——提交方向与裁定相反，worker 上下文疑似过期**
+- 审查对象: commit 513d486（Fix task 002: Message/Event 数据结构修复）
+- 验证方式: 四项门禁实跑 + git show 逐行核对
+
+## 门禁结果
+
+| Gate | 结果 |
+|------|------|
+| cargo check | ✓ |
+| cargo clippy -D warnings | ✓ 0 warning |
+| cargo test | ✓ 9 passed / 0 failed |
+| cargo fmt --check | ✓ |
+
+（门禁绿不代表通过——问题在规格符合性，见下。）
+
+## 核心问题
+
+### P0 — commit 513d486 与 PM 裁定（7ed877d）直接冲突
+
+1. **Cargo.toml:12 — 删除了 serde 的 `"rc"` feature**。裁定记录（docs/tasks/002-message-event.md:115）明确：`"rc"` feature **保留**（`Arc<Message>` 序列化需要）。当前删除后 feature 与"无 Arc"自洽所以门禁仍绿，但这是在执行裁定的反方向。
+2. **src/core/event.rs — 五处 Arc 完全未实现**。复审 #4 唯一阻塞项原样保留：`AgentEnd.messages`、`TurnEnd.message`、`MessageStart/Update/End.message` 仍为裸类型。
+3. message.rs:85 注释微调（Deserialize → Serialize/Deserialize）——无实质影响。
+
+### 流程问题 — [Done] 汇报内容过期
+
+本次 `[Done]` 汇报的改动（依赖版本修复、StopReason 兜底、测试语法错误）均为复审 #1–#3 已完成并合入的内容（c2624cf 等），不是本轮工作。worker 上下文疑似停留在第 3 轮之前，未读取：
+- docs/reviews/002-review.md 复审 #4（唯一阻塞项 = Arc）
+- docs/tasks/002-message-event.md:107-120 裁定记录（PM 批准方向①：保留 Arc）
+
+## 给 worker 的明确指令（只需做这一件事）
+
+按裁定记录落地 Arc，其余不要动：
+
+1. `Cargo.toml:12` — 恢复 `"rc"` feature：`serde = { version = "1.0", features = ["derive", "rc"] }`
+2. `src/core/event.rs` — 五处包 `Arc<std::sync::Arc>`：
+   - `AgentEnd { messages: Vec<Arc<Message>> }`
+   - `TurnEnd { message: Arc<AssistantMessage>, ... }`
+   - `MessageStart { message: Arc<Message> }`
+   - `MessageUpdate { message: Arc<Message>, ... }`
+   - `MessageEnd { message: Arc<Message> }`
+   - 注意：`ToolExecution*` 的 `ToolResult` 字段**不加** Arc（规格如此）
+3. `tests/message.rs` — 对应构造处包 `Arc::new(...)`；`assert_eq!` 无需改（`Arc<T>` 的 PartialEq 比较内部值）
+4. 四道门禁全绿 → 一任务一 commit → 回复 `[Fix] Task 002`
+
+范围澄清：「真共享」（canonical Arc 由 runtime 持有）是 003 的接入约束，本任务只做类型层改动。
