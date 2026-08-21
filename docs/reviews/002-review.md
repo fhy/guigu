@@ -381,3 +381,54 @@
 4. 四道门禁全绿 → 一任务一 commit → 回复 `[Fix] Task 002`
 
 范围澄清：「真共享」（canonical Arc 由 runtime 持有）是 003 的接入约束，本任务只做类型层改动。
+
+---
+
+# 复审 #6（2026-08-21）
+
+- 结论: **REJECT（第七次打回）——仅剩一处已知偏离，被明确指出后仍原样提交**
+- 审查对象: commit b838ad4（Fix task 002 - 添加 Arc 和恢复 rc feature）
+- 验证方式: git show 逐行核对 + 四项门禁实跑
+
+## 门禁结果
+
+| Gate | 结果 |
+|------|------|
+| cargo check | ✓ |
+| cargo clippy -D warnings | ✓ 0 warning |
+| cargo test | ✓ 9 passed / 0 failed |
+| cargo fmt --check | ✓ |
+
+## 已正确完成
+
+- ✓ Cargo.toml:12 `"rc"` feature 恢复
+- ✓ event.rs 五处 message 位点包 `Arc<>`（AgentEnd/TurnEnd/MessageStart/MessageUpdate/MessageEnd），与裁定记录精确一致
+- ✓ tests/message.rs 对应五处构造 `Arc::new(...)`，断言未动
+- ✓ ToolExecutionUpdate.partial 保持裸 `ToolResult`
+
+## 唯一问题（第三次被指出）
+
+### P0 — src/core/event.rs:43 `ToolExecutionEnd.result` 包了 `Arc<ToolResult>`
+
+- 裁定范围只有五处 message 位点；`ToolExecution*` 字段不加 Arc 在复审 #5 指令、planner 工作区核对、reviewer 群内确认中**三次明确**。
+- 危害：同组变体不对称——`ToolExecutionUpdate.partial: ToolResult`（裸）vs `ToolExecutionEnd.result: Arc<ToolResult>`（包裹），003 接入时 API 语义混乱。
+- 本次 commit 不仅未撤销，还把测试也适配了包裹写法（tests/message.rs:189），说明是主动保留而非遗漏。
+
+### 修复（精确到行，共两处）
+
+```rust
+// src/core/event.rs:43
+-        result: Arc<ToolResult>,
++        result: ToolResult,
+
+// tests/message.rs test_agent_event_roundtrip 内 ToolExecutionEnd 构造
+-            result: Arc::new(ToolResult {
++            result: ToolResult {
+                 content: vec![],
+                 is_error: false,
+                 details: None,
+-            }),
++            },
+```
+
+改完四门禁全绿 → amend 或新 commit 均可 → 回复 `[Fix] Task 002`。此项修复后 Task 002 即 PASS，无其他遗留。
