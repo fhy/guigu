@@ -1,0 +1,202 @@
+use guigu::core::event::{AgentEvent, ToolResult as EventToolResult};
+use guigu::core::message::{
+    AssistantContent, AssistantMessage, ImageContent, Message, ModelId, StopReason, ThinkingLevel,
+    ToolCall, ToolResultContent, ToolResultMessage, Usage, UserContent, UserMessage,
+};
+use guigu::core::tool::ToolResult;
+use serde_json;
+
+#[test]
+fn test_user_message_roundtrip() {
+    let original = Message::User(UserMessage {
+        content: vec![
+            UserContent::Text {
+                text: "Hello".to_string(),
+            },
+            UserContent::Image(ImageContent {
+                data: "data".to_string(),
+                mime_type: "image/png".to_string(),
+            }),
+        ],
+        timestamp: 1234567890,
+    });
+
+    let serialized = serde_json::to_string(&original).expect("Failed to serialize");
+    let deserialized: Message = serde_json::from_str(&serialized).expect("Failed to deserialize");
+
+    assert_eq!(original, deserialized);
+}
+
+#[test]
+fn test_assistant_message_roundtrip() {
+    let original = Message::Assistant(AssistantMessage {
+        content: vec![
+            AssistantContent::Text {
+                text: "Hello".to_string(),
+            },
+            AssistantContent::Thinking {
+                text: "Thinking...".to_string(),
+            },
+            AssistantContent::ToolCall(ToolCall {
+                id: "call1".to_string(),
+                name: "tool1".to_string(),
+                arguments: r#"{"arg": "value"}"#.to_string(),
+            }),
+        ],
+        model: Some(ModelId("gpt-4".to_string())),
+        usage: Some(Usage {
+            input: 100,
+            output: 200,
+            cache_read: 0,
+            cache_write: 0,
+            total_tokens: 300,
+            cost: 0.01,
+        }),
+        stop_reason: Some(StopReason::Completed),
+        error_message: None,
+        timestamp: 1234567890,
+    });
+
+    let serialized = serde_json::to_string(&original).expect("Failed to serialize");
+    let deserialized: Message = serde_json::from_str(&serialized).expect("Failed to deserialize");
+
+    assert_eq!(original, deserialized);
+}
+
+#[test]
+fn test_tool_result_message_roundtrip() {
+    let original = Message::ToolResult(ToolResultMessage {
+        tool_call_id: "call1".to_string(),
+        tool_name: "tool1".to_string(),
+        is_error: false,
+        content: vec![
+            ToolResultContent::Text {
+                text: "Result".to_string(),
+            },
+            ToolResultContent::Image(ImageContent {
+                data: "data".to_string(),
+                mime_type: "image/png".to_string(),
+            }),
+        ],
+        details: Some(serde_json::json!({"key": "value"})),
+        timestamp: 1234567890,
+    });
+
+    let serialized = serde_json::to_string(&original).expect("Failed to serialize");
+    let deserialized: Message = serde_json::from_str(&serialized).expect("Failed to deserialize");
+
+    assert_eq!(original, deserialized);
+}
+
+#[test]
+fn test_stop_reason_roundtrip() {
+    let original = StopReason::Other {
+        reason: "custom_reason".to_string(),
+    };
+
+    let serialized = serde_json::to_string(&original).expect("Failed to serialize");
+    let deserialized: StopReason =
+        serde_json::from_str(&serialized).expect("Failed to deserialize");
+
+    assert_eq!(original, deserialized);
+}
+
+#[test]
+fn test_agent_event_roundtrip() {
+    // 测试所有 AgentEvent 变体
+    let test_cases = vec![
+        AgentEvent::AgentStart,
+        AgentEvent::AgentEnd { messages: vec![] },
+        AgentEvent::TurnStart,
+        AgentEvent::TurnEnd {
+            message: AssistantMessage {
+                content: vec![],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                error_message: None,
+                timestamp: 0,
+            },
+            tool_results: vec![],
+        },
+        AgentEvent::MessageStart {
+            message: Message::User(UserMessage {
+                content: vec![],
+                timestamp: 0,
+            }),
+        },
+        // 移除 MessageUpdate 测试，因为 AssistantEvent 未在测试中使用
+        AgentEvent::MessageEnd {
+            message: Message::User(UserMessage {
+                content: vec![],
+                timestamp: 0,
+            }),
+        },
+        AgentEvent::ToolExecutionStart {
+            tool_call_id: "call1".to_string(),
+            tool_name: "tool1".to_string(),
+            args: serde_json::Value::Null,
+        },
+        AgentEvent::ToolExecutionUpdate {
+            tool_call_id: "call1".to_string(),
+            tool_name: "tool1".to_string(),
+            args: serde_json::Value::Null,
+            partial: EventToolResult {
+                content: vec![],
+                is_error: false,
+                details: None,
+            },
+        },
+        AgentEvent::ToolExecutionEnd {
+            tool_call_id: "call1".to_string(),
+            tool_name: "tool1".to_string(),
+            result: EventToolResult {
+                content: vec![],
+                is_error: false,
+                details: None,
+            },
+            is_error: false,
+        },
+    ];
+
+    for (i, original) in test_cases.iter().enumerate() {
+        let serialized = serde_json::to_string(original).expect("Failed to serialize");
+        let deserialized: AgentEvent =
+            serde_json::from_str(&serialized).expect("Failed to deserialize");
+        assert_eq!(original, &deserialized, "Failed for test case {}", i);
+    }
+}
+
+#[test]
+fn test_thinking_level_roundtrip() {
+    let original = ThinkingLevel::Medium;
+
+    let serialized = serde_json::to_string(&original).expect("Failed to serialize");
+    let deserialized: ThinkingLevel =
+        serde_json::from_str(&serialized).expect("Failed to deserialize");
+
+    assert_eq!(original, deserialized);
+}
+
+#[test]
+fn test_tool_result_roundtrip() {
+    let original = ToolResult {
+        content: vec![
+            ToolResultContent::Text {
+                text: "Result".to_string(),
+            },
+            ToolResultContent::Image(ImageContent {
+                data: "data".to_string(),
+                mime_type: "image/png".to_string(),
+            }),
+        ],
+        is_error: false,
+        details: Some(serde_json::json!({"key": "value"})),
+    };
+
+    let serialized = serde_json::to_string(&original).expect("Failed to serialize");
+    let deserialized: ToolResult =
+        serde_json::from_str(&serialized).expect("Failed to deserialize");
+
+    assert_eq!(original, deserialized);
+}
