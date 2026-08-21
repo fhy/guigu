@@ -1,9 +1,9 @@
+use guigu::core::ToolResult;
 use guigu::core::event::{AgentEvent, ToolResult as EventToolResult};
 use guigu::core::message::{
     AssistantContent, AssistantMessage, ImageContent, Message, ModelId, StopReason, ThinkingLevel,
     ToolCall, ToolResultContent, ToolResultMessage, Usage, UserContent, UserMessage,
 };
-use guigu::core::tool::ToolResult;
 use serde_json;
 
 #[test]
@@ -90,15 +90,24 @@ fn test_tool_result_message_roundtrip() {
 
 #[test]
 fn test_stop_reason_roundtrip() {
-    let original = StopReason::Other {
-        reason: "custom_reason".to_string(),
-    };
+    let original = StopReason::Other("custom_reason".to_string());
 
     let serialized = serde_json::to_string(&original).expect("Failed to serialize");
     let deserialized: StopReason =
         serde_json::from_str(&serialized).expect("Failed to deserialize");
 
     assert_eq!(original, deserialized);
+}
+
+#[test]
+fn test_stop_reason_unknown_variant() {
+    // 测试未知的 stop reason 应该被兜底到 Other
+    let json = r#"{"type":"some_future_reason"}"#;
+    let deserialized: StopReason = serde_json::from_str(json).expect("Failed to deserialize");
+    assert_eq!(
+        deserialized,
+        StopReason::Other("some_future_reason".to_string())
+    );
 }
 
 #[test]
@@ -125,7 +134,13 @@ fn test_agent_event_roundtrip() {
                 timestamp: 0,
             }),
         },
-        // 移除 MessageUpdate 测试，因为 AssistantEvent 未在测试中使用
+        AgentEvent::MessageUpdate {
+            message: Message::User(UserMessage {
+                content: vec![],
+                timestamp: 0,
+            }),
+            assistant_event: guigu::core::event::AssistantEvent,
+        },
         AgentEvent::MessageEnd {
             message: Message::User(UserMessage {
                 content: vec![],

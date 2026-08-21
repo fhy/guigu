@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::core::message::{AssistantMessage, Message, ToolResultContent, ToolResultMessage};
+use crate::core::message::{AssistantMessage, Message, ToolResultMessage};
+use crate::core::tool::ToolResult;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -46,10 +47,3 @@ pub enum AgentEvent {
 // 占位类型，实际实现由 provider.rs 决定
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssistantEvent;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ToolResult {
-    pub content: Vec<ToolResultContent>,
-    pub is_error: bool,
-    pub details: Option<serde_json::Value>,
-}

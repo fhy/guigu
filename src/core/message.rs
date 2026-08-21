@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -82,15 +82,71 @@ pub struct Usage {
     pub cost: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+// 自定义 Deserialize 实现 StopReason 的未知值兜底功能
+#[derive(Debug, Clone, PartialEq)]
 pub enum StopReason {
     Completed,
     Length,
     Error,
     Aborted,
     Pending,
-    Other { reason: String },
+    Other(String),
+}
+
+impl Serialize for StopReason {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            StopReason::Completed => serializer.serialize_str("completed"),
+            StopReason::Length => serializer.serialize_str("length"),
+            StopReason::Error => serializer.serialize_str("error"),
+            StopReason::Aborted => serializer.serialize_str("aborted"),
+            StopReason::Pending => serializer.serialize_str("pending"),
+            StopReason::Other(reason) => {
+                #[derive(Serialize)]
+                struct Helper<'a> {
+                    #[serde(rename = "type")]
+                    type_: &'a str,
+                    reason: &'a str,
+                }
+                Helper {
+                    type_: "other",
+                    reason,
+                }
+                .serialize(serializer)
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StopReason {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum Helper {
+            Completed,
+            Length,
+            Error,
+            Aborted,
+            Pending,
+            Other { reason: String },
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+        match helper {
+            Helper::Completed => Ok(StopReason::Completed),
+            Helper::Length => Ok(StopReason::Length),
+            Helper::Error => Ok(StopReason::Error),
+            Helper::Aborted => Ok(StopReason::Aborted),
+            Helper::Pending => Ok(StopReason::Pending),
+            Helper::Other { reason } => Ok(StopReason::Other(reason)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
