@@ -186,11 +186,11 @@ fn test_agent_event_roundtrip() {
         AgentEvent::ToolExecutionEnd {
             tool_call_id: "call1".to_string(),
             tool_name: "tool1".to_string(),
-            result: Arc::new(ToolResult {
+            result: ToolResult {
                 content: vec![],
                 is_error: false,
                 details: None,
-            }),
+            },
             is_error: false,
         },
     ];

@@ -40,7 +40,7 @@ pub enum AgentEvent {
     ToolExecutionEnd {
         tool_call_id: String,
         tool_name: String,
-        result: Arc<ToolResult>,
+        result: ToolResult,
         is_error: bool,
     },
 }
