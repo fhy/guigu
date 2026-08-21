@@ -65,3 +65,72 @@
 ## 复审指引
 
 修复后请确保：四项门禁全绿 + 问题 8/9/10/11 的测试真实覆盖 + 回复中记录对规格的偏差（如有）。
+
+---
+
+# 复审 #1（2026-08-21）
+
+- 结论: **REJECT（再次打回）**
+- 审查对象: 工作区未提交改动（Cargo.toml、src/lib.rs、src/core/、src/main.rs、tests/message.rs）
+
+## 门禁结果
+
+| Gate | 结果 |
+|------|------|
+| cargo check | ✓ |
+| cargo clippy -D warnings | ✗ 17 个错误 |
+| cargo test | ✓ 7 passed / 0 failed |
+| cargo fmt --check | ✓ |
+
+## 上次问题修复情况
+
+| 上次问题 | 状态 |
+|----------|------|
+| P0-1/2 依赖版本 | ✓ 已修（async-trait 0.1、tokio-test 0.4） |
+| P0-3 edition 2024 | ✓ 已恢复 |
+| P0-4 event.rs 引用路径 | ✓ 已修（crate::core::message::...） |
+| P0-5 unused HashMap | ✓ 已删 |
+| P0-6 缺 lib.rs | ✓ 已加 src/lib.rs，测试走 guigu::core |
+| P0-7 serde rc feature | ⚠ feature 已加但代码未用 Arc（见新问题 5） |
+| P0-8 serde tag 冲突 | ✓ 已按建议改 struct variant |
+| **P0-9 StopReason 兜底** | ✗ **仍未实现** |
+| **P1-10 AgentEvent 全变体** | ✗ **仍只测 AgentStart** |
+| P1-11 StopReason 用例 | ✗ 仅 Other roundtrip，无兜底用例 |
+| P1-12 内容段全枚举 | ✓ 真实通过 |
+| P2-13 文档注释 | ✗ 仍全部缺失 |
+| P2-14 main.rs 换行 | ✓ 已修 |
+| P2-16 未提交 | ✗ 改动仍在工作区 |
+
+## 新问题清单
+
+### P0 — 门禁硬伤
+
+1. **src/main.rs:1 — `mod core;` 触发 binary crate dead_code ×16**。main.rs 声明模块但从未使用，clippy -D warnings 下所有 core 类型报 "never used" → 删除 main.rs 的 `mod core;`（lib.rs 已导出，binary 需要时经 `guigu::core` 引用）。
+2. **tests/message.rs:7 — `use serde_json;` 冗余 import**，clippy 报 redundant → 删除。
+
+### P0 — AC 明确要求未满足（上次遗留）
+
+3. **StopReason 未知值兜底未实现**（AC 第 5 条 + 上次问题 9）。实测 `{"type":"some_brand_new_reason"}` 反序列化报 `unknown variant` 错误而非落入 `Other` → 需自定义 Deserialize 或 untagged fallback，并补兜底测试用例。
+4. **AgentEvent 全变体 roundtrip 未覆盖**（AC 第 5 条 + 上次问题 10）。9 个变体仍只测 AgentStart（tests/message.rs:104）→ 补齐其余 8 个变体的构造 + roundtrip 断言。
+
+### P1 — 规格偏差未裁定
+
+5. **AgentEvent 未使用 Arc**。规格 Design Notes 明确 `Vec<Arc<Message>>`、`Arc<AssistantMessage>`、`Arc<Message>`；实现为裸类型，serde `rc` feature 加了没用。事件流场景 Arc 可避免大消息 clone → 按规格补 Arc，或在回复中记录偏差请 PM/Architect 裁定。
+
+### P2 — 建议性改进（不阻塞）
+
+6. **ToolResult 双重定义**：src/core/tool.rs:6 与 src/core/event.rs:51 各有一份完全相同的 ToolResult，event.rs 内部用自己的、测试用 tool.rs 的 → 删一份统一引用。
+7. 公开 API 全部缺 `///` 文档注释（conventions 要求）。
+8. 依赖超范围：tokio/tokio-util/tracing/futures/async-trait 本任务均未使用，违反 "Minimal dependencies"，建议用到再加（thiserror 同理）。
+9. ThinkingLevel 缺 serde tag 策略，当前序列化为 `"Medium"` 字符串形式，建议补 `rename_all = "snake_case"` 保持一致。
+10. 测试中 `unwrap()` 严格按 AC 措辞应换 `expect`/assert（生产代码无 unwrap ✓）。
+
+## 已验证的事实
+
+- clippy 完整错误：16 × dead_code（binary crate）+ 1 × redundant import。
+- StopReason 兜底探针测试失败：`unknown variant \`some_brand_new_reason\`, expected one of ...`。
+- 合理偏差（已认可）：内容段 `Text(String)` → `Text { text }` struct variant（上次 review 裁定）；AssistantEvent 占位放 event.rs（规格允许，有注释）；ToolResult 放独立 tool.rs（规格允许，但见问题 6 重复定义）。
+
+## 复审指引
+
+四项门禁全绿 + 问题 3/4 测试真实覆盖 + 问题 5 有裁定结论 + 改动提交推送后，回复 `[Fix] Task 002` 申请复审。
