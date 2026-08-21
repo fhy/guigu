@@ -134,3 +134,69 @@
 ## 复审指引
 
 四项门禁全绿 + 问题 3/4 测试真实覆盖 + 问题 5 有裁定结论 + 改动提交推送后，回复 `[Fix] Task 002` 申请复审。
+
+---
+
+# 复审 #2（2026-08-21）
+
+- 结论: **REJECT（第三次打回）**
+- 审查对象: commit a4ea3ec（Fix task 002）
+- 验证方式: 四项门禁实跑 + /tmp 探针项目实测 StopReason 兜底行为（未动仓库代码）
+
+## 门禁结果
+
+| Gate | 结果 |
+|------|------|
+| cargo check | ✓ |
+| cargo clippy -D warnings | ✓ 0 warning |
+| cargo test | ✓ 7 passed / 0 failed |
+| cargo fmt --check | ✓ |
+
+## 上次问题修复情况
+
+| 上次问题 | 状态 |
+|----------|------|
+| P0-1 main.rs dead_code ×16 | ✓ 已修（main.rs 不再声明 mod core） |
+| P0-2 冗余 use serde_json | ✓ clippy 已过（保留为风格 nit） |
+| **P0-3 StopReason 兜底** | ✗ **第三轮仍未实现** |
+| **P0-4 AgentEvent 全变体** | ⚠ 8/9，MessageUpdate 被显式移除并留注释自认 |
+| P1-5 Arc 偏差未裁定 | ✗ 未裁定，serde rc feature 仍空挂 |
+| P2-6 ToolResult 双重定义 | ✗ 未统一（两份均出自本次 fix commit） |
+| P2-7 文档注释 | ✗ 仍全部缺失 |
+| P2-8 依赖超范围 | ✗ 未收敛 |
+| P2-9 ThinkingLevel serde 策略 | ✗ 未改 |
+| 流程：提交推送 | ✓ a4ea3ec 已提交 |
+
+## 本轮问题清单
+
+### P0 — AC 明确要求未满足（连续三轮遗留）
+
+1. **src/core/message.rs:85-94 — StopReason 未知值兜底未实现**（AC 第 5 条）。本轮探针实测：
+   `{"type":"some_future_reason"}` → `Err: unknown variant \`some_future_reason\`, expected one of ...`
+   规格要求"任意未知字符串走 Other"，当前直接反序列化失败。且无兜底测试用例（现有 `test_stop_reason_roundtrip` 只测已知变体 `Other`）。
+   → 自定义 Deserialize：先按 tagged 尝试，失败映射 `Other { reason }`；补两条测试（未知字符串 → Other、Other roundtrip 保持）。
+2. **tests/message.rs:128 — AgentEvent 全变体未覆盖**（AC 第 5 条）。MessageUpdate 变体无任何构造与断言，注释"移除 MessageUpdate 测试，因为 AssistantEvent 未在测试中使用"不成立——AssistantEvent 是单元结构体，`AssistantEvent` 字面量即可构造。→ 补 MessageUpdate 用例。
+
+### P1 — 结构缺陷 / 待裁定
+
+3. **src/core/event.rs:50 与 src/core/tool.rs:6 — ToolResult 双重定义**。两个完全相同的 pub 类型同名并存于兄弟模块，event 内部用自己那份、测试 import tool 那份。规格要求单一位置复用；003/004 接入时必然引用混乱。→ 删一份（建议留 tool.rs 并在 event.rs re-export），event.rs 改用统一定义。
+4. **AgentEvent 未使用 Arc**（上轮 P1-5 遗留）。规格明确 `Vec<Arc<Message>>` / `Arc<AssistantMessage>` / `Arc<Message>`；实现全为裸类型，Cargo.toml 的 serde `rc` feature 加了没用。事件广播场景丢 Arc 意味深拷贝。→ 按 spec 补回，或由 PM/Architect 裁定放弃并在规格记录。
+
+### P2 — 建议性改进（不阻塞）
+
+5. 全部 pub 类型缺 `///` 文档注释（conventions 要求，连续三轮遗留）。
+6. 依赖超范围：tokio/tokio-util/tracing/futures/async-trait/thiserror 本任务零使用，违反 Minimal dependencies。
+7. ThinkingLevel 无 serde tag 策略，序列化为 `"Medium"`，与其余类型 snake_case 风格不一致。
+8. tests/message.rs:7 `use serde_json;` 冗余（clippy 已不报，纯风格）。
+9. StopReason 具名变体（Completed 等）与 ThinkingLevel 其余变体无独立用例（roundtrip 循环可低成本覆盖）。
+
+## 体量与规范核查
+
+- 文件行数：message.rs 105 / event.rs 55 / tool.rs 10 / tests 202 ✓（≤400）
+- 函数长度、test 数量（7 ≤ 30）✓
+- src/ 无 unwrap() ✓；测试用 expect + assert_eq ✓
+- 合理偏差维持认可：内容段 struct variant、AssistantEvent 占位放 event.rs（有注释）
+
+## 复审指引
+
+修复问题 1/2（AC 硬性项）+ 问题 3/4 有结论后回复 `[Fix] Task 002` 申请复审。问题 1 已连续三轮未修，请 worker 优先处理。
