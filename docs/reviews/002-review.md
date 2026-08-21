@@ -432,3 +432,45 @@
 ```
 
 改完四门禁全绿 → amend 或新 commit 均可 → 回复 `[Fix] Task 002`。此项修复后 Task 002 即 PASS，无其他遗留。
+
+---
+
+# 复审 #7（2026-08-21）
+
+- 结论: **PASS ✅**
+- 审查对象: commit 74455be（Fix task 002 - 修正 ToolExecutionEnd 中多余的 Arc）
+- 验证方式: 独立核验（git show + 源码逐行比对规格与裁定记录 + 四项门禁实跑），不依赖转述
+
+## 门禁结果
+
+| Gate | 结果 |
+|------|------|
+| cargo check | ✓ |
+| cargo clippy -D warnings | ✓ 0 warning |
+| cargo test | ✓ 9 passed / 0 failed |
+| cargo fmt --check | ✓ |
+
+## 最终合规核对
+
+- ✓ event.rs:43 `result: ToolResult`——Arc 偏差已撤销，测试构造同步还原（tests/message.rs:189）
+- ✓ 五处 Arc 精确匹配裁定记录：`AgentEnd.messages` / `TurnEnd.message` / `MessageStart.message` / `MessageUpdate.message` / `MessageEnd.message`（event.rs:12,16,20,23,27）
+- ✓ `ToolExecutionUpdate.partial` 与 `ToolExecutionEnd.result` 均为裸 `ToolResult`，组内对称
+- ✓ Cargo.toml serde `"rc"` feature 恢复，与 Arc 使用自洽
+- ✓ 工作区干净，一任务一 commit 链清晰（513d486 → b838ad4 → 74455be）
+
+## Task 002 整体验收（AC 六条全过）
+
+1. cargo check ✓　2. clippy -D warnings ✓　3. cargo test ✓　4. fmt --check ✓
+5. 测试覆盖：三种消息 roundtrip、内容段全枚举、StopReason 未知值兜底、AgentEvent 全 10 变体 roundtrip ✓
+6. 无 unwrap() ✓
+
+已认可的规格偏差（均有记录）：内容段 struct variant（serde internally-tagged 技术约束）、StopReason 纯字符串表示（与 Pi 一致）、AssistantEvent 占位于 event.rs、ToolResult 定于 tool.rs。
+
+## 遗留 P2（不阻塞，移交后续任务）
+
+- pub 类型 `///` 文档注释缺失（建议随首个消费者任务 003 一并补齐）
+- 依赖收敛（tokio/tokio-util/tracing/futures/async-trait/thiserror 当前零使用）
+- ThinkingLevel serde 策略（当前 PascalCase 字符串，与其余 snake_case 不一致）
+- tests/message.rs:8 `use serde_json;` 冗余
+
+**Task 002 关闭。**
