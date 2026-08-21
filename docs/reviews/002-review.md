@@ -274,3 +274,60 @@
 1. 修问题 1（一行 re-export）+ 问题 2（换纯字符串方案）后四项门禁必须全绿——注意当前 cargo test 编译失败掩盖了至少 2 个必挂测试，修复后以真实运行为准；
 2. 问题 3 请 PM 给出裁定结论；
 3. 完成后回复 `[Fix] Task 002` 申请复审。
+
+---
+
+# 复审 #4（2026-08-21）
+
+- 结论: **REJECT（第五次打回，仅剩 1 项阻塞）**
+- 审查对象: commit c2624cf（Fix task 002: Message/Event 数据结构修复）
+- 验证方式: 四项门禁实跑 + 通读全部源码与测试
+
+## 门禁结果
+
+| Gate | 结果 |
+|------|------|
+| cargo check | ✓ |
+| cargo clippy -D warnings | ✓ 0 warning |
+| cargo test | ✓ 9 passed / 0 failed |
+| cargo fmt --check | ✓ |
+
+## 上次问题修复情况
+
+| 上次问题 | 状态 |
+|----------|------|
+| P0-1 event.rs 私有导入 E0603 | ✓ 已修（测试改走 `guigu::core::ToolResult`，mod.rs re-export） |
+| P0-2 StopReason 回归 | ✓ 已按建议改纯字符串方案，roundtrip 与兜底均真实通过 |
+| P1-3 Arc 裁定 | ✗ **连续第四轮未落地**（见唯一阻塞项） |
+| P2 文档注释 / 依赖收敛 / ThinkingLevel serde / use serde_json | ✗ 均未动（维持非阻塞） |
+
+## 本轮验证通过项
+
+- **StopReason 纯字符串方案正确**：Serialize/Deserialize 对称（`"completed"` 等 5 个具名值 ↔ 变体，其余任意字符串 → `Other(s)`）。实测覆盖：未知字符串兜底（tests/message.rs:103）、5 具名变体（:115）、Other roundtrip（:92）、内嵌于 AssistantMessage 的 roundtrip（:55）。
+- **AgentEvent 全变体 roundtrip**：10 个变体全部构造并断言（tests/message.rs:134-203），含 MessageUpdate。
+- **内容段全枚举**：UserContent(Text/Image)、AssistantContent(Text/Thinking/ToolCall)、ToolResultContent(Text/Image) 均在消息级 roundtrip 中真实覆盖。
+- **规格符合性**：Message 三变体、各 struct 字段、ModelId/Usage/StopReason/ThinkingLevel 与规格一致；serde tag 策略 ✓；ToolResult 单一定义于 tool.rs ✓；AssistantEvent 占位在 event.rs 且有注释记录 ✓；无 unwrap() ✓；体量全部达标（message.rs 144 行 / event.rs 49 行 / tests 237 行 9 测试）。
+
+## 唯一阻塞项
+
+### P1 — AgentEvent 未使用 Arc，且无裁定记录（连续四轮遗留）
+
+- src/core/event.rs:11,15,19,22,26 — 规格明确 `Vec<Arc<Message>>`、`Arc<AssistantMessage>`、`Arc<Message>`；实现全为裸类型。Cargo.toml:12 serde `rc` feature 因此空挂成死配置。
+- 影响：事件广播场景每次 clone 深拷贝整条消息（含 Vec<String>），高频 MessageUpdate 下是真实性能差异；更重要的是规格与代码不一致会误导 003/004 的实现者。
+- 上轮已明确"此项不宜再拖"，本次 fix commit 未携带任何裁定结论。
+
+**二选一，任一路径均可通过复审**：
+1. **按规格补 Arc**：event.rs 五处包 `Arc<>`，测试构造处加 `Arc::new(...)`，约 10 行改动；
+2. **修订规格放弃 Arc**：由 PM 授权 Architect 更新 docs/tasks/002-message-event.md 并注明决策理由，同时删除 Cargo.toml 的 `"rc"` feature。
+
+## 非阻塞建议（P2，不阻塞 PASS，但请勿再拖到任务收尾）
+
+1. 全部 pub 类型缺 `///` 文档注释（conventions 要求，连续五轮遗留）。
+2. 依赖超范围：tokio/tokio-util/tracing/futures/async-trait/thiserror 本任务零使用。
+3. ThinkingLevel 无 serde 策略，序列化为 `"Medium"`/`"Xhigh"`（PascalCase），与其余类型 snake_case 不一致。
+4. tests/message.rs:7 `use serde_json;` 冗余。
+5. message.rs:123 `StopReason::from_string` 为 pub 但无文档注释，且当前仅内部使用，可考虑降为私有。
+
+## 复审指引
+
+落地 Arc 二选一并提交后回复 `[Fix] Task 002`，本轮只需验证该单项，预计快速 PASS。
