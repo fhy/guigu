@@ -82,7 +82,7 @@ pub struct Usage {
     pub cost: f64,
 }
 
-// 自定义 Deserialize 实现 StopReason 的未知值兜底功能
+// 自定义 Serialize/Deserialize 实现 StopReason 的未知值兜底功能
 #[derive(Debug, Clone, PartialEq)]
 pub enum StopReason {
     Completed,
