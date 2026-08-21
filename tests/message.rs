@@ -5,6 +5,7 @@ use guigu::core::message::{
     ToolCall, ToolResultContent, ToolResultMessage, Usage, UserContent, UserMessage,
 };
 use serde_json;
+use std::sync::Arc;
 
 #[test]
 fn test_user_message_roundtrip() {
@@ -138,34 +139,34 @@ fn test_agent_event_roundtrip() {
         AgentEvent::AgentEnd { messages: vec![] },
         AgentEvent::TurnStart,
         AgentEvent::TurnEnd {
-            message: AssistantMessage {
+            message: Arc::new(AssistantMessage {
                 content: vec![],
                 model: None,
                 usage: None,
                 stop_reason: None,
                 error_message: None,
                 timestamp: 0,
-            },
+            }),
             tool_results: vec![],
         },
         AgentEvent::MessageStart {
-            message: Message::User(UserMessage {
+            message: Arc::new(Message::User(UserMessage {
                 content: vec![],
                 timestamp: 0,
-            }),
+            })),
         },
         AgentEvent::MessageUpdate {
-            message: Message::User(UserMessage {
+            message: Arc::new(Message::User(UserMessage {
                 content: vec![],
                 timestamp: 0,
-            }),
+            })),
             assistant_event: guigu::core::event::AssistantEvent,
         },
         AgentEvent::MessageEnd {
-            message: Message::User(UserMessage {
+            message: Arc::new(Message::User(UserMessage {
                 content: vec![],
                 timestamp: 0,
-            }),
+            })),
         },
         AgentEvent::ToolExecutionStart {
             tool_call_id: "call1".to_string(),
@@ -185,11 +186,11 @@ fn test_agent_event_roundtrip() {
         AgentEvent::ToolExecutionEnd {
             tool_call_id: "call1".to_string(),
             tool_name: "tool1".to_string(),
-            result: ToolResult {
+            result: Arc::new(ToolResult {
                 content: vec![],
                 is_error: false,
                 details: None,
-            },
+            }),
             is_error: false,
         },
     ];

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::core::message::{AssistantMessage, Message, ToolResultMessage};
 use crate::core::tool::ToolResult;
@@ -8,22 +9,22 @@ use crate::core::tool::ToolResult;
 pub enum AgentEvent {
     AgentStart,
     AgentEnd {
-        messages: Vec<Message>,
+        messages: Vec<Arc<Message>>,
     },
     TurnStart,
     TurnEnd {
-        message: AssistantMessage,
+        message: Arc<AssistantMessage>,
         tool_results: Vec<ToolResultMessage>,
     },
     MessageStart {
-        message: Message,
+        message: Arc<Message>,
     },
     MessageUpdate {
-        message: Message,
+        message: Arc<Message>,
         assistant_event: AssistantEvent,
     },
     MessageEnd {
-        message: Message,
+        message: Arc<Message>,
     },
     ToolExecutionStart {
         tool_call_id: String,
@@ -39,7 +40,7 @@ pub enum AgentEvent {
     ToolExecutionEnd {
         tool_call_id: String,
         tool_name: String,
-        result: ToolResult,
+        result: Arc<ToolResult>,
         is_error: bool,
     },
 }
