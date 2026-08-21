@@ -156,6 +156,7 @@ AgentSnapshot / AgentEvent       （订阅方）
 
 - `watch`：UI 随时拿最新状态，**权威**。
 - `broadcast`：只传增量事件（瞬态渲染）。订阅者 lag 时**重读 snapshot**，不把 broadcast 当审计或持久化通道。
+- 事件里的 `Message` 用 `Arc` **真共享**（runtime 持 canonical Arc，事件/快照引用同一份）：`MessageUpdate` 的 `message` 是累积消息的共享视图，`assistant_event` 才是增量 delta，事件流仍以 delta 为主，不违背"只传增量"。
 - 主循环与工具执行期间**不持锁跨 await**。
 - `AgentSnapshot` 对外不可变；agent 内部持有完整 transcript。
 

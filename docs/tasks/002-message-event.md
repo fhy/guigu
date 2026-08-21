@@ -104,6 +104,21 @@ pub enum AgentEvent {
 - `ToolResult`（工具产出，供事件与 Tool trait 复用，放 `event.rs` 或独立 `tool_result.rs`，由实现者定，避免循环依赖）
 - `AssistantEvent` 属 provider 流事件，**本任务不实现**（003 的 provider.rs），event.rs 只在 `MessageUpdate` 中引用其类型——若产生循环依赖，则将 `AssistantEvent` 的占位类型放 event.rs 或 provider.rs 由实现者裁定并记录。
 
+### 裁定记录：AgentEvent 是否使用 Arc（2026-08-21，PM 批准方向①）
+
+**决策：保留 `Arc`**（review 二选一中的路径 1——地基层现在改最便宜，事件广播场景真实需要）。
+
+理由：
+- `MessageUpdate` 携带**当前累积的整条消息**（`message` 字段）而非纯增量；若用裸类型，流式 N 个 delta 时每次深拷贝累积内容 → O(N²) 拷贝，是最热路径的真实性能债。
+- 与 Task 001 的 `AgentSnapshot { messages: Vec<Arc<Message>> }` 一致，事件与快照共享同一批消息。
+- 单 writer 模型下 Arc 不引入可变共享，仅用于多事件/多订阅方/快照间的零拷贝引用，无正确性风险。
+- `Cargo.toml` 的 serde `"rc"` feature **保留**（`Arc<Message>` 序列化需要，非死配置）。
+
+**关键语义（实现必须遵守）**：
+- **真共享**：唯一 runtime task 持有 transcript 中 canonical 的 `Arc<Message>`，`watch` 快照与 `broadcast` 事件引用**同一份** Arc；不得每次发射时新建。
+- `MessageUpdate` 的 `message` 是累积消息的共享视图，`assistant_event` 才是增量 delta；事件流仍以 delta 为主，"broadcast 只传增量"不矛盾。
+- 实现范围：event.rs 五处包 `Arc<>`（`AgentEnd` / `TurnEnd` / `MessageStart` / `MessageUpdate` / `MessageEnd`），测试构造处加 `Arc::new(...)`。
+
 ### 序列化约束
 
 - 所有类型 `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]`
