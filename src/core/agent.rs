@@ -1,6 +1,5 @@
 use crate::core::event::AgentEvent;
 use crate::core::message::Message;
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, watch, Notify};
@@ -32,12 +31,12 @@ pub enum AgentCommand {
 pub struct AgentHandle {
     tx: mpsc::Sender<AgentCommand>,
     snapshot: watch::Receiver<AgentSnapshot>,
-    events: broadcast::Receiver<AgentEvent>,
+    events: broadcast::Sender<AgentEvent>,
     idle: Arc<Notify>,
 }
 
 impl AgentHandle {
-    pub fn spawn(config: AgentConfig) -> Self {
+    pub fn spawn(_config: AgentConfig) -> Self {
         // 这里是简化版本，实际实现将在后续任务中完善
         todo!("Implementation will be done in task 003")
     }
@@ -47,7 +46,7 @@ impl AgentHandle {
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
-        self.events.clone()
+        self.events.subscribe()
     }
 
     pub async fn wait_for_idle(&self) -> Result<(), AgentError> {
@@ -61,16 +60,16 @@ impl AgentHandle {
     }
 }
 
-#[async_trait]
-pub trait Agent: Send + Sync {
+// 简化版的 Agent trait
+pub trait Agent {
     fn snapshot(&self) -> AgentSnapshot;
     fn subscribe(&self) -> broadcast::Receiver<AgentEvent>;
-    async fn prompt(&self, messages: Vec<Message>) -> Result<(), AgentError>;
-    async fn continue_(&self) -> Result<(), AgentError>;
-    async fn steer(&self, msg: Message) -> Result<(), AgentError>;
-    async fn follow_up(&self, msg: Message) -> Result<(), AgentError>;
+    fn prompt(&self, messages: Vec<Message>) -> Result<(), AgentError>;
+    fn continue_(&self) -> Result<(), AgentError>;
+    fn steer(&self, msg: Message) -> Result<(), AgentError>;
+    fn follow_up(&self, msg: Message) -> Result<(), AgentError>;
     fn abort(&self);
-    async fn wait_for_idle(&self) -> Result<(), AgentError>;
+    fn wait_for_idle(&self) -> Result<(), AgentError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -129,45 +128,6 @@ impl From<serde_json::Error> for AgentError {
     }
 }
 
-// 为 AgentHandle 实现 Agent trait
-impl Agent for AgentHandle {
-    fn snapshot(&self) -> AgentSnapshot {
-        self.snapshot()
-    }
-
-    fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
-        self.subscribe()
-    }
-
-    async fn prompt(&self, messages: Vec<Message>) -> Result<(), AgentError> {
-        // 发送 Prompt 命令
-        Ok(())
-    }
-
-    async fn continue_(&self) -> Result<(), AgentError> {
-        // 发送 Continue 命令
-        Ok(())
-    }
-
-    async fn steer(&self, msg: Message) -> Result<(), AgentError> {
-        // 发送 Steer 命令
-        Ok(())
-    }
-
-    async fn follow_up(&self, msg: Message) -> Result<(), AgentError> {
-        // 发送 FollowUp 命令
-        Ok(())
-    }
-
-    fn abort(&self) {
-        // 发送 Abort 命令
-    }
-
-    async fn wait_for_idle(&self) -> Result<(), AgentError> {
-        self.wait_for_idle().await
-    }
-}
-
 // InMemoryAgent 实现（最小内存实现）
 pub struct InMemoryAgent {
     snapshot: watch::Sender<AgentSnapshot>,
@@ -209,7 +169,7 @@ impl InMemoryAgent {
         self.events.subscribe()
     }
 
-    pub async fn prompt(&mut self, messages: Vec<Message>) -> Result<(), AgentError> {
+    pub fn prompt(&mut self, messages: Vec<Message>) -> Result<(), AgentError> {
         // 检查是否正在运行
         if self.is_running {
             return Err(AgentError {
@@ -287,17 +247,17 @@ impl InMemoryAgent {
         Ok(())
     }
 
-    pub async fn continue_(&self) -> Result<(), AgentError> {
+    pub fn continue_(&self) -> Result<(), AgentError> {
         // 简化实现，实际应处理继续逻辑
         Ok(())
     }
 
-    pub async fn steer(&self, msg: Message) -> Result<(), AgentError> {
+    pub fn steer(&self, _msg: Message) -> Result<(), AgentError> {
         // 简化实现，实际应处理转向逻辑
         Ok(())
     }
 
-    pub async fn follow_up(&self, msg: Message) -> Result<(), AgentError> {
+    pub fn follow_up(&self, _msg: Message) -> Result<(), AgentError> {
         // 简化实现，实际应处理后续逻辑
         Ok(())
     }
@@ -306,7 +266,7 @@ impl InMemoryAgent {
         // 简化实现，实际应处理中止逻辑
     }
 
-    pub async fn wait_for_idle(&self) -> Result<(), AgentError> {
+    pub fn wait_for_idle(&self) -> Result<(), AgentError> {
         // 等待所有事件处理完成
         Ok(())
     }
