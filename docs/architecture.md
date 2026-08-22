@@ -43,6 +43,7 @@ telemetry(遥测) → agent-core(运行时+session树) → coding-agent(CLI) →
 │   │   ├── mod.rs
 │   │   ├── message.rs         # 消息、内容段、usage、stop reason
 │   │   ├── event.rs           # 生命周期与流式事件
+│   │   ├── agent.rs           # Agent trait、AgentHandle、单 writer actor 外壳
 │   │   ├── tool.rs            # Tool trait、参数校验、执行策略、资源声明
 │   │   ├── provider.rs        # ModelProvider、AssistantStream、请求/响应规范
 │   │   ├── runtime.rs         # 单 writer agent loop、命令队列、取消、重试
