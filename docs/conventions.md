@@ -43,11 +43,62 @@ TASK_BOARD.md is an index only — no details. Each task's full spec lives in `d
 
 ## Communication
 
-**Quick questions**: @mention the relevant agent in the group.
-**Formal tasks**: PM issues in the task's Matrix thread.
+**PM sends instructions**: Use `@botname` prefix in main thread to target a specific agent.
 **Blockers**: Agent must clearly mark `BLOCKED` in its reply. PM coordinates.
 
 No separate feedback file needed. Matrix threads naturally isolate per-task discussions.
+
+## Agent Coordination Rules
+
+### PM is the coordinator, not the only communicator
+
+- PM 用 `@botname` 前缀在主线程发指令，明确指定目标 agent
+- Agent 之间可以**有限度地直接通信**，不需要每次都经过 PM
+- PM 不参与 agent 之间的技术细节讨论
+
+### Direct communication allowed
+
+| From | To | When | Example |
+|------|----|------|---------|
+| Developer | Reviewer | 代码完成后请审查 | `@guigu-reviewer 请审查 Task 001` |
+| Reviewer | Planner | 遇到设计疑问时 | `@guigu-planner 001 的规格有歧义，xxx 应该怎么处理？` |
+| Reviewer | Developer | 打回后简单修复 | `@guigu-worker Task 001 第3点需要修复` |
+| Any agent | PM | BLOCKED 或需要决策时 | `@fhy 需要你决定：xxx vs yyy` |
+
+### Escalate to PM only when
+
+- Agent 之间无法达成一致
+- 需要业务决策（非技术决策）
+- BLOCKED 状态无法自行解决
+- 跨目录修改需要授权
+
+### Strict phase separation
+
+每个任务遵循这个序列，PM 触发第一步：
+
+```
+Step 1: PM → @planner   设计规格
+Step 2: PM → @developer  实现代码
+Step 3: Developer → @reviewer  审查（无需 PM 参与）
+Step 4: Reviewer → @developer  打回修复（简单问题）
+        Reviewer → @planner    设计疑问（无需 PM 参与）
+        Reviewer → @fhy        需要决策时（PM 参与）
+```
+
+**Rules:**
+- PM 确认规格完成后才启动开发
+- 开发完成后 developer 直接请 reviewer 审查
+- 简单修复 reviewer 直接通知 developer
+- 只有需要决策时才找 PM
+- Agent 不得自行跳转到未授权的阶段
+
+### Role drift prevention
+
+| Agent | MUST do | MUST NOT do |
+|-------|---------|-------------|
+| Planner | Design specs, update TASK_BOARD, answer design questions | Read src/, run cargo, review code |
+| Developer | Implement code, run gates, commit, request review | Design specs, review code, write docs |
+| Reviewer | Review code, run gates, commit reviews, ask design questions | Design specs, implement code |
 
 ## Daily Workflow
 
