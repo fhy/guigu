@@ -136,7 +136,8 @@ Step 4: Reviewer → @developer  打回修复（简单问题）
 1. PM provides task ID
 2. Read `docs/tasks/NNN-xxx.md` for the spec
 3. Run DoD gates + code review
-4. Reply format:
+4. Write review report to `docs/reviews/NNN-review-rN.md` (N = round number, starting from 1)
+5. Reply format:
 
 ```
 [Review] Task NNN: PASS/REJECT
@@ -151,13 +152,28 @@ Step 4: Reviewer → @developer  打回修复（简单问题）
 
 Developer, upon receiving rejection:
 
+1. Read review report at `docs/reviews/NNN-review-rN.md`
+2. Fix the issues listed
+3. Run DoD gates
+4. Commit and push
+5. Reply format:
+
 ```
 [Fix] Task NNN: fixed
-- Reviewer said: xxx
-- I changed: yyy
+- Review report: docs/reviews/NNN-review-rN.md
+- Issues fixed: list issue numbers
+- Changes: list files and why
+- Gates: cargo check ✓ / cargo clippy ✓ / cargo test ✓ / cargo fmt ✓
 ```
 
 Reviewer re-reviews and marks PASS when satisfied.
+
+## Review Report Location
+
+- Review reports: `docs/reviews/NNN-review-rN.md`
+- N = task number, rN = round number (r1, r2, r3...)
+- Reviewer writes the report, Developer reads it for fixes
+- Both agents must know this location
 
 ## Task Spec Template
 
