@@ -1,5 +1,6 @@
 use crate::core::event::AgentEvent;
 use crate::core::message::Message;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, watch, Notify};
@@ -31,12 +32,12 @@ pub enum AgentCommand {
 pub struct AgentHandle {
     tx: mpsc::Sender<AgentCommand>,
     snapshot: watch::Receiver<AgentSnapshot>,
-    events: broadcast::Sender<AgentEvent>,
+    events: broadcast::Receiver<AgentEvent>,
     idle: Arc<Notify>,
 }
 
 impl AgentHandle {
-    pub fn spawn(_config: AgentConfig) -> Self {
+    pub fn spawn(config: AgentConfig) -> Self {
         // 这里是简化版本，实际实现将在后续任务中完善
         todo!("Implementation will be done in task 003")
     }
@@ -46,7 +47,7 @@ impl AgentHandle {
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
-        self.events.subscribe()
+        self.events.clone()
     }
 
     pub async fn wait_for_idle(&self) -> Result<(), AgentError> {
@@ -60,32 +61,16 @@ impl AgentHandle {
     }
 }
 
-impl AgentHandle {
-    // 用于测试的构造函数
-    pub fn new_for_test(snapshot: AgentSnapshot, events: broadcast::Sender<AgentEvent>) -> Self {
-        let (tx, _rx) = mpsc::channel(100);
-        let (snapshot_tx, snapshot_rx) = watch::channel(snapshot);
-        let idle = Arc::new(Notify::new());
-        
-        AgentHandle {
-            tx,
-            snapshot: snapshot_rx,
-            events,
-            idle,
-        }
-    }
-}
-
-// 简化版本的 trait，避免生命周期问题
-pub trait Agent {
+#[async_trait]
+pub trait Agent: Send + Sync {
     fn snapshot(&self) -> AgentSnapshot;
     fn subscribe(&self) -> broadcast::Receiver<AgentEvent>;
-    fn prompt(&self, messages: Vec<Message>) -> Result<(), AgentError>;
-    fn continue_(&self) -> Result<(), AgentError>;
-    fn steer(&self, msg: Message) -> Result<(), AgentError>;
-    fn follow_up(&self, msg: Message) -> Result<(), AgentError>;
+    async fn prompt(&self, messages: Vec<Message>) -> Result<(), AgentError>;
+    async fn continue_(&self) -> Result<(), AgentError>;
+    async fn steer(&self, msg: Message) -> Result<(), AgentError>;
+    async fn follow_up(&self, msg: Message) -> Result<(), AgentError>;
     fn abort(&self);
-    fn wait_for_idle(&self) -> Result<(), AgentError>;
+    async fn wait_for_idle(&self) -> Result<(), AgentError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -144,6 +129,45 @@ impl From<serde_json::Error> for AgentError {
     }
 }
 
+// 为 AgentHandle 实现 Agent trait
+impl Agent for AgentHandle {
+    fn snapshot(&self) -> AgentSnapshot {
+        self.snapshot()
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
+        self.subscribe()
+    }
+
+    async fn prompt(&self, messages: Vec<Message>) -> Result<(), AgentError> {
+        // 发送 Prompt 命令
+        Ok(())
+    }
+
+    async fn continue_(&self) -> Result<(), AgentError> {
+        // 发送 Continue 命令
+        Ok(())
+    }
+
+    async fn steer(&self, msg: Message) -> Result<(), AgentError> {
+        // 发送 Steer 命令
+        Ok(())
+    }
+
+    async fn follow_up(&self, msg: Message) -> Result<(), AgentError> {
+        // 发送 FollowUp 命令
+        Ok(())
+    }
+
+    fn abort(&self) {
+        // 发送 Abort 命令
+    }
+
+    async fn wait_for_idle(&self) -> Result<(), AgentError> {
+        self.wait_for_idle().await
+    }
+}
+
 // InMemoryAgent 实现（最小内存实现）
 pub struct InMemoryAgent {
     snapshot: watch::Sender<AgentSnapshot>,
@@ -165,12 +189,12 @@ impl InMemoryAgent {
             error_message: None,
         };
 
-        let (_snapshot_tx, _snapshot_rx) = watch::channel(snapshot);
+        let (snapshot_tx, _snapshot_rx) = watch::channel(snapshot);
         let (events_tx, _events_rx) = broadcast::channel(100);
         let idle = Arc::new(Notify::new());
 
         InMemoryAgent {
-            snapshot: _snapshot_tx,
+            snapshot: snapshot_tx,
             events: events_tx,
             idle,
             is_running: false,
@@ -185,7 +209,7 @@ impl InMemoryAgent {
         self.events.subscribe()
     }
 
-    pub fn prompt(&mut self, messages: Vec<Message>) -> Result<(), AgentError> {
+    pub async fn prompt(&mut self, messages: Vec<Message>) -> Result<(), AgentError> {
         // 检查是否正在运行
         if self.is_running {
             return Err(AgentError {
@@ -263,17 +287,17 @@ impl InMemoryAgent {
         Ok(())
     }
 
-    pub fn continue_(&self) -> Result<(), AgentError> {
+    pub async fn continue_(&self) -> Result<(), AgentError> {
         // 简化实现，实际应处理继续逻辑
         Ok(())
     }
 
-    pub fn steer(&self, _msg: Message) -> Result<(), AgentError> {
+    pub async fn steer(&self, msg: Message) -> Result<(), AgentError> {
         // 简化实现，实际应处理转向逻辑
         Ok(())
     }
 
-    pub fn follow_up(&self, _msg: Message) -> Result<(), AgentError> {
+    pub async fn follow_up(&self, msg: Message) -> Result<(), AgentError> {
         // 简化实现，实际应处理后续逻辑
         Ok(())
     }
@@ -282,7 +306,7 @@ impl InMemoryAgent {
         // 简化实现，实际应处理中止逻辑
     }
 
-    pub fn wait_for_idle(&self) -> Result<(), AgentError> {
+    pub async fn wait_for_idle(&self) -> Result<(), AgentError> {
         // 等待所有事件处理完成
         Ok(())
     }
