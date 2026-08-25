@@ -48,7 +48,7 @@ pub struct AgentHandle {
     tx: mpsc::Sender<AgentCommand>,
     snapshot: watch::Receiver<AgentSnapshot>,
     events: broadcast::Receiver<AgentEvent>,
-    idle: Arc<Notify>,           // wait_for_idle 用
+    idle: Arc<Notify>,           // wait_for_idle 用（v1.1：建议改为 watch<bool>，见行为契约）
 }
 
 impl AgentHandle {
@@ -87,11 +87,46 @@ pub struct AgentSnapshot {
 - 不做 LLM、不做工具执行（003 接入）。
 - 目的：让生命周期（订阅、steer/followUp 队列、abort、wait_for_idle）有真实逻辑可测，杜绝 fake green。
 
-### 行为契约（本任务内）
+### 行为契约（本任务内，v1.1 已定稿）
 
-- 并发 `prompt` 在 active run 期间应排队或返回错误（`AgentError::Busy`），实现者二选一并记录。
-- `abort()` 不阻塞调用方；被取消的 run 最终产出 `stop_reason: Aborted` 的 assistant 消息（003 强化）。
-- `wait_for_idle` 在 `AgentEnd` 的所有 listener 结算后返回。
+**并发 prompt：active run 期间排队。**
+- 选定方案：`active run` 期间的 `prompt` 不返回 Busy，而是与 steer/followUp 一起进入
+  同一 FIFO 命令队列，待当前 run 结束后按序处理（命令本身已由 `mpsc` 天然排队）。
+- 实现者在 `AgentCommand::Prompt` 的文档注释中记录该选择；`AgentError::Busy` 仍保留
+  为类型成员，但本任务内不使用（003 若引入超时/丢弃语义再启用）。
+- 测试须覆盖"排队执行"语义，禁止把"无并发检查"写成预期。
+
+**事件序列（固定，与 pi 对齐）。**
+- 单个 run（一次 Prompt/Continue 处理）的事件序列固定为：
+  `TurnStart → (逐消息 MessageStart → MessageEnd) → TurnEnd → AgentEnd`。
+- 多消息 prompt 时，`MessageStart/MessageEnd` 按消息逐条包裹，即
+  `M1S → M1E → M2S → M2E`（不是 M1S → M2S → M1E → M2E）。
+- 订阅测试必须完整断言该序列（含 `AgentStart` 开头），不得只断言"收到过某事件"。
+
+**wait_for_idle：以 `AgentEnd` 为同步点，含超时兜底。**
+- `wait_for_idle` 在 `AgentEnd` 发出且所有 listener 结算后返回；同一 run 结束可多次调用，
+  不能因"通知已发出"而永久挂起（r6 死锁根因）。
+- 实现建议：放弃裸 `Notify`，改用 `watch<bool>`（idle 标志，AgentEnd 后置 true）+
+  循环 `changed().await` 直到为真；或先查状态快照再注册等待 + `notify_one` 补发。
+- **必须**有超时兜底（默认 5s），防止任何路径下的永久挂起。
+- 测试**禁止**用 `tokio::time::sleep()` 做同步点（r6 flaky 根因），一律以
+  `wait_for_idle` 或收到 `AgentEnd` 为同步点。
+
+**reset：清空 transcript 与命令队列。**
+- `Reset` 处理时清空内部 transcript、丢弃队列中未处理的 Prompt/Steer/FollowUp，
+  并重置 `is_streaming / streaming_message / pending_tool_calls / error_message`。
+- Reset 完成后 idle 标志为真，`wait_for_idle` 可立即返回；snapshot 中的
+  system_prompt / model / thinking_level 保持不变。
+
+**abort：不阻塞调用方，run 结束且状态一致。**
+- `abort()` 只入队即返回（try_send），不做 await。
+- 被取消的 run 产出 `stop_reason: Aborted` 的 assistant 消息并照常发出
+  `MessageEnd/TurnEnd/AgentEnd`（003 强化，本任务需保证 AgentEnd 必达）。
+- abort 后 `wait_for_idle` 正常返回，测试不得依赖调度时序（r6 flaky）。
+
+**shutdown：等待 runtime task 真正退出。**
+- `shutdown(self)` 发送 `Shutdown` 后，必须 `await` 保存的 `JoinHandle` 直至 task 退出
+  再返回 Ok（r6 第 8 条：不能 send 即返回）。
 
 ## Files
 
@@ -103,9 +138,28 @@ pub struct AgentSnapshot {
 ## Acceptance Criteria
 
 - [ ] cargo check passes
-- [ ] cargo clippy -D warnings passes
-- [ ] cargo test passes
+- [ ] cargo clippy --all-targets -D warnings passes
+- [ ] cargo test passes（无挂起，`--all-targets` 覆盖集成测试）
 - [ ] cargo fmt --check passes
-- [ ] tests/agent_lifecycle.rs 覆盖：prompt 后 snapshot.messages 增长；subscribe 收到完整事件序列；steer/followUp 入队与 drain；abort 后 run 结束且状态一致；wait_for_idle 正确结算；reset 清空 transcript 与队列
-- [ ] 无 `unwrap()`；异步测试用 `tokio::test` 真实执行
+- [ ] tests/agent_lifecycle.rs 覆盖：
+  - prompt 后 snapshot.messages 增长
+  - subscribe 收到完整事件序列 `AgentStart→TurnStart→M1S→M1E→M2S→M2E→TurnEnd→AgentEnd`（多消息）
+  - steer/followUp 入队与 drain
+  - 并发 prompt 排队执行（active run 期间第二条 prompt 之后才被处理）
+  - abort 后 run 结束且状态一致（AgentEnd 必达，wait_for_idle 正常返回）
+  - wait_for_idle 正确结算（多次调用、同 run 内、Reset 后均可返回）
+  - reset 清空 transcript 与队列
+- [ ] 测试以 `wait_for_idle` / subscribe 收 `AgentEnd` 为同步点，无 `tokio::time::sleep` 竞态
+- [ ] 产品代码无 `unwrap()`；测试内用 `expect("前置条件说明")` 替代裸 `unwrap()`
+- [ ] 异步测试用 `tokio::test` 真实执行
 - [ ] 单文件超 400 行时按 responsibility 拆子模块并记录
+
+## 修订记录
+
+- v1.1（2026-08-25，Architect）：依据 r6 审查（docs/reviews/001-review-r6.md）定稿行为契约。
+  - 并发 prompt 选定"active run 期间排队"（r6 #6）
+  - 事件序列固定为逐消息包裹 M1S→M1E→M2S→M2E（r6 #7）
+  - wait_for_idle 改为 AgentEnd 同步点 + 超时兜底，禁止 sleep 竞态（r6 #1/#3/#9）
+  - reset 契约明确为清空 transcript 与队列（r6 #4/#5）
+  - shutdown 需等待 JoinHandle（r6 #8）
+  - 验收标准增加 `--all-targets`、事件序列断言、expect 替代 unwrap（r6 #2/#10）
