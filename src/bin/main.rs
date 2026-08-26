@@ -1,28 +1,85 @@
-use guigu::Agent;
-use guigu::core::{
-    AgentConfig, AgentHandle,
-    message::{Message, UserContent, UserMessage},
-};
+//! 示例 CLI：最小 echo agent（stdin 读一行 → provider 回显 → 打印）。
+
 use std::io;
+
+use async_trait::async_trait;
+use futures::stream;
+use guigu::core::message::{
+    AssistantContent, AssistantMessage, Message, ModelId, StopReason, ThinkingLevel, UserContent,
+    UserMessage,
+};
+use guigu::core::provider::{
+    AssistantEvent, AssistantStream, ModelProvider, ProviderError, ProviderRequest,
+};
+use guigu::core::{Agent, AgentConfig, AgentHandle, AgentRuntime, LoopConfig, Model};
+
+/// 最小 echo provider：回显最后一条用户消息（演示用，非真实 LLM）。
+struct EchoProvider;
+
+#[async_trait]
+impl ModelProvider for EchoProvider {
+    async fn stream(&self, request: ProviderRequest) -> Result<AssistantStream, ProviderError> {
+        let text = request
+            .context
+            .messages
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                Message::User(u) => u.content.iter().find_map(|c| match c {
+                    UserContent::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        let response = format!("Echo: {text}");
+        let message = AssistantMessage {
+            content: vec![AssistantContent::Text {
+                text: response.clone(),
+            }],
+            model: Some(ModelId(request.model.id.clone())),
+            usage: None,
+            stop_reason: Some(StopReason::Completed),
+            error_message: None,
+            timestamp: 0,
+        };
+        let events = vec![
+            AssistantEvent::TextDelta { text: response },
+            AssistantEvent::Done { message },
+        ];
+        Ok(Box::pin(stream::iter(events)))
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 创建 Agent 配置
     let agent_config = AgentConfig {
         system_prompt: "You are a helpful assistant that can echo messages.".to_string(),
-        model: None,
-        thinking_level: guigu::core::message::ThinkingLevel::Off,
+        model: Some("echo-model".to_string()),
+        thinking_level: ThinkingLevel::Off,
     };
 
-    // 创建 AgentHandle
-    let agent_handle = AgentHandle::spawn(agent_config);
+    let loop_config = LoopConfig {
+        model: Model {
+            id: "echo-model".to_string(),
+            context_window: 8192,
+        },
+        ..LoopConfig::default()
+    };
 
-    // 从 stdin 读取输入
+    let runtime = AgentRuntime {
+        provider: std::sync::Arc::new(EchoProvider),
+        tools: Vec::new(),
+        loop_config,
+    };
+
+    let agent_handle = AgentHandle::spawn(agent_config, runtime);
+
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     let prompt = input.trim();
 
-    // 创建用户消息
     let user_message = Message::User(UserMessage {
         content: vec![UserContent::Text {
             text: prompt.to_string(),
@@ -30,11 +87,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timestamp: 0,
     });
 
-    // 发送 prompt 并等待完成
     agent_handle.prompt(vec![user_message]).await?;
     agent_handle.wait_for_idle().await?;
 
-    // 获取最终的 assistant 消息并打印
     let snapshot = agent_handle.snapshot();
     if let Some(assistant_message) = snapshot
         .messages

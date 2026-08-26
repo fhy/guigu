@@ -159,7 +159,9 @@ fn test_agent_event_roundtrip() {
                 content: vec![],
                 timestamp: 0,
             })),
-            assistant_event: guigu::core::event::AssistantEvent,
+            assistant_event: guigu::core::event::AssistantEvent::TextDelta {
+                text: "hi".to_string(),
+            },
         },
         AgentEvent::MessageEnd {
             message: Arc::new(Message::User(UserMessage {

@@ -9,6 +9,7 @@
 use crate::core::agent_runtime::spawn_runtime;
 use crate::core::event::AgentEvent;
 use crate::core::message::{Message, ThinkingLevel};
+use crate::core::runtime::AgentRuntime;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -217,7 +218,9 @@ impl Agent for AgentHandle {
 
 impl AgentHandle {
     /// 启动唯一 runtime task，返回句柄。
-    pub fn spawn(config: AgentConfig) -> Self {
+    ///
+    /// `runtime` 注入 provider + 工具 + loop 配置（003 执行引擎依赖）。
+    pub fn spawn(config: AgentConfig, runtime: AgentRuntime) -> Self {
         let (tx, rx) = mpsc::channel::<AgentCommand>(100);
         let (snapshot_tx, snapshot_rx) = watch::channel(AgentSnapshot {
             system_prompt: config.system_prompt.clone(),
@@ -241,6 +244,7 @@ impl AgentHandle {
             processed_tx,
             exited_tx,
             config,
+            runtime,
         );
 
         AgentHandle {

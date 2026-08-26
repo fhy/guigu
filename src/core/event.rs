@@ -4,6 +4,9 @@ use std::sync::Arc;
 use crate::core::message::{AssistantMessage, Message, ToolResultMessage};
 use crate::core::tool::ToolResult;
 
+/// assistant 流事件（定义在 `provider`，此处 re-export 保持 `event::AssistantEvent` 路径）。
+pub use crate::core::provider::AssistantEvent;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -44,7 +47,3 @@ pub enum AgentEvent {
         is_error: bool,
     },
 }
-
-// 占位类型，实际实现由 provider.rs 决定
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AssistantEvent;
