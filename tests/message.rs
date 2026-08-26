@@ -4,7 +4,6 @@ use guigu::core::message::{
     AssistantContent, AssistantMessage, ImageContent, Message, ModelId, StopReason, ThinkingLevel,
     ToolCall, ToolResultContent, ToolResultMessage, Usage, UserContent, UserMessage,
 };
-use serde_json;
 use std::sync::Arc;
 
 #[test]
