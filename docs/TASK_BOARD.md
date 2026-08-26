@@ -16,5 +16,5 @@
 - 001 规格 v1.1（2026-08-25）：定稿并发排队、事件序列、wait_for_idle 同步点+超时、reset/abort/shutdown 契约（依据 r6 审查）
 - 001 已于 r7 审查通过（2026-08-26，docs/reviews/001-review-r7.md）：四门禁全绿、r6 十项阻塞全部核销
 - 003 已于 r2 审查通过（2026-08-26，docs/reviews/003-review-r2.md）：四门禁全绿、r1 五项问题全部核销（含 no-Done→Error 新增测试）
-- 004 规格 v1.1（2026-08-26，Architect 重核验）：旧实现（8-22）早于 001/003 定稿已过期，需按新规格在定稿架构上重做；已对齐 Tool 签名、FakeProvider 两轮回放、AgentConfig.tools 契约、事件完整断言、bin 冲突处理
+- 004 规格 v1.2（2026-08-26，Architect 二次重核验）：v1.1 仅更新修订记录未落实正文，本次已把两轮回放、完整事件断言、`cargo run --bin guigu`、删除 src/main.rs 等写入正文；旧实现（8-22，567265b）早于 001/003 定稿已过期，需按 v1.2 重做
 - 二期（暂不排期）：Session 树/JSONL 崩溃恢复、上下文摘要压缩、内置工具集(read/write/edit/bash)、adapters(OpenAI/Anthropic)、远程协议
