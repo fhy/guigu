@@ -10,6 +10,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::message::ToolResultContent;
@@ -46,18 +47,11 @@ impl ToolResult {
 }
 
 /// 工具执行错误（参数非法、执行异常等）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Error, Debug, Clone, Serialize, Deserialize)]
+#[error("ToolError: {message}")]
 pub struct ToolError {
     pub message: String,
 }
-
-impl std::fmt::Display for ToolError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ToolError: {}", self.message)
-    }
-}
-
-impl std::error::Error for ToolError {}
 
 impl ToolError {
     /// 参数非法错误。

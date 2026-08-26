@@ -224,13 +224,15 @@ fn tool_specs(tools: &[Arc<dyn Tool>]) -> Vec<ToolSpec> {
 }
 
 /// 构建本轮 LLM 消息：transform_context 钩子（或默认预算截断）→ convert_to_llm。
+///
+/// 仅 `transform_context` 钩子消耗所有权时才 clone transcript；默认预算路径
+/// 借用 `&[Arc<Message>]`，避免全量浅拷贝。
 fn build_llm_messages(ctx: &RunContext, signal: &CancellationToken) -> Vec<Message> {
-    let transcript = ctx.transcript.clone();
     let transformed = if let Some(hook) = &ctx.config.transform_context {
-        hook(transcript, signal.clone())
+        hook(ctx.transcript.clone(), signal.clone())
     } else {
         let budget = ContextBudget::new(ctx.config.model.context_window);
-        budget.truncate(transcript)
+        budget.truncate(ctx.transcript.as_slice())
     };
     (ctx.config.convert_to_llm)(transformed)
 }
@@ -345,8 +347,7 @@ async fn append_user_message(ctx: &mut RunContext<'_>, msg: Message) {
     let _ = ctx.events_tx.send(AgentEvent::MessageEnd { message: arc });
 }
 
-/// 供测试/外部使用的 stop_reason 映射（流内 Error → Error，取消 → Aborted）。
-#[allow(dead_code)]
+/// stop_reason 映射：取消 → Aborted，其余（流内 Error / 重试耗尽）→ Error。
 pub(crate) fn stop_reason_for_error(aborted: bool) -> StopReason {
     if aborted {
         StopReason::Aborted

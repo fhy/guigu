@@ -20,7 +20,7 @@ use crate::core::provider::{
     AssistantEvent, AssistantStream, ModelProvider, ProviderError, ProviderRequest,
 };
 
-use super::{LoopConfig, drain_commands};
+use super::{LoopConfig, drain_commands, stop_reason_for_error};
 
 /// 一个 turn 的结果。
 pub(crate) struct TurnResult {
@@ -225,7 +225,9 @@ impl TurnAccumulator {
             msg.stop_reason = Some(StopReason::Error);
             msg.error_message = Some(err);
         } else {
-            msg.stop_reason = Some(StopReason::Completed);
+            // 流结束但未收到 Done（provider 异常截断）：按 Error 处理，不掩盖为 Completed。
+            msg.stop_reason = Some(StopReason::Error);
+            msg.error_message = Some("stream ended without Done event".to_string());
         }
         msg
     }
@@ -238,11 +240,8 @@ fn stream_failure_result(
     signal: &CancellationToken,
 ) -> TurnResult {
     let aborted = matches!(e, ProviderError::Aborted) || signal.is_cancelled();
-    let (stop_reason, error_message) = if aborted {
-        (Some(StopReason::Aborted), None)
-    } else {
-        (Some(StopReason::Error), Some(e.to_string()))
-    };
+    let stop_reason = Some(stop_reason_for_error(aborted));
+    let error_message = if aborted { None } else { Some(e.to_string()) };
     let msg = AssistantMessage {
         content: Vec::new(),
         model: Some(ModelId(model_id.to_string())),

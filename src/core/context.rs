@@ -72,10 +72,11 @@ impl ContextBudget {
 
     /// 保守截断：从最旧（前端）丢弃直到预算内，始终保留最近一条消息。
     ///
-    /// 已预算内则原样返回。若单条消息即超窗，仍保留最近一条（不丢空）。
-    pub fn truncate(&self, messages: Vec<Arc<Message>>) -> Vec<Arc<Message>> {
-        if self.fits(&messages) {
-            return messages;
+    /// 接受借用切片，仅 clone 保留下来的 Arc 指针（已预算内则 clone 全量）。
+    /// 若单条消息即超窗，仍保留最近一条（不丢空）。
+    pub fn truncate(&self, messages: &[Arc<Message>]) -> Vec<Arc<Message>> {
+        if self.fits(messages) {
+            return messages.to_vec();
         }
         let len = messages.len();
         let mut start = 0;
@@ -120,7 +121,7 @@ mod tests {
             .map(|i| user_msg(&format!("m{i}{}", "x".repeat(400))))
             .collect();
         assert!(!budget.fits(&msgs), "5 条应超预算");
-        let truncated = budget.truncate(msgs.clone());
+        let truncated = budget.truncate(&msgs);
         assert!(budget.fits(&truncated), "截断后应在预算内");
         assert!(truncated.len() <= 2, "应只保留最近的消息");
         // 最近一条必须保留
@@ -136,7 +137,7 @@ mod tests {
         let budget = ContextBudget::new(10);
         let big = user_msg(&"x".repeat(1000));
         let msgs = vec![big.clone(), big.clone()];
-        let truncated = budget.truncate(msgs);
+        let truncated = budget.truncate(&msgs);
         assert_eq!(truncated.len(), 1, "超窗单条也应保留最近一条");
     }
 

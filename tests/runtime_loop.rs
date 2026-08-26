@@ -590,6 +590,58 @@ async fn test_abort() {
         !snapshot.is_streaming,
         "is_streaming should be false after abort"
     );
+    // 规格要求：abort 后产出 stop_reason: Aborted。
+    let last = snapshot
+        .messages
+        .last()
+        .expect("transcript should not be empty");
+    let Message::Assistant(a) = last.as_ref() else {
+        panic!("last message should be assistant");
+    };
+    assert_eq!(
+        a.stop_reason,
+        Some(StopReason::Aborted),
+        "abort should produce stop_reason: Aborted"
+    );
+}
+
+/// 流结束但未收到 Done（provider 异常截断）→ stop_reason: Error，不掩盖为 Completed。
+#[tokio::test]
+async fn test_stream_ends_without_done() {
+    // 一个 turn 只发 TextDelta、无 Done —— 流直接结束。
+    let events = vec![AssistantEvent::TextDelta {
+        text: "partial".to_string(),
+    }];
+    let provider = FakeProvider::new(vec![events]);
+    let handle = AgentHandle::spawn(
+        make_config(),
+        make_runtime(
+            provider.clone(),
+            Vec::new(),
+            ToolExecutionMode::Sequential,
+            8192,
+        ),
+    );
+    handle
+        .prompt(vec![user_msg("hi")])
+        .await
+        .expect("prompt should succeed");
+    handle.wait_for_idle().await.expect("should settle");
+
+    let snapshot = handle.snapshot();
+    let last = snapshot
+        .messages
+        .last()
+        .expect("transcript should not be empty");
+    let Message::Assistant(a) = last.as_ref() else {
+        panic!("last message should be assistant");
+    };
+    assert_eq!(
+        a.stop_reason,
+        Some(StopReason::Error),
+        "stream ending without Done should produce stop_reason: Error"
+    );
+    assert!(a.error_message.is_some(), "should carry an error message");
 }
 
 /// provider 失败重试：前 2 次建立失败 → 第 3 次成功，call_count == 3。
