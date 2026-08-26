@@ -13,15 +13,17 @@
 
 ## Design Notes
 
-### Echo 工具（实现 Tool trait）
+### Echo 工具（实现 Tool trait，签名沿用 003 定稿）
 
 ```rust
 pub struct EchoTool;   // name="echo"，读 args.message，返回原文
 ```
 
-- `resource_scope: ReadOnly`（可并行，验证并发路径）
-- 参数宽松校验：`serde_json::from_value::<EchoArgs>()`
-- 注册方式：`Vec<Arc<dyn Tool>>` 传入 agent 配置（`AgentConfig { tools: Vec<Arc<dyn Tool>> }`）
+- 实现 003 定稿的 `Tool` trait 完整签名：
+  `execute(&self, tool_call_id: &str, args: serde_json::Value, signal: CancellationToken, on_update: Option<&dyn Fn(ToolResult)>) -> Result<ToolResult, ToolError>`
+- `resource_scope: ReadOnly`（可并行，验证并发路径）；echo 无副作用，`on_update` 可忽略；参数校验失败直接返回 `ToolError`
+- 参数宽松校验：`serde_json::from_value::<EchoArgs>()`，`EchoArgs { message: String }`
+- 注册方式：`AgentConfig` 增加 `tools: Vec<Arc<dyn Tool>>` 字段（001/003 未显式定该字段，本任务补契约），经 `AgentHandle::spawn(config)` 传入，runtime 循环据此编排工具执行
 
 ### 端到端集成（tests/echo_agent.rs）
 
@@ -63,3 +65,13 @@ pub struct EchoTool;   // name="echo"，读 args.message，返回原文
 - [ ] tests/echo_agent.rs 端到端通过：snapshot 含 User/ToolResult/Assistant，事件含 ToolExecution 与 AgentEnd
 - [ ] 无 `unwrap()`（bin 示例可用 `?` + main 返回 `Result`，或打印错误）
 - [ ] 单文件超 400 行拆子模块
+
+## 修订记录
+
+- v1.1（2026-08-26，Architect 重核验）：对齐 001 v1.1 / 003 定稿后的架构。
+  - Echo 工具补 003 定稿 `Tool` 完整签名（signal / on_update）
+  - `AgentConfig.tools` 字段契约（001/003 未显式定义，本任务补）
+  - FakeProvider 改为两轮回放（工具轮 + 文本轮），修正单轮 `Done` 后无终止的歧义
+  - 事件断言按 001 定稿严格化（完整序列，非"收到过"）
+  - lib.rs 导出适配 runtime 子模块拆分
+  - 明确 `src/main.rs` 与 `src/bin/main.rs` 同名 bin 冲突的处理
