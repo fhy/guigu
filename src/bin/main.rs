@@ -9,7 +9,7 @@ use std::io;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 创建 Agent 配置
     let agent_config = AgentConfig {
-        system_prompt: "You are a helpful assistant.".to_string(),
+        system_prompt: "You are a helpful assistant that can echo messages.".to_string(),
         model: None,
         thinking_level: guigu::core::message::ThinkingLevel::Off,
     };
