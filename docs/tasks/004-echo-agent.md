@@ -25,14 +25,14 @@ pub struct EchoTool;   // name="echo"，读 args.message，返回原文
   `execute(&self, tool_call_id: &str, args: serde_json::Value, signal: CancellationToken, on_update: Option<&dyn Fn(ToolResult)>) -> Result<ToolResult, ToolError>`
 - `resource_scope: ReadOnly`（可并行，验证并发路径）；echo 无副作用，`on_update` 可忽略；参数校验失败直接返回 `ToolError`
 - 参数宽松校验：`serde_json::from_value::<EchoArgs>()`，`EchoArgs { message: String }`
-- 注册方式：`AgentConfig` 增加 `tools: Vec<Arc<dyn Tool>>` 字段（001/003 未显式定该字段，本任务补契约），经 `AgentHandle::spawn(config)` 传入，runtime 循环据此编排工具执行
+- 注册方式：工具经 `AgentRuntime` 的 `tools: Vec<Arc<dyn Tool>>` 字段注册（**003 已定该字段，本任务复用**，不在 `AgentConfig` 增加重复字段），经 `AgentHandle::spawn(config, runtime)` **双参**传入，runtime 循环据此编排工具执行
 
 ### 端到端集成（tests/echo_agent.rs）
 
 - 复用 `tests/common/mod.rs` 的 `FakeProvider`（003 已建，勿复制），配置**两轮回放**：
   1. 工具轮：`ToolCallStart { id, name: "echo", arguments: {"message":"hello"} } → ToolCallEnd → Done`，触发 EchoTool 执行
   2. 文本轮：`TextDelta("echo: hello") → Done`，产出终态 assistant 文本
-- `AgentHandle::spawn(AgentConfig { tools: vec![Arc::new(EchoTool)] })`
+- `AgentHandle::spawn(AgentConfig { system_prompt, model, thinking_level }, AgentRuntime { provider, tools: vec![Arc::new(EchoTool)], loop_config })`（双参：工具经 runtime 注册，不落 config）
 - `prompt("hello")` → `wait_for_idle`（唯一同步点，禁止 `sleep`）
 - 断言（snapshot + 事件交叉验证）：
   - snapshot 最终 `messages` 含 `User`、含 `ToolResult`（`tool_name=="echo"`）、含终态 `Assistant`（`stop_reason == Some(Completed)`）
@@ -81,6 +81,7 @@ pub struct EchoTool;   // name="echo"，读 args.message，返回原文
 
 ## 修订记录
 
+- v1.3（2026-08-26，Architect 三次重核验）：修正工具注册契约。Developer 预实现审查发现 v1.2 正文误记——工具注册**已在 003 定稿中落在 `AgentRuntime.tools`**（非 `AgentConfig`），`AgentHandle::spawn` 为**双参** `spawn(config, runtime)`。本次将第 28 行注册方式、第 35 行 spawn 调用改为经 `AgentRuntime { tools }` 注册 + 双参 spawn，不再在 `AgentConfig` 增加重复 `tools` 字段（消除双重事实源，公共 API 零改动）。
 - v1.2（2026-08-26，Architect 二次重核验）：v1.1 仅更新修订记录未落实正文，正文仍残留旧表述（单轮回放、"收到过"断言、"由实现者定"）。本次将修订记录所述变更**写入正文**，消除歧义。
   - 端到端集成改为两轮回放 + 完整事件序列断言 + stop_reason==Completed
   - CLI 明确 `cargo run --bin guigu` 并删除 `src/main.rs`
@@ -89,7 +90,7 @@ pub struct EchoTool;   // name="echo"，读 args.message，返回原文
   - 验收标准统一 `--all-targets`、复用 FakeProvider、删除 src/main.rs
 - v1.1（2026-08-26，Architect 重核验）：对齐 001 v1.1 / 003 定稿后的架构。
   - Echo 工具补 003 定稿 `Tool` 完整签名（signal / on_update）
-  - `AgentConfig.tools` 字段契约（001/003 未显式定义，本任务补）
+  - `AgentConfig.tools` 字段契约（001/003 未显式定义，本任务补）——⚠️ v1.3 已更正：工具注册实际在 `AgentRuntime.tools`，见 v1.3 条目
   - FakeProvider 改为两轮回放（工具轮 + 文本轮），修正单轮 `Done` 后无终止的歧义
   - 事件断言按 001 定稿严格化（完整序列，非"收到过"）
   - lib.rs 导出适配 runtime 子模块拆分

@@ -16,5 +16,5 @@
 - 001 规格 v1.1（2026-08-25）：定稿并发排队、事件序列、wait_for_idle 同步点+超时、reset/abort/shutdown 契约（依据 r6 审查）
 - 001 已于 r7 审查通过（2026-08-26，docs/reviews/001-review-r7.md）：四门禁全绿、r6 十项阻塞全部核销
 - 003 已于 r2 审查通过（2026-08-26，docs/reviews/003-review-r2.md）：四门禁全绿、r1 五项问题全部核销（含 no-Done→Error 新增测试）
-- 004 规格 v1.2（2026-08-26，Architect 二次重核验）：v1.1 仅更新修订记录未落实正文，本次已把两轮回放、完整事件断言、`cargo run --bin guigu`、删除 src/main.rs 等写入正文；旧实现（8-22，567265b）早于 001/003 定稿已过期，需按 v1.2 重做
+- 004 规格 v1.3（2026-08-26，Architect 三次重核验）：Developer 预实现审查发现 v1.2 正文误记工具注册契约——工具注册在 003 定稿中已落 `AgentRuntime.tools`（非 `AgentConfig`），spawn 为双参；本次修正第 28/35 行，工具经 `AgentRuntime { tools }` 注册 + 双参 spawn，不再给 `AgentConfig` 加 `tools` 字段（消除双重事实源）。旧实现（8-22，567265b）早于 001/003 定稿已过期，需按 v1.3 重做
 - 二期（暂不排期）：Session 树/JSONL 崩溃恢复、上下文摘要压缩、内置工具集(read/write/edit/bash)、adapters(OpenAI/Anthropic)、远程协议
