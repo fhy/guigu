@@ -1,15 +1,18 @@
+//! guigu：轻量级 Rust 原生 AI Agent 运行时。
+//!
+//! 顶层 facade：嵌入方 `guigu = { path = ... }` 后可直接用 `guigu::AgentHandle`、
+//! `guigu::EchoTool` 等公开项，无需深入 `core` / `tools` 子模块。
+
 pub mod core;
 pub mod tools;
 
 pub use core::{
-    agent::{Agent, AgentConfig, AgentError, AgentHandle, AgentSnapshot},
+    agent::*,
     context::{ContextBudget, default_convert_to_llm},
     event::*,
     message::*,
-    provider::{
-        AssistantEvent, AssistantStream, Context, Model, ModelProvider, ProviderError,
-        ProviderRequest, ToolSpec,
-    },
-    runtime::{AgentRuntime, LoopConfig, ToolExecutionMode},
-    tool::{ResourceScope, Tool, ToolError, ToolResult},
+    provider::*,
+    runtime::*,
+    tool::*,
 };
+pub use tools::*;

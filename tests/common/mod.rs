@@ -1,7 +1,9 @@
 //! 测试共享 helper：fake provider、测试工具、脚本与配置构造。
 //!
-//! 供 `runtime_loop.rs` 与 `runtime_loop_tools.rs` 通过 `#[path]` 引入
-//! （tests/ 下顶层 .rs 会被当作独立 test crate，故共享代码放子模块）。
+//! 供多个集成测试 crate 通过 `mod common;` 引入（tests/ 下顶层 .rs 会被当作
+//! 独立 test crate，故共享代码放子模块）。不同 crate 使用不同子集，故允许
+//! 未使用的 helper。
+#![allow(dead_code)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,8 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream;
 use guigu::core::message::{
-    AssistantContent, AssistantMessage, Message, StopReason, ThinkingLevel, ToolCall,
-    UserContent, UserMessage,
+    AssistantContent, AssistantMessage, StopReason, ThinkingLevel, ToolCall,
 };
 use guigu::core::provider::{
     AssistantEvent, AssistantStream, ModelProvider, ProviderError, ProviderRequest,
@@ -34,7 +35,7 @@ pub struct FakeProvider {
 
 impl FakeProvider {
     pub fn new(turns: Vec<Vec<AssistantEvent>>) -> Arc<Self> {
-        Arc::new(Self::with(turns, 0, None))
+        Self::with(turns, 0, None)
     }
 
     /// `fail_next`：前 N 次 stream() 建立失败；`gate`：首次 stream() 前等待。
@@ -64,10 +65,7 @@ impl FakeProvider {
 
 #[async_trait]
 impl ModelProvider for FakeProvider {
-    async fn stream(
-        &self,
-        request: ProviderRequest,
-    ) -> Result<AssistantStream, ProviderError> {
+    async fn stream(&self, request: ProviderRequest) -> Result<AssistantStream, ProviderError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         // gate：首次调用前等待（确定性注入命令）。
         let rx = self.gate.lock().expect("gate mutex").take();
@@ -200,4 +198,31 @@ pub fn tool_call_turn(id: &str, name: &str, args: &str) -> Vec<AssistantEvent> {
 }
 
 pub fn make_config() -> AgentConfig {
-    AgentConfig
+    AgentConfig {
+        system_prompt: "test".to_string(),
+        model: Some("test-model".to_string()),
+        thinking_level: ThinkingLevel::Off,
+    }
+}
+
+/// 构造 `AgentRuntime`：注入 provider + 工具 + loop 配置（测试用短退避）。
+pub fn make_runtime(
+    provider: Arc<dyn ModelProvider>,
+    tools: Vec<Arc<dyn Tool>>,
+    mode: ToolExecutionMode,
+    context_window: u32,
+) -> AgentRuntime {
+    AgentRuntime {
+        provider,
+        tools,
+        loop_config: LoopConfig {
+            model: Model {
+                id: "test-model".to_string(),
+                context_window,
+            },
+            tool_execution: mode,
+            retry_base_delay: Duration::from_millis(1),
+            ..LoopConfig::default()
+        },
+    }
+}
