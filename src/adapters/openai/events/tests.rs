@@ -160,6 +160,8 @@ fn tool_call_duplicate_index_is_parse_error() {
         &mut acc,
     )
     .expect("start 1");
+    let tcs_before = acc.tool_calls.len();
+    let segs_before = acc.segments.len();
     // 同一 provider index 再次 start → Parse。
     let result = map_event(
         SseEvent::Data {
@@ -168,6 +170,11 @@ fn tool_call_duplicate_index_is_parse_error() {
         &mut acc,
     );
     assert!(matches!(result, Err(ProviderError::Parse(_))));
+    // 错误路径状态一致：未留下幽灵 tool call / 段，原映射仍指向首个。
+    assert_eq!(acc.tool_calls.len(), tcs_before);
+    assert_eq!(acc.segments.len(), segs_before);
+    assert_eq!(acc.tool_local_index(0), Some(0));
+    assert_eq!(acc.tool_calls[0].id, "call_1");
 }
 
 #[test]

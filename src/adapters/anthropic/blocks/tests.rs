@@ -217,3 +217,90 @@ fn stop_unknown_block_is_parse_error() {
     let result = handle_block_stop(&parse(r#"{"index":5}"#), &mut acc);
     assert!(matches!(result, Err(ProviderError::Parse(_))));
 }
+
+#[test]
+fn duplicate_text_start_index_is_parse_error() {
+    let mut acc = Acc::new("m".into());
+    let _ = handle_block_start(
+        &parse(r#"{"index":0,"content_block":{"type":"text","text":""}}"#),
+        &mut acc,
+    )
+    .expect("start 0");
+    let segs_before = acc.segments.len();
+    let texts_before = acc.texts.len();
+    // 同一 index 再次 start → Parse。
+    let result = handle_block_start(
+        &parse(r#"{"index":0,"content_block":{"type":"text","text":""}}"#),
+        &mut acc,
+    );
+    assert!(matches!(result, Err(ProviderError::Parse(_))));
+    // 状态未被污染：无新段、无新文本 block，原映射仍指向首个 block。
+    assert_eq!(acc.segments.len(), segs_before);
+    assert_eq!(acc.texts.len(), texts_before);
+    assert!(matches!(acc.block_kind(0), Some(SegmentKind::Text(0))));
+}
+
+#[test]
+fn duplicate_tool_use_start_index_is_parse_error() {
+    let mut acc = Acc::new("m".into());
+    let _ = handle_block_start(
+        &parse(r#"{"index":0,"content_block":{"type":"tool_use","id":"tu_1","name":"search"}}"#),
+        &mut acc,
+    )
+    .expect("start 0");
+    let segs_before = acc.segments.len();
+    let tcs_before = acc.tool_calls.len();
+    // 同一 index 再次 start（不同 id）→ Parse。
+    let result = handle_block_start(
+        &parse(r#"{"index":0,"content_block":{"type":"tool_use","id":"tu_2","name":"other"}}"#),
+        &mut acc,
+    );
+    assert!(matches!(result, Err(ProviderError::Parse(_))));
+    // 状态未被污染：无新段、无新 tool call，原映射仍指向首个 tool call。
+    assert_eq!(acc.segments.len(), segs_before);
+    assert_eq!(acc.tool_calls.len(), tcs_before);
+    assert!(matches!(acc.block_kind(0), Some(SegmentKind::ToolCall(0))));
+    assert_eq!(acc.tool_calls[0].id, "tu_1");
+}
+
+#[test]
+fn duplicate_thinking_start_index_is_parse_error() {
+    let mut acc = Acc::new("m".into());
+    let _ = handle_block_start(
+        &parse(r#"{"index":0,"content_block":{"type":"thinking","thinking":""}}"#),
+        &mut acc,
+    )
+    .expect("start 0");
+    let segs_before = acc.segments.len();
+    let thinkings_before = acc.thinkings.len();
+    // 同一 index 再次 start → Parse。
+    let result = handle_block_start(
+        &parse(r#"{"index":0,"content_block":{"type":"thinking","thinking":""}}"#),
+        &mut acc,
+    );
+    assert!(matches!(result, Err(ProviderError::Parse(_))));
+    // 状态未被污染：无新段、无新 thinking block，原映射仍指向首个 block。
+    assert_eq!(acc.segments.len(), segs_before);
+    assert_eq!(acc.thinkings.len(), thinkings_before);
+    assert!(matches!(acc.block_kind(0), Some(SegmentKind::Thinking(0))));
+}
+
+#[test]
+fn duplicate_block_stop_tool_use_is_parse_error() {
+    let mut acc = Acc::new("m".into());
+    let _ = handle_block_start(
+        &parse(r#"{"index":0,"content_block":{"type":"tool_use","id":"tu_1","name":"search"}}"#),
+        &mut acc,
+    )
+    .expect("start 0");
+    // 首次 stop → ToolCallEnd。
+    let events = handle_block_stop(&parse(r#"{"index":0}"#), &mut acc).expect("stop 0");
+    assert_eq!(
+        events,
+        vec![AssistantEvent::ToolCallEnd { id: "tu_1".into() }]
+    );
+    assert!(acc.tool_calls[0].done);
+    // 同一 index 再次 stop → Parse，不重复发 ToolCallEnd。
+    let result = handle_block_stop(&parse(r#"{"index":0}"#), &mut acc);
+    assert!(matches!(result, Err(ProviderError::Parse(_))));
+}

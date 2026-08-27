@@ -27,6 +27,13 @@ pub(crate) fn handle_block_start(
     acc: &mut Acc,
 ) -> Result<Vec<AssistantEvent>, ProviderError> {
     let index = block_index(v, "content_block_start")?;
+    // 同一 index 重复 start 是协议违规：必须在创建/登记新 block 之前拒绝，
+    // 否则新段先入 `segments`、`note_block` 再覆盖旧映射，留下无法定位的幽灵段。
+    if acc.block_kind(index).is_some() {
+        return Err(ProviderError::Parse(format!(
+            "duplicate content_block_start at index {index}"
+        )));
+    }
     let block = v
         .get("content_block")
         .ok_or_else(|| ProviderError::Parse("content_block_start missing content_block".into()))?;
@@ -157,13 +164,19 @@ pub(crate) fn handle_block_stop(
     let index = block_index(v, "content_block_stop")?;
     match acc.block_kind(index) {
         Some(SegmentKind::ToolCall(tc_idx)) => {
-            let id = acc
-                .tool_calls
-                .get(*tc_idx)
-                .map(|t| t.id.clone())
-                .ok_or_else(|| {
+            // 先取出 (id, done) 再释放借用，避免与后续 `end_tool_call` 的可变借用冲突。
+            let (id, done) = {
+                let tc = acc.tool_calls.get(*tc_idx).ok_or_else(|| {
                     ProviderError::Parse(format!("tool call {tc_idx} missing for block {index}"))
                 })?;
+                (tc.id.clone(), tc.done)
+            };
+            // 同一 tool call 重复 stop 是协议违规：拒绝，避免重复发 `ToolCallEnd`。
+            if done {
+                return Err(ProviderError::Parse(format!(
+                    "duplicate content_block_stop for tool call {id} at block index {index}"
+                )));
+            }
             acc.end_tool_call(&id);
             Ok(vec![AssistantEvent::ToolCallEnd { id }])
         }

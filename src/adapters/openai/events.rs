@@ -81,7 +81,13 @@ fn map_chunk(data: &str, acc: &mut Acc) -> Result<Vec<AssistantEvent>, ProviderE
                     .to_string();
 
                 let tc_idx = if !id.is_empty() {
-                    // 新工具调用开始：登记 provider index → 本地 index 映射。
+                    // 新工具调用开始：先校验 provider index 未被占用，再创建并登记映射，
+                    // 保持错误路径状态一致（避免 `start_tool_call` 已入段而映射失败留下幽灵项）。
+                    if acc.tool_local_index(index).is_some() {
+                        return Err(ProviderError::Parse(format!(
+                            "duplicate tool_call start at provider index {index}"
+                        )));
+                    }
                     let idx = acc.start_tool_call(id.clone(), name.clone());
                     acc.map_tool_index(index, idx)?;
                     events.push(AssistantEvent::ToolCallStart {
