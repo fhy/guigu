@@ -273,3 +273,66 @@ async fn test_within_budget_no_compaction() {
     assert_eq!(msgs[0], m0);
     assert_eq!(msgs[1], m1);
 }
+
+/// 持久化语义：压缩结果回写 transcript，后续 turn 不重复压缩、不恢复旧消息
+/// （验证「非单次请求投影」的持久契约，避免调用方误以为只是单次请求投影）。
+#[tokio::test]
+async fn test_compaction_persistent_no_recompact() {
+    let provider = RecordingProvider::new(text_turn("ok"));
+    let fake = FakeCompactor::ok("SUMMARY");
+    let compactor: Arc<dyn Compactor> = fake.clone();
+    let policy = CompactionPolicy {
+        budget_tokens: 200,
+        keep_recent: 1,
+    };
+    let handle = AgentHandle::spawn(
+        make_config(),
+        make_runtime_with_compactor(provider.clone(), compactor, policy),
+    );
+
+    // 第一次 prompt：3 条大消息（超预算）→ 压缩触发。
+    let m0 = user_msg(&format!("m0{}", "x".repeat(400)));
+    let m1 = user_msg(&format!("m1{}", "x".repeat(400)));
+    let m2 = user_msg(&format!("m2{}", "x".repeat(400)));
+    handle
+        .prompt(vec![m0, m1, m2.clone()])
+        .await
+        .expect("first prompt should succeed");
+    handle.wait_for_idle().await.expect("should settle");
+
+    // 压缩触发一次。
+    assert_eq!(fake.call_count(), 1, "compactor should be called once");
+
+    // 第二次 prompt：小消息（transcript 现已预算内）→ 不重复压缩。
+    handle
+        .prompt(vec![user_msg("hi")])
+        .await
+        .expect("second prompt should succeed");
+    handle.wait_for_idle().await.expect("should settle");
+
+    // compactor 仍只被调用一次（未重复压缩）。
+    assert_eq!(
+        fake.call_count(),
+        1,
+        "should not re-compact on subsequent turn"
+    );
+
+    // transcript 仍含摘要（未恢复旧消息）。
+    let snapshot = handle.snapshot();
+    let has_summary = snapshot.messages.iter().any(|m| {
+        matches!(m.as_ref(), Message::User(u) if u.content.first()
+            == Some(&UserContent::Text { text: "SUMMARY".to_string() }))
+    });
+    assert!(has_summary, "summary should still be in transcript");
+    // 旧消息 m0 不应恢复。
+    let m0_restored = snapshot.messages.iter().any(|m| {
+        m.as_ref()
+            == &Message::User(UserMessage {
+                content: vec![UserContent::Text {
+                    text: format!("m0{}", "x".repeat(400)),
+                }],
+                timestamp: 0,
+            })
+    });
+    assert!(!m0_restored, "m0 should not be restored");
+}

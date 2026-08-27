@@ -135,13 +135,21 @@ async fn test_compact_accumulates_text_and_builds_request() {
 
     let req = provider.last_request().expect("provider should be called");
     assert_eq!(req.context.system_prompt, "summarize this");
+    // 规格「默认拼接格式」：待压缩消息序列化为**单条 user 输入**。
     assert_eq!(
         req.context.messages.len(),
-        2,
-        "messages should be the input messages"
+        1,
+        "messages should be a single serialized user input"
     );
-    assert_eq!(req.context.messages[0], *messages[0]);
-    assert_eq!(req.context.messages[1], *messages[1]);
+    let expected = format_messages_for_summary(&messages);
+    assert_eq!(
+        req.context.messages[0],
+        Message::User(UserMessage {
+            content: vec![UserContent::Text { text: expected }],
+            timestamp: 0,
+        }),
+        "the single message should be the serialized user input"
+    );
     assert!(req.context.tools.is_empty(), "tools should be empty");
 }
 
@@ -192,6 +200,40 @@ async fn test_compact_empty_input() {
         })
         .await;
     assert!(matches!(result, Err(CompactionError::EmptyInput)));
+}
+
+/// 流仅 `Done`（无 `TextDelta`）→ 空摘要 → EmptySummary 错误（触发降级）。
+#[tokio::test]
+async fn test_compact_done_only_empty_summary_is_error() {
+    let provider = ScriptedProvider::new(vec![done_event("")]);
+    let compactor = LlmCompactor::new(provider, model(), "p");
+    let result = compactor
+        .compact(CompactionRequest {
+            messages: vec![user_msg("a")],
+            signal: CancellationToken::new(),
+        })
+        .await;
+    assert!(
+        matches!(result, Err(CompactionError::EmptySummary)),
+        "done-only (no text) should be EmptySummary error"
+    );
+}
+
+/// 流自然结束（无任何事件）→ 空摘要 → EmptySummary 错误。
+#[tokio::test]
+async fn test_compact_stream_end_no_text_is_error() {
+    let provider = ScriptedProvider::new(vec![]);
+    let compactor = LlmCompactor::new(provider, model(), "p");
+    let result = compactor
+        .compact(CompactionRequest {
+            messages: vec![user_msg("a")],
+            signal: CancellationToken::new(),
+        })
+        .await;
+    assert!(
+        matches!(result, Err(CompactionError::EmptySummary)),
+        "stream end with no text should be EmptySummary error"
+    );
 }
 
 /// 调用前已取消 → Cancelled。

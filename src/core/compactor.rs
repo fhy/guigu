@@ -15,7 +15,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::message::{
-    AssistantContent, Message, ThinkingLevel, ToolResultContent, UserContent,
+    AssistantContent, Message, ThinkingLevel, ToolResultContent, UserContent, UserMessage,
 };
 use crate::core::provider::{
     AssistantEvent, Context, Model, ModelProvider, ProviderError, ProviderRequest,
@@ -46,6 +46,12 @@ pub enum CompactionError {
     /// 待压缩消息为空。
     #[error("no messages to compact")]
     EmptyInput,
+    /// 摘要流未产出任何文本（流自然结束或仅 `Done` 而无 `TextDelta`）。
+    ///
+    /// 视为错误而非空摘要成功：空摘要注入 transcript 会静默吞掉被压缩的
+    /// 历史上下文，故走降级路径（保守截断）更明确、更安全。
+    #[error("summary produced no text")]
+    EmptySummary,
 }
 
 /// 摘要压缩器：职责单一——给一批消息，产出一条摘要。
@@ -89,12 +95,17 @@ impl Compactor for LlmCompactor {
             return Err(CompactionError::Cancelled);
         }
         // 构造 provider 请求：system_prompt = 摘要 prompt；messages = 待压缩消息
-        // （原样，作为待摘要内容）；tools 为空（摘要无需工具）。
+        // 序列化为**单条 user 输入**（规格「默认拼接格式」稳定契约，见
+        // `format_messages_for_summary`）；tools 为空（摘要无需工具）。
+        let serialized = format_messages_for_summary(&req.messages);
         let request = ProviderRequest {
             model: self.model.clone(),
             context: Context {
                 system_prompt: self.summary_prompt.clone(),
-                messages: req.messages.iter().map(|m| (**m).clone()).collect(),
+                messages: vec![Message::User(UserMessage {
+                    content: vec![UserContent::Text { text: serialized }],
+                    timestamp: 0,
+                })],
                 tools: Vec::new(),
             },
             thinking_level: ThinkingLevel::Off,
@@ -133,6 +144,11 @@ impl Compactor for LlmCompactor {
                     }
                 }
             }
+        }
+        // 流未产出任何文本（自然结束或仅 Done）→ 视为错误，触发降级，
+        // 避免空摘要静默吞掉被压缩的历史上下文。
+        if summary.is_empty() {
+            return Err(CompactionError::EmptySummary);
         }
         Ok(CompactionResult { summary })
     }

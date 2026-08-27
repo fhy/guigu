@@ -120,8 +120,14 @@ impl Default for CompactionPolicy {
 /// - 未超预算：原样返回（不压缩）。
 /// - 超预算：前 `len - keep_recent` 条压缩为一条摘要，摘要作为一条 `User` 消息
 ///   置于保留消息之前（不新增 `Message` 变体，不破坏 002 消息拓扑）。
-/// - 压缩失败（Provider 错误 / 取消 / 空输入）：降级为保守截断——仅保留最近
-///   `keep_recent` 条，不阻断运行（与一期「超限截断」契约兼容）。
+/// - 压缩失败（Provider 错误 / 取消 / 空输入 / 空摘要）：降级为保守截断——仅保留
+///   最近 `keep_recent` 条，不阻断运行（与一期「超限截断」契约兼容）。
+///
+/// **持久化语义（有意为之，非单次请求投影）**：调用方（runtime 主循环）将返回值
+/// **回写 transcript**，即摘要替换 / 降级截断是**持久**的——被压缩的旧消息被永久
+/// 替换（或丢弃），**不会**在后续 turn 恢复，也**不会**对已压缩内容重复压缩
+/// （除非 transcript 再次超预算）。调用方不应把本函数当作「仅对本次请求生效的
+/// 投影」；它改变的是 agent 的权威 transcript 状态。
 pub async fn prepare_context(
     messages: Vec<Arc<Message>>,
     policy: &CompactionPolicy,
@@ -390,5 +396,43 @@ mod tests {
         .await;
         assert_eq!(out, vec![big], "split==0 应原样返回");
         assert_eq!(compactor.call_count(), 0, "split==0 不应调用 compactor");
+    }
+
+    /// 持久化语义：压缩结果回写 transcript 后，后续调用（预算内）不重复压缩、
+    /// 不恢复旧消息（验证「非单次请求投影」的持久契约）。
+    #[tokio::test]
+    async fn test_prepare_context_persistent_no_recompact() {
+        let compactor = FakeCompactor::ok("SUMMARY");
+        let policy = CompactionPolicy {
+            budget_tokens: 200,
+            keep_recent: 1,
+        };
+        // 第一次：3 条大消息（超预算）→ 压缩为 [摘要, m2]。
+        let m0 = user_msg(&format!("m0{}", "x".repeat(400)));
+        let m1 = user_msg(&format!("m1{}", "x".repeat(400)));
+        let m2 = user_msg(&format!("m2{}", "x".repeat(400)));
+        let first = prepare_context(
+            vec![m0.clone(), m1.clone(), m2.clone()],
+            &policy,
+            compactor.as_ref(),
+            CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(first.len(), 2, "摘要 + 保留 1 条");
+        assert_eq!(compactor.call_count(), 1, "第一次应压缩");
+
+        // 第二次：以第一次结果（已回写 transcript，预算内）为输入 → 不重复压缩。
+        let second = prepare_context(
+            first.clone(),
+            &policy,
+            compactor.as_ref(),
+            CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(second, first, "预算内应原样返回（不重复压缩）");
+        assert_eq!(compactor.call_count(), 1, "第二次不应再调用 compactor");
+        // 旧消息 m0/m1 不恢复。
+        assert!(!second.contains(&m0), "m0 不应恢复");
+        assert!(!second.contains(&m1), "m1 不应恢复");
     }
 }
