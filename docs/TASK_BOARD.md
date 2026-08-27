@@ -9,6 +9,17 @@
 - [x] 003 — Tool trait + Runtime 执行引擎（依赖 001、002）
 - [x] 004 — 最小 Echo Agent 端到端（依赖 003）
 
+## 二期 Backlog（优先级已排定，逐个实现）
+
+实施顺序：005 → 006 → 007 → 008 → 009 → 010
+
+- [~] 005 — 内置文件工具 read/write/edit（ReadOnly + FileWriter，复用 003 Tool trait）
+- [ ] 006 — bash 工具 + file_mutation_queue（Exclusive + 跨 agent 同文件写串行化）
+- [ ] 007 — adapters（OpenAI/Anthropic，reqwest feature-gated）
+- [ ] 008 — 上下文摘要压缩 Compactor（依赖 007 真实现）
+- [ ] 009 — Session 树 + JSONL 崩溃恢复
+- [ ] 010 — 远程协议
+
 ## 备注
 
 - 实施顺序：002 → 001 → 003 → 004
@@ -19,4 +30,4 @@
 - 004 规格 v1.3（2026-08-26，Architect 三次重核验）：Developer 预实现审查发现 v1.2 正文误记工具注册契约——工具注册在 003 定稿中已落 `AgentRuntime.tools`（非 `AgentConfig`），spawn 为双参；本次修正第 28/35 行，工具经 `AgentRuntime { tools }` 注册 + 双参 spawn，不再给 `AgentConfig` 加 `tools` 字段（消除双重事实源）。旧实现（8-22，567265b）早于 001/003 定稿已过期，需按 v1.3 重做
 - 004 已于 r1 审查通过（2026-08-27，docs/reviews/004-review-r1.md）：四门禁全绿、40 测试通过；EchoTool 签名与 003 定稿一致，工具经 `AgentRuntime.tools` + 双参 spawn
 - 一期（002/001/003/004）全部完成并审查通过，核心运行时 + 最小端到端闭环
-- 二期（待 PM 排期）：内置工具集(read/write/edit/bash + file_mutation_queue)、adapters(OpenAI/Anthropic)、上下文摘要压缩、Session 树/JSONL 崩溃恢复、远程协议
+- 二期优先级依据（2026-08-27，Architect 排定）：005 文件工具最基础、零外部依赖，直接复用 003 Tool trait + 004 的 src/tools 结构；006 bash（Exclusive 验证独占编排）+ file_mutation_queue（跨 agent 写串行化安全底座）；007 adapters 接真实 LLM（fake provider → 生产）；008 压缩真实现需调用 LLM 摘要，故在 007 之后；009 session 持久化独立但价值次于"接真实模型+可摘要"；010 远程协议最外层最后
