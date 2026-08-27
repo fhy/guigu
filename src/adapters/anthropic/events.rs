@@ -46,9 +46,9 @@ fn dispatch(
 ) -> Result<Vec<AssistantEvent>, ProviderError> {
     let v: Value = serde_json::from_str(data).map_err(|e| ProviderError::Parse(e.to_string()))?;
     match event_type {
-        "content_block_start" => Ok(super::blocks::handle_block_start(&v, acc)),
-        "content_block_delta" => Ok(super::blocks::handle_block_delta(&v, acc)),
-        "content_block_stop" => Ok(super::blocks::handle_block_stop(&v, acc)),
+        "content_block_start" => super::blocks::handle_block_start(&v, acc),
+        "content_block_delta" => super::blocks::handle_block_delta(&v, acc),
+        "content_block_stop" => super::blocks::handle_block_stop(&v, acc),
         "message_start" => {
             // input_tokens 在 message_start 提供。
             if let Some(input) = v
@@ -183,6 +183,11 @@ mod tests {
     #[test]
     fn message_stop_builds_done() {
         let mut acc = Acc::new("claude".into());
+        let _ = map(
+            "content_block_start",
+            r#"{"index":0,"content_block":{"type":"text","text":""}}"#,
+            &mut acc,
+        );
         let _ = map(
             "content_block_delta",
             r#"{"index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,

@@ -2,240 +2,177 @@
 //!
 //! `content_block_start` / `content_block_delta` / `content_block_stop`
 //! 由 [`super::events::dispatch`] 解析 JSON 后分发至此。
+//!
+//! 每个 text/thinking block 按 content_block index **独立累积**（多个同类型
+//! block 不合并）；缺少/非法 `index` 或 block 类型字段返回可诊断的
+//! `ProviderError::Parse`，避免异常响应污染第 0 个 block。
 
 use serde_json::Value;
 
-use crate::core::provider::AssistantEvent;
+use crate::core::provider::{AssistantEvent, ProviderError};
 
 use super::super::acc::{Acc, SegmentKind};
 
-/// `content_block_start`：tool_use → `ToolCallStart`；text/thinking 仅记录块种类。
-pub(crate) fn handle_block_start(v: &Value, acc: &mut Acc) -> Vec<AssistantEvent> {
-    let index = v.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-    let block = &v["content_block"];
-    let block_type = block
-        .get("type")
-        .and_then(|t| t.as_str())
-        .unwrap_or_default();
+/// 提取并校验 `index` 字段（缺失/非数字 → `Parse`）。
+fn block_index(v: &Value, event: &str) -> Result<usize, ProviderError> {
+    v.get("index")
+        .and_then(|i| i.as_u64())
+        .map(|i| i as usize)
+        .ok_or_else(|| ProviderError::Parse(format!("{event} missing valid index")))
+}
+
+/// `content_block_start`：tool_use → `ToolCallStart`；text/thinking 新建独立 block。
+pub(crate) fn handle_block_start(
+    v: &Value,
+    acc: &mut Acc,
+) -> Result<Vec<AssistantEvent>, ProviderError> {
+    let index = block_index(v, "content_block_start")?;
+    let block = v
+        .get("content_block")
+        .ok_or_else(|| ProviderError::Parse("content_block_start missing content_block".into()))?;
+    let block_type = block.get("type").and_then(|t| t.as_str()).ok_or_else(|| {
+        ProviderError::Parse("content_block_start missing content_block.type".into())
+    })?;
     match block_type {
         "tool_use" => {
-            let id = block
-                .get("id")
-                .and_then(|i| i.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let name = block
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let tc_idx = acc.start_tool_call(id.clone(), name.clone());
+            let id = block.get("id").and_then(|i| i.as_str()).ok_or_else(|| {
+                ProviderError::Parse("content_block_start tool_use missing id".into())
+            })?;
+            let name = block.get("name").and_then(|n| n.as_str()).ok_or_else(|| {
+                ProviderError::Parse("content_block_start tool_use missing name".into())
+            })?;
+            let tc_idx = acc.start_tool_call(id.to_string(), name.to_string());
             acc.note_block(index, SegmentKind::ToolCall(tc_idx));
-            vec![AssistantEvent::ToolCallStart {
-                id,
-                name,
+            Ok(vec![AssistantEvent::ToolCallStart {
+                id: id.to_string(),
+                name: name.to_string(),
                 arguments: String::new(),
-            }]
+            }])
         }
         "text" => {
-            acc.ensure_text();
-            acc.note_block(index, SegmentKind::Text);
-            Vec::new()
+            let seg = acc.start_text_block();
+            acc.note_block(index, SegmentKind::Text(seg));
+            Ok(Vec::new())
         }
         "thinking" => {
-            acc.ensure_thinking();
-            acc.note_block(index, SegmentKind::Thinking);
-            Vec::new()
+            let seg = acc.start_thinking_block();
+            acc.note_block(index, SegmentKind::Thinking(seg));
+            Ok(Vec::new())
         }
-        _ => Vec::new(),
+        other => Err(ProviderError::Parse(format!(
+            "content_block_start unknown block type: {other}"
+        ))),
     }
 }
 
 /// `content_block_delta`：text_delta / thinking_delta / input_json_delta。
-pub(crate) fn handle_block_delta(v: &Value, acc: &mut Acc) -> Vec<AssistantEvent> {
-    let index = v.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-    let delta = &v["delta"];
+pub(crate) fn handle_block_delta(
+    v: &Value,
+    acc: &mut Acc,
+) -> Result<Vec<AssistantEvent>, ProviderError> {
+    let index = block_index(v, "content_block_delta")?;
+    let delta = v
+        .get("delta")
+        .ok_or_else(|| ProviderError::Parse("content_block_delta missing delta".into()))?;
     let delta_type = delta
         .get("type")
         .and_then(|t| t.as_str())
-        .unwrap_or_default();
+        .ok_or_else(|| ProviderError::Parse("content_block_delta missing delta.type".into()))?;
     match delta_type {
         "text_delta" => {
             let text = delta
                 .get("text")
                 .and_then(|t| t.as_str())
-                .unwrap_or_default()
-                .to_string();
-            acc.append_text(&text);
-            vec![AssistantEvent::TextDelta { text }]
+                .ok_or_else(|| ProviderError::Parse("text_delta missing text".into()))?;
+            let seg = match acc.block_kind(index) {
+                Some(SegmentKind::Text(i)) => *i,
+                other => {
+                    return Err(ProviderError::Parse(format!(
+                        "text_delta for block {index} without text block start (kind: {other:?})"
+                    )));
+                }
+            };
+            acc.append_text_block(seg, text);
+            Ok(vec![AssistantEvent::TextDelta {
+                text: text.to_string(),
+            }])
         }
         "thinking_delta" => {
             let thinking = delta
                 .get("thinking")
                 .and_then(|t| t.as_str())
-                .unwrap_or_default()
-                .to_string();
-            acc.append_thinking(&thinking);
-            vec![AssistantEvent::ThinkingDelta { thinking }]
+                .ok_or_else(|| ProviderError::Parse("thinking_delta missing thinking".into()))?;
+            let seg = match acc.block_kind(index) {
+                Some(SegmentKind::Thinking(i)) => *i,
+                other => {
+                    return Err(ProviderError::Parse(format!(
+                        "thinking_delta for block {index} without thinking block start (kind: {other:?})"
+                    )));
+                }
+            };
+            acc.append_thinking_block(seg, thinking);
+            Ok(vec![AssistantEvent::ThinkingDelta {
+                thinking: thinking.to_string(),
+            }])
         }
         "input_json_delta" => {
             let partial = delta
                 .get("partial_json")
                 .and_then(|t| t.as_str())
-                .unwrap_or_default()
-                .to_string();
+                .ok_or_else(|| {
+                    ProviderError::Parse("input_json_delta missing partial_json".into())
+                })?;
             let tc_idx = match acc.block_kind(index) {
                 Some(SegmentKind::ToolCall(i)) => *i,
-                _ => return Vec::new(),
+                other => {
+                    return Err(ProviderError::Parse(format!(
+                        "input_json_delta for block {index} without tool_use block start (kind: {other:?})"
+                    )));
+                }
             };
-            if let Some(tca) = acc.tool_calls.get_mut(tc_idx) {
-                tca.arguments.push_str(&partial);
-                vec![AssistantEvent::ToolCallDelta {
-                    id: tca.id.clone(),
-                    arguments_delta: partial,
-                }]
-            } else {
-                Vec::new()
-            }
+            let id = acc
+                .tool_calls
+                .get(tc_idx)
+                .map(|t| t.id.clone())
+                .ok_or_else(|| {
+                    ProviderError::Parse(format!("tool call {tc_idx} missing for block {index}"))
+                })?;
+            acc.tool_calls[tc_idx].arguments.push_str(partial);
+            Ok(vec![AssistantEvent::ToolCallDelta {
+                id,
+                arguments_delta: partial.to_string(),
+            }])
         }
-        _ => Vec::new(),
+        other => Err(ProviderError::Parse(format!(
+            "content_block_delta unknown delta type: {other}"
+        ))),
     }
 }
 
-/// `content_block_stop`：tool_use → `ToolCallEnd`；其它块不产出事件。
-pub(crate) fn handle_block_stop(v: &Value, acc: &mut Acc) -> Vec<AssistantEvent> {
-    let index = v.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-    let tc_idx = match acc.block_kind(index) {
-        Some(SegmentKind::ToolCall(i)) => *i,
-        _ => return Vec::new(),
-    };
-    let id = match acc.tool_calls.get(tc_idx) {
-        Some(tca) => tca.id.clone(),
-        None => return Vec::new(),
-    };
-    acc.end_tool_call(&id);
-    vec![AssistantEvent::ToolCallEnd { id }]
+/// `content_block_stop`：tool_use → `ToolCallEnd`；text/thinking 不产出事件。
+pub(crate) fn handle_block_stop(
+    v: &Value,
+    acc: &mut Acc,
+) -> Result<Vec<AssistantEvent>, ProviderError> {
+    let index = block_index(v, "content_block_stop")?;
+    match acc.block_kind(index) {
+        Some(SegmentKind::ToolCall(tc_idx)) => {
+            let id = acc
+                .tool_calls
+                .get(*tc_idx)
+                .map(|t| t.id.clone())
+                .ok_or_else(|| {
+                    ProviderError::Parse(format!("tool call {tc_idx} missing for block {index}"))
+                })?;
+            acc.end_tool_call(&id);
+            Ok(vec![AssistantEvent::ToolCallEnd { id }])
+        }
+        Some(SegmentKind::Text(_)) | Some(SegmentKind::Thinking(_)) => Ok(Vec::new()),
+        None => Err(ProviderError::Parse(format!(
+            "content_block_stop for unknown block index {index}"
+        ))),
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn parse(s: &str) -> Value {
-        serde_json::from_str(s).expect("valid json")
-    }
-
-    #[test]
-    fn block_start_text_no_event() {
-        let mut acc = Acc::new("m".into());
-        let events = handle_block_start(
-            &parse(r#"{"index":0,"content_block":{"type":"text","text":""}}"#),
-            &mut acc,
-        );
-        assert!(events.is_empty());
-        assert!(matches!(acc.block_kind(0), Some(SegmentKind::Text)));
-    }
-
-    #[test]
-    fn block_start_tool_use_emits_start() {
-        let mut acc = Acc::new("m".into());
-        let events = handle_block_start(
-            &parse(
-                r#"{"index":0,"content_block":{"type":"tool_use","id":"tu_1","name":"search"}}"#,
-            ),
-            &mut acc,
-        );
-        assert_eq!(
-            events,
-            vec![AssistantEvent::ToolCallStart {
-                id: "tu_1".into(),
-                name: "search".into(),
-                arguments: String::new()
-            }]
-        );
-        assert!(matches!(acc.block_kind(0), Some(SegmentKind::ToolCall(0))));
-    }
-
-    #[test]
-    fn text_delta() {
-        let mut acc = Acc::new("m".into());
-        let events = handle_block_delta(
-            &parse(r#"{"index":0,"delta":{"type":"text_delta","text":"Hello"}}"#),
-            &mut acc,
-        );
-        assert_eq!(
-            events,
-            vec![AssistantEvent::TextDelta {
-                text: "Hello".into()
-            }]
-        );
-        assert_eq!(acc.text, "Hello");
-    }
-
-    #[test]
-    fn thinking_delta() {
-        let mut acc = Acc::new("m".into());
-        let events = handle_block_delta(
-            &parse(r#"{"index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}"#),
-            &mut acc,
-        );
-        assert_eq!(
-            events,
-            vec![AssistantEvent::ThinkingDelta {
-                thinking: "hmm".into()
-            }]
-        );
-        assert_eq!(acc.thinking, "hmm");
-    }
-
-    #[test]
-    fn input_json_delta_accumulates() {
-        let mut acc = Acc::new("m".into());
-        let _ = handle_block_start(
-            &parse(
-                r#"{"index":0,"content_block":{"type":"tool_use","id":"tu_1","name":"search"}}"#,
-            ),
-            &mut acc,
-        );
-        let events = handle_block_delta(
-            &parse(r#"{"index":0,"delta":{"type":"input_json_delta","partial_json":"{\"q\":"}}"#),
-            &mut acc,
-        );
-        assert_eq!(
-            events,
-            vec![AssistantEvent::ToolCallDelta {
-                id: "tu_1".into(),
-                arguments_delta: "{\"q\":".into()
-            }]
-        );
-        assert_eq!(acc.tool_calls[0].arguments, "{\"q\":");
-    }
-
-    #[test]
-    fn block_stop_tool_use_emits_end() {
-        let mut acc = Acc::new("m".into());
-        let _ = handle_block_start(
-            &parse(
-                r#"{"index":0,"content_block":{"type":"tool_use","id":"tu_1","name":"search"}}"#,
-            ),
-            &mut acc,
-        );
-        let events = handle_block_stop(&parse(r#"{"index":0}"#), &mut acc);
-        assert_eq!(
-            events,
-            vec![AssistantEvent::ToolCallEnd { id: "tu_1".into() }]
-        );
-        assert!(acc.tool_calls[0].done);
-    }
-
-    #[test]
-    fn block_stop_text_no_event() {
-        let mut acc = Acc::new("m".into());
-        let _ = handle_block_start(
-            &parse(r#"{"index":0,"content_block":{"type":"text","text":""}}"#),
-            &mut acc,
-        );
-        let events = handle_block_stop(&parse(r#"{"index":0}"#), &mut acc);
-        assert!(events.is_empty());
-    }
-}
+mod tests;
