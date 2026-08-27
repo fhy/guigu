@@ -13,8 +13,8 @@
 
 实施顺序：005 → 006 → 007 → 008 → 009 → 010
 
-- [~] 005 — 内置文件工具 read/write/edit（ReadOnly + FileWriter，复用 003 Tool trait）
-- [ ] 006 — bash 工具 + file_mutation_queue（Exclusive + 跨 agent 同文件写串行化）
+- [x] 005 — 内置文件工具 read/write/edit（ReadOnly + FileWriter，复用 003 Tool trait）
+- [~] 006 — bash 工具 + file_mutation_queue（Exclusive + 跨 agent 同文件写串行化）
 - [ ] 007 — adapters（OpenAI/Anthropic，reqwest feature-gated）
 - [ ] 008 — 上下文摘要压缩 Compactor（依赖 007 真实现）
 - [ ] 009 — Session 树 + JSONL 崩溃恢复
@@ -31,3 +31,4 @@
 - 004 已于 r1 审查通过（2026-08-27，docs/reviews/004-review-r1.md）：四门禁全绿、40 测试通过；EchoTool 签名与 003 定稿一致，工具经 `AgentRuntime.tools` + 双参 spawn
 - 一期（002/001/003/004）全部完成并审查通过，核心运行时 + 最小端到端闭环
 - 二期优先级依据（2026-08-27，Architect 排定）：005 文件工具最基础、零外部依赖，直接复用 003 Tool trait + 004 的 src/tools 结构；006 bash（Exclusive 验证独占编排）+ file_mutation_queue（跨 agent 写串行化安全底座）；007 adapters 接真实 LLM（fake provider → 生产）；008 压缩真实现需调用 LLM 摘要，故在 007 之后；009 session 持久化独立但价值次于"接真实模型+可摘要"；010 远程协议最外层最后
+- 006 规格 v1（2026-08-27，Architect）：FileMutationQueue 为进程内 per-path 异步写锁（RAII guard，跨 agent 同文件串行化），WriteTool/EditTool 改为 `new(Arc<FileMutationQueue>)` 注入；BashTool 声明 Exclusive（单 agent 独占由 003 主循环保证）、`sh -c` 子进程 + kill_on_drop + 取消/超时 kill、非零退出走 `ToolResult::is_error` 不 throw。明确边界：跨进程串行化、bash 跨 agent 独占（需全局读写锁层级）不在本任务。tokio `full` 已含 process/time，无需改 Cargo.toml
