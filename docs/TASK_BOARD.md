@@ -16,7 +16,7 @@
 - [x] 005 — 内置文件工具 read/write/edit（ReadOnly + FileWriter，复用 003 Tool trait）
 - [x] 006 — bash 工具 + file_mutation_queue（Exclusive + 跨 agent 同文件写串行化）
 - [x] 007 — adapters（OpenAI/Anthropic，reqwest feature-gated）
-- [ ] 008 — 上下文摘要压缩 Compactor（依赖 007 真实现）
+- [x] 008 — 上下文摘要压缩 Compactor（依赖 007 真实现）
 - [ ] 009 — Session 树 + JSONL 崩溃恢复
 - [ ] 010 — 远程协议
 
@@ -35,4 +35,4 @@
 - 006 已于 r1 审查通过（2026-08-27，docs/reviews/006-review-r1.md）：四门禁全绿、84 测试通过（23 lib + 10 bash + 1 queue + 14 tools + 36 既有）；v1.1 三处修订（wait_with_output→child.wait()、kill+wait 严格 reap、锁表只增不减）均正确落地，FileMutationQueue 惰性建锁 + OwnedMutexGuard 设计符合规格建议
 - 007 规格 v1.0（2026-08-27，Architect）：复用 003 定稿 ModelProvider/AssistantStream/AssistantEvent/ProviderRequest（不改签名）；ProviderError 四类语义（Network/HttpStatus/Parse/Build，若 003 缺变体则补齐）；default feature 含 providers-http（保证 DoD `cargo test` 覆盖 adapter，嵌入方 default-features=false 剥离 reqwest）；SSE/请求构造/事件映射/累积四层纯逻辑 + wiremock 端到端测试；Model/Context 具体字段形状以 core/provider.rs 003 实际实现为准（语义固定，见规格映射表）
 - 007 已于 r5 审查通过（2026-08-27，docs/reviews/007-review-r5.md）：四门禁全绿、180 测试通过（含 `--no-default-features` 75 通过，验证 default-features=false 可剥离 reqwest）；r2/r3/r4 打回项（重复 block index / 重复 stop / OpenAI 错误路径状态一致）均核销，r5 无阻塞问题
-- 008 规格 v1.1（2026-08-28，Architect，依据 Developer 实现反馈修订）：LlmCompactor 将待压缩消息序列化为单条 User 输入（format_messages_for_summary 默认格式，非原样透传）；新增 EmptySummary 错误变体（空摘要视为错误并触发降级）；修正伪代码注释与验收标准自相矛盾处。实现已提交（6824e17）待 r1 复审
+- 008 已于 r2 审查通过（2026-08-28，docs/reviews/008-review-r2.md）：四门禁全绿、r1 三项问题全部核销；规格 v1.1 消除正文与伪代码矛盾
