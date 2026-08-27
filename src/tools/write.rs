@@ -1,7 +1,9 @@
 //! WriteTool：写入文件内容（自动创建父目录，覆盖写）。
 //!
-//! `FileWriter` 范围：与其他 `FileWriter` 工具串行（二期走 file_mutation_queue）。
-//! 覆盖写；原子写属 006。
+//! `FileWriter` 范围：跨 agent 同文件写由注入的 `FileMutationQueue` 串行化
+//! （写 IO 在 guard 持有期间执行）。覆盖写；原子写属后续任务。
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -9,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::message::ToolResultContent;
 use crate::core::tool::{ResourceScope, Tool, ToolError, ToolResult};
+use crate::tools::file_mutation_queue::FileMutationQueue;
 
 /// WriteTool 参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,8 +23,20 @@ pub struct WriteArgs {
 }
 
 /// 文件写入工具：把内容写入文件（自动创建父目录，覆盖已有文件）。
+///
+/// 构造时注入 `Arc<FileMutationQueue>`，写 IO 前 acquire 同路径写锁、
+/// 写后 RAII 释放，实现跨 agent 同文件写串行化。
 #[derive(Debug, Clone)]
-pub struct WriteTool;
+pub struct WriteTool {
+    queue: Arc<FileMutationQueue>,
+}
+
+impl WriteTool {
+    /// 注入跨 agent 写锁队列。
+    pub fn new(queue: Arc<FileMutationQueue>) -> Self {
+        WriteTool { queue }
+    }
+}
 
 #[async_trait]
 impl Tool for WriteTool {
@@ -65,6 +80,23 @@ impl Tool for WriteTool {
             .map_err(|e| ToolError::invalid_arguments(e.to_string()))?;
 
         let path = &write_args.path;
+
+        // 可取消 acquire：等待同路径写锁期间可被 signal 打断。
+        let _guard = tokio::select! {
+            g = self.queue.acquire(std::path::Path::new(path)) => g,
+            _ = signal.cancelled() => {
+                return Err(ToolError::new(
+                    "cancelled: write aborted while waiting for file lock".to_string(),
+                ));
+            }
+        };
+        // 拿锁后二次取消检查，消除 acquire 等待期间被取消的竞态。
+        if signal.is_cancelled() {
+            return Err(ToolError::new(
+                "cancelled: write aborted after acquiring file lock".to_string(),
+            ));
+        }
+
         if let Some(parent) = std::path::Path::new(path).parent()
             && !parent.as_os_str().is_empty()
         {
@@ -95,24 +127,27 @@ impl Tool for WriteTool {
 mod tests {
     use super::*;
 
+    /// 构造带独立写锁队列的 WriteTool（测试统一入口）。
+    fn tool() -> WriteTool {
+        WriteTool::new(Arc::new(FileMutationQueue::new()))
+    }
+
     /// WriteTool 名称应为 "write"。
     #[test]
     fn test_write_tool_name() {
-        assert_eq!(WriteTool.name(), "write");
+        assert_eq!(tool().name(), "write");
     }
 
     /// WriteTool 应为 FileWriter 范围。
     #[test]
     fn test_write_tool_resource_scope() {
-        assert_eq!(WriteTool.resource_scope(), ResourceScope::FileWriter);
+        assert_eq!(tool().resource_scope(), ResourceScope::FileWriter);
     }
 
     /// WriteTool 应声明参数 schema（path/content 必填）。
     #[test]
     fn test_write_tool_parameters() {
-        let params = WriteTool
-            .parameters()
-            .expect("parameters should be declared");
+        let params = tool().parameters().expect("parameters should be declared");
         assert_eq!(params["type"], "object");
         let required = params["required"]
             .as_array()
@@ -124,7 +159,7 @@ mod tests {
     /// WriteTool 缺少 content 字段应返回 invalid_arguments。
     #[tokio::test]
     async fn test_write_tool_missing_content() {
-        let result = WriteTool
+        let result = tool()
             .execute(
                 "call1",
                 serde_json::json!({ "path": "/nonexistent/guigu-test-x" }),
@@ -147,7 +182,7 @@ mod tests {
     async fn test_write_tool_cancelled() {
         let signal = CancellationToken::new();
         signal.cancel();
-        let result = WriteTool
+        let result = tool()
             .execute(
                 "call1",
                 serde_json::json!({ "path": "/nonexistent/guigu-test-never", "content": "x" }),

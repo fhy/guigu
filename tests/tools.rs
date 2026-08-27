@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use guigu::core::message::ToolResultContent;
 use guigu::core::tool::{ResourceScope, Tool, ToolError, ToolResult};
-use guigu::tools::{EditTool, ReadTool, WriteTool};
+use guigu::tools::{EditTool, FileMutationQueue, ReadTool, WriteTool};
 use tokio_util::sync::CancellationToken;
 
 /// 生成唯一临时目录（进程 id + 计数器），保证测试间隔离。
@@ -24,11 +24,11 @@ fn read_tool() -> Arc<dyn Tool> {
 }
 
 fn write_tool() -> Arc<dyn Tool> {
-    Arc::new(WriteTool)
+    Arc::new(WriteTool::new(Arc::new(FileMutationQueue::new())))
 }
 
 fn edit_tool() -> Arc<dyn Tool> {
-    Arc::new(EditTool)
+    Arc::new(EditTool::new(Arc::new(FileMutationQueue::new())))
 }
 
 /// 用未取消的 signal 执行工具（测试统一入口）。

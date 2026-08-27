@@ -1,7 +1,10 @@
 //! EditTool：把文件中唯一出现的 old_string 替换为 new_string。
 //!
-//! `FileWriter` 范围：与其他 `FileWriter` 工具串行（二期走 file_mutation_queue）。
-//! 要求 old_string 在文件中唯一；0 处或 >1 处匹配均为错误。
+//! `FileWriter` 范围：跨 agent 同文件写由注入的 `FileMutationQueue` 串行化
+//! （写 IO 在 guard 持有期间执行）。要求 old_string 在文件中唯一；0 处或 >1 处
+//! 匹配均为错误。
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -9,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::message::ToolResultContent;
 use crate::core::tool::{ResourceScope, Tool, ToolError, ToolResult};
+use crate::tools::file_mutation_queue::FileMutationQueue;
 
 /// EditTool 参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,8 +26,20 @@ pub struct EditArgs {
 }
 
 /// 文件编辑工具：把文件中唯一出现的 old_string 替换为 new_string。
+///
+/// 构造时注入 `Arc<FileMutationQueue>`，写 IO 前 acquire 同路径写锁、
+/// 写后 RAII 释放，实现跨 agent 同文件写串行化。
 #[derive(Debug, Clone)]
-pub struct EditTool;
+pub struct EditTool {
+    queue: Arc<FileMutationQueue>,
+}
+
+impl EditTool {
+    /// 注入跨 agent 写锁队列。
+    pub fn new(queue: Arc<FileMutationQueue>) -> Self {
+        EditTool { queue }
+    }
+}
 
 #[async_trait]
 impl Tool for EditTool {
@@ -68,6 +84,23 @@ impl Tool for EditTool {
             .map_err(|e| ToolError::invalid_arguments(e.to_string()))?;
 
         let path = &edit_args.path;
+
+        // 可取消 acquire：read-modify-write 全程持锁，避免跨 agent 丢更新。
+        let _guard = tokio::select! {
+            g = self.queue.acquire(std::path::Path::new(path)) => g,
+            _ = signal.cancelled() => {
+                return Err(ToolError::new(
+                    "cancelled: edit aborted while waiting for file lock".to_string(),
+                ));
+            }
+        };
+        // 拿锁后二次取消检查，消除 acquire 等待期间被取消的竞态。
+        if signal.is_cancelled() {
+            return Err(ToolError::new(
+                "cancelled: edit aborted after acquiring file lock".to_string(),
+            ));
+        }
+
         let meta = tokio::fs::metadata(path)
             .await
             .map_err(|e| ToolError::new(format!("edit {path}: {e}")))?;
@@ -121,24 +154,27 @@ impl Tool for EditTool {
 mod tests {
     use super::*;
 
+    /// 构造带独立写锁队列的 EditTool（测试统一入口）。
+    fn tool() -> EditTool {
+        EditTool::new(Arc::new(FileMutationQueue::new()))
+    }
+
     /// EditTool 名称应为 "edit"。
     #[test]
     fn test_edit_tool_name() {
-        assert_eq!(EditTool.name(), "edit");
+        assert_eq!(tool().name(), "edit");
     }
 
     /// EditTool 应为 FileWriter 范围。
     #[test]
     fn test_edit_tool_resource_scope() {
-        assert_eq!(EditTool.resource_scope(), ResourceScope::FileWriter);
+        assert_eq!(tool().resource_scope(), ResourceScope::FileWriter);
     }
 
     /// EditTool 应声明参数 schema（path/old_string/new_string 必填）。
     #[test]
     fn test_edit_tool_parameters() {
-        let params = EditTool
-            .parameters()
-            .expect("parameters should be declared");
+        let params = tool().parameters().expect("parameters should be declared");
         assert_eq!(params["type"], "object");
         let required = params["required"]
             .as_array()
@@ -151,7 +187,7 @@ mod tests {
     /// EditTool 缺少 old_string 字段应返回 invalid_arguments。
     #[tokio::test]
     async fn test_edit_tool_missing_old_string() {
-        let result = EditTool
+        let result = tool()
             .execute(
                 "call1",
                 serde_json::json!({ "path": "/nonexistent/guigu-test-x", "new_string": "y" }),
@@ -174,7 +210,7 @@ mod tests {
     async fn test_edit_tool_cancelled() {
         let signal = CancellationToken::new();
         signal.cancel();
-        let result = EditTool
+        let result = tool()
             .execute(
                 "call1",
                 serde_json::json!({
