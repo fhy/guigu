@@ -7,6 +7,10 @@ description = "A lightweight Rust-native AI Agent runtime"
 license = "MIT"
 repository = "https://github.com/fhy/guigu"
 
+[features]
+default = ["providers-http"]
+providers-http = ["dep:reqwest"]
+
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
@@ -16,9 +20,14 @@ tracing = "0.1"
 tokio-util = "0.7"
 futures = "0.3"
 async-trait = "0.1"
+# Optional：真实 LLM HTTP 适配器（OpenAI / Anthropic）。
+# 嵌入方 `default-features = false` 可剥离 reqwest，得到纯核心库。
+# 本构建环境无 OpenSSL 头文件，故用 rustls（纯 Rust）替代默认 native-tls。
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
+wiremock = "0.6"
 
 [[bin]]
 name = "guigu"

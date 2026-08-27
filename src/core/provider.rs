@@ -52,12 +52,26 @@ pub struct ProviderRequest {
 }
 
 /// provider 错误（仅"建立请求失败"这一外层阶段）。
+///
+/// 四类语义（007 补齐，保留既有 `Request`/`Aborted`）：
+/// - `Network`：连接失败 / 超时
+/// - `HttpStatus`：HTTP 非 2xx（401 认证 / 400 参数 / 429 限流 / 5xx）
+/// - `Parse`：SSE / JSON 结构非法
+/// - `Build`：请求体构造失败（防御性，正常不应发生）
 #[derive(Error, Debug)]
 pub enum ProviderError {
     #[error("Provider request failed: {0}")]
     Request(String),
     #[error("Provider request aborted")]
     Aborted,
+    #[error("Network error: {0}")]
+    Network(String),
+    #[error("HTTP status {status}: {body}")]
+    HttpStatus { status: u16, body: String },
+    #[error("Parse error: {0}")]
+    Parse(String),
+    #[error("Build error: {0}")]
+    Build(String),
 }
 
 /// assistant 流：provider 返回的增量事件流。
