@@ -43,7 +43,7 @@ pub struct FileMutationGuard<'a> { /* 持有锁，Drop 自动释放 */ }
 1. **锁粒度 per-path**：以规范化后的路径为 key，不同文件并行、同一文件互斥。规范化用 `std::path::absolute(path)`（失败则退回原始 `PathBuf` 作 key）；**一期不解析 symlink/hardlink**（同一物理文件经不同路径可能漏串行化，属已知局限，规格接受）。
 2. **RAII 释放**：`FileMutationGuard` Drop 即释放，覆盖异常/取消提前返回路径，不要求调用方显式 release。
 3. **可跨 await 持有**：guard 必须 `Send` 且可在文件 IO 的 `await` 期间持有。建议内部用 `Arc<tokio::sync::Mutex<()>>` + `lock_owned()` 得到 `OwnedMutexGuard`，规避借用 lifetime 复杂度（实现方式 Developer 可自定，但须满足 Send + 跨 await）。
-4. **惰性建锁**：按需为每个 path 建锁；锁表的并发访问用 `std::sync::Mutex`（锁表操作极短，不跨 await）。
+4. **惰性建锁**：按需为每个 path 建锁；锁表的并发访问用 `std::sync::Mutex`（锁表操作极短，不跨 await）。**一期锁表只增不减**：安全驱逐需两阶段 dying 态或代际计数（否则有竞态——A drop 后查 `strong_count==1` 准备移除，B 此刻 acquire 同 path 克隆旧 Arc（count=2）持旧锁进临界区，A 移除表项后 C 新 acquire 建新锁，B（旧锁）与 C（新锁）并发进临界区，互斥被破坏）；条目小（约 100–200B）、agent 触碰路径通常有界，故接受无界增长，与 symlink 局限并列声明为已知局限，后续任务按需再补。
 
 ### WriteTool / EditTool 改造
 
@@ -76,13 +76,13 @@ pub struct FileMutationGuard<'a> { /* 持有锁，Drop 自动释放 */ }
   1. 入口 `signal.is_cancelled()` 检查 → 取消 `ToolError`
   2. 反序列化失败 → `invalid_arguments`
   3. 以 `sh -c <command>` 启动子进程（**用 `sh` 而非 `bash`**，POSIX 可移植，且支持管道/重定向语义）；`Command` 设 `kill_on_drop(true)` 防泄漏；`cwd` 有值时设置
-  4. `spawn()` 拿 `Child`，用 `tokio::select!` 三路并发等待：
-     - `child.wait()` 完成 → 读 stdout/stderr（`wait_with_output`）
-     - `signal.cancelled()` → `child.kill()` 后返回取消 `ToolError`（消息含 "cancelled"）
-     - `sleep(timeout_ms)`（仅当设置了超时）→ `child.kill()` 后返回超时 `ToolError`（消息含 "timeout"）
+  4. `spawn()` 拿 `Child`；先 `take()` 出 `child.stdout` / `child.stderr`（`Option<ChildStdout>` / `Option<ChildStderr>`），若有则 `tokio::spawn` 并行 `read_to_end` 排空（避免管道缓冲写满死锁）；再用 `tokio::select!` 三路等待。**禁用 `wait_with_output`**：它按值消费 `Child`（`mut self`），而 `select!` 急切创建各分支 future，`child` 移入完成分支后，取消/超时分支的 `child.kill()` 变 use-after-move（E0382）；先 `wait()` 再 `wait_with_output()` 亦不可行（`wait()` 已 reap）：
+     - `child.wait()` 完成（`&mut self`，不移动 child）→ join 排空任务拿 stdout/stderr → 按退出码组装结果
+     - `signal.cancelled()` → `child.kill().await` 后 `child.wait().await`（严格 reap）→ 返回取消 `ToolError`（消息含 "cancelled"）
+     - `sleep(timeout_ms)`（仅当设置了超时）→ `child.kill().await` 后 `child.wait().await`（严格 reap）→ 返回超时 `ToolError`（消息含 "timeout"）
   5. **非零退出码不 throw**（Pi 哲学"错误不 throw"）：返回 `Ok(ToolResult { is_error: true, content: stderr 或组合文本, details: {"exit_code": n, "stdout": .., "stderr": ..} })`
   6. 成功（exit 0）→ `Ok(ToolResult::text(stdout))`，`details: {"exit_code": 0}`
-- **必须 kill 子进程**：取消/超时路径显式 `kill().await`（配合 `kill_on_drop`），不得泄漏僵尸进程
+- **必须 kill 且 reap 子进程**：取消/超时路径显式 `kill().await` 后 `wait().await`（严格 reap，不依赖 tokio best-effort reaper——`ChildDropGuard::drop` 只 `kill()` 不 reap，官方对孤儿进程回收仅 best-effort、不保证及时性），配合 `kill_on_drop(true)` 兜底，不得泄漏僵尸进程
 
 ### 错误语义统一
 
@@ -116,7 +116,7 @@ pub struct FileMutationGuard<'a> { /* 持有锁，Drop 自动释放 */ }
 - [ ] FileMutationQueue：同一 path 并发 acquire 串行（进入临界区计数，任意时刻 ≤1）；不同 path 并行；guard Drop 后锁可被再次 acquire；acquire 等待可被外层 select 取消
 - [ ] WriteTool/EditTool 经 `Arc<FileMutationQueue>` 注入，写 IO 在 guard 持有期间执行；name/description/parameters/resource_scope 与 005 一致（FileWriter/FileWriter）
 - [ ] BashTool：`name="bash"`、`resource_scope=Exclusive`；`sh -c "echo hello"` 返回 stdout；非零退出返回 `is_error: true` 且 details 含 `exit_code`；`timeout_ms` 触发时 kill 子进程并返回含 "timeout" 错误；`signal` 取消时 kill 子进程并返回含 "cancelled" 错误
-- [ ] 取消/超时后无子进程泄漏（kill_on_drop + 显式 kill）
+- [ ] 取消/超时后无子进程泄漏（显式 `kill().await` 后 `wait().await` 严格 reap，`kill_on_drop` 兜底）
 - [ ] 既有 005 文件工具测试（tests/tools.rs）构造处更新后仍全绿
 - [ ] 产品代码无 `unwrap()`；测试内用 `expect("前置条件")`；bash 测试用 `sh -c`（POSIX，不依赖 bash 二进制）
 - [ ] 单文件 ≤ 400 行，超则拆子模块并记录
