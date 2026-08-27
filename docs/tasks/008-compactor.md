@@ -57,6 +57,8 @@ pub enum CompactionError {
     Cancelled,                          // signal 取消
     #[error("no messages to compact")]
     EmptyInput,                         // 待压缩消息为空
+    #[error("empty summary produced")]
+    EmptySummary,                       // 流结束未累积任何摘要文本（视为错误，触发降级）
 }
 
 #[async_trait]
@@ -85,14 +87,14 @@ impl Compactor for LlmCompactor {
     async fn compact(&self, req: CompactionRequest) -> Result<CompactionResult, CompactionError> {
         // 1. 构造 ProviderRequest：
         //    - context.system_prompt = self.summary_prompt
-        //    - context.messages = req.messages（原样，作为待摘要内容）
+        //    - context.messages = [单条 User 消息，文本 = format_messages_for_summary(&req.messages)]（序列化，非原样透传）
         //    - context.tools = 空（摘要无需工具）
         //    - signal = req.signal
         // 2. 调用 provider.stream(request)：
         //    - 外层 Err → CompactionError::Provider
         //    - 流内累积 TextDelta → summary（忽略 ThinkingDelta / ToolCall*，摘要场景不应出现）
         //    - 流内 AssistantEvent::Error → CompactionError::Provider（映射为 ProviderError 语义，或新增包装；aborted=true 时仍走 Provider 错误）
-        //    - 累积完毕（Done / 流自然结束）→ CompactionResult { summary }
+        //    - 累积完毕（Done / 流自然结束）→ 若 summary 为空 → CompactionError::EmptySummary；否则 CompactionResult { summary }
         // 3. req.messages 为空 → CompactionError::EmptyInput
         // 4. 累积期间 select! 监听 req.signal.cancelled() → CompactionError::Cancelled
     }
@@ -184,8 +186,8 @@ LlmCompactor 把 `req.messages` 序列化为 provider user 输入，默认格式
 - [ ] cargo clippy --all-targets -D warnings passes
 - [ ] cargo test --all-targets passes
 - [ ] cargo fmt --check passes
-- [ ] `LlmCompactor` 单测（fake provider 回放 `TextDelta* → Done`）：摘要文本正确累积；构造的 `ProviderRequest` 中 `system_prompt == summary_prompt`、`messages == 待压缩消息`、`tools` 为空
-- [ ] `LlmCompactor` 错误路径：provider 外层 `Err` → `CompactionError::Provider`；流内 `Error` → `CompactionError::Provider`；空输入 → `EmptyInput`；`signal.cancel()` → `Cancelled`
+- [ ] `LlmCompactor` 单测（fake provider 回放 `TextDelta* → Done`）：摘要文本正确累积；构造的 `ProviderRequest` 中 `system_prompt == summary_prompt`、`messages == [单条 User 输入，文本 = format_messages_for_summary(待压缩消息)]`、`tools` 为空
+- [ ] `LlmCompactor` 错误路径：provider 外层 `Err` → `CompactionError::Provider`；流内 `Error` → `CompactionError::Provider`；空输入 → `EmptyInput`；空摘要（无 `TextDelta`，仅 `Done`/流自然结束）→ `EmptySummary`；`signal.cancel()` → `Cancelled`
 - [ ] 编排 `prepare_context` 单测：未超预算不压缩（原样返回）；超预算压缩（旧消息被 `[user]` 摘要替换、最近 `keep_recent` 条保留）；压缩失败降级截断（仅保留最近 `keep_recent` 条）
 - [ ] token 估算：复用或新增粗估（`chars/4` 兜底），有单测断言边界（空、短、长文本）
 - [ ] 默认拼接格式：逐条 `[role] content` 输出稳定，有单测断言（含 User/Assistant/ToolResult 混合序列）
@@ -196,3 +198,4 @@ LlmCompactor 把 `req.messages` 序列化为 provider user 输入，默认格式
 ## 修订记录
 
 - v1.0（2026-08-27，Architect）：初稿。复用 003 定稿 ModelProvider/AssistantStream/AssistantEvent/ProviderRequest（不改签名）；Compactor 职责单一（生成摘要），编排（预算检查 + 保留策略 + 降级）落 context/runtime；LlmCompactor 持有 ModelProvider；压缩失败降级为保守截断（兼容一期契约）；摘要以普通 User 消息注入不破坏 002 消息拓扑；LoopConfig 加字段需同步更新既有构造点。
+- v1.1（2026-08-28，Architect，依据 Developer 实现反馈修订）：消除正文与伪代码的自相矛盾——LlmCompactor 将待压缩消息**序列化为单条 User 输入**（默认 `format_messages_for_summary` 稳定格式，非原样透传）；① 伪代码注释「`context.messages = req.messages（原样）`」→「单条 User，文本 = format_messages_for_summary」；② 验收标准「`messages == 待压缩消息`」→「`messages == [单条 User 输入，文本 = format_messages_for_summary(待压缩消息)]`」；③ 新增 `CompactionError::EmptySummary` 变体——流结束未累积任何摘要文本视为错误并触发降级（规格原未定义此场景，防空摘要静默吞掉历史上下文）。
