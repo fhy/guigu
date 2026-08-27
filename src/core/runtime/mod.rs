@@ -23,7 +23,10 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent::{AgentCommand, AgentSnapshot};
-use crate::core::context::{ContextBudget, default_convert_to_llm};
+use crate::core::compactor::Compactor;
+use crate::core::context::{
+    CompactionPolicy, ContextBudget, default_convert_to_llm, prepare_context,
+};
 use crate::core::event::AgentEvent;
 use crate::core::message::{
     AssistantMessage, Message, StopReason, ThinkingLevel, ToolCall, ToolResultMessage,
@@ -84,6 +87,10 @@ pub struct LoopConfig {
     pub retry_base_delay: Duration,
     /// 重试退避上限。
     pub retry_max_delay: Duration,
+    /// 二期：摘要压缩器。`None` = 关闭压缩（回退一期截断）。
+    pub compactor: Option<Arc<dyn Compactor>>,
+    /// 二期：压缩策略（预算阈值 + 保留策略）。
+    pub compaction: CompactionPolicy,
 }
 
 impl Default for LoopConfig {
@@ -103,6 +110,8 @@ impl Default for LoopConfig {
             max_retries: 3,
             retry_base_delay: Duration::from_millis(500),
             retry_max_delay: Duration::from_secs(30),
+            compactor: None,
+            compaction: CompactionPolicy::default(),
         }
     }
 }
@@ -270,6 +279,27 @@ pub(crate) async fn run_agent_loop(ctx: &mut RunContext<'_>, initial: Vec<Messag
         }
 
         let _ = ctx.events_tx.send(AgentEvent::TurnStart);
+
+        // 二期：每轮请求前做预算检查 + 摘要压缩（compactor 启用时）。
+        // 结果回写 transcript：摘要替换旧消息（或降级截断），避免每轮重复压缩。
+        if let Some(compactor) = &ctx.config.compactor {
+            let prepared = prepare_context(
+                ctx.transcript.clone(),
+                &ctx.config.compaction,
+                compactor.as_ref(),
+                signal.clone(),
+            )
+            .await;
+            *ctx.transcript = prepared;
+            update_snapshot(
+                ctx.snapshot_tx,
+                ctx.transcript,
+                false,
+                None,
+                &HashSet::new(),
+                None,
+            );
+        }
 
         // 流式消费 assistant 响应（含重试）。
         let request = build_request(ctx, &signal);

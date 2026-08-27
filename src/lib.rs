@@ -17,7 +17,8 @@ pub mod tools;
 pub use adapters::{AnthropicConfig, AnthropicProvider, OpenAiConfig, OpenAiProvider};
 pub use core::{
     agent::*,
-    context::{ContextBudget, default_convert_to_llm},
+    compactor::*,
+    context::{CompactionPolicy, ContextBudget, default_convert_to_llm, prepare_context},
     event::*,
     message::*,
     provider::*,
