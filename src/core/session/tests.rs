@@ -106,6 +106,29 @@ fn reduce_path_to_returns_root_to_leaf_sequence() {
 }
 
 #[test]
+fn reduce_path_to_internal_node_returns_none() {
+    // path_to 仅定义于叶：内部节点（children 非空）返回 None，
+    // 调用方据此区分完整 transcript 与中间路径。
+    let tree = reduce(vec![
+        entry(0, None, "a"),
+        entry(1, Some(0), "b"),
+        entry(2, Some(1), "c"),
+    ])
+    .unwrap();
+    assert_eq!(tree.path_to(0), None); // 根（有 child）
+    assert_eq!(tree.path_to(1), None); // 中间节点
+    assert!(tree.path_to(2).is_some()); // 叶
+}
+
+#[test]
+fn reduce_path_to_single_node_root_is_leaf() {
+    // 单节点树：根即叶（children 为空），path_to 返回单条序列。
+    let tree = reduce(vec![entry(0, None, "a")]).unwrap();
+    let path = tree.path_to(0).unwrap();
+    assert_eq!(path, vec![&user_msg("a")]);
+}
+
+#[test]
 fn reduce_duplicate_id() {
     let err = reduce(vec![entry(0, None, "a"), entry(0, None, "b")]).unwrap_err();
     assert!(matches!(err, SessionError::DuplicateNode(0)));

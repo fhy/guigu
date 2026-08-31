@@ -62,8 +62,15 @@ impl SessionTree {
             .collect()
     }
 
-    /// 从根到某叶的线性消息序列（用于恢复 transcript）；叶不存在返回 `None`。
+    /// 从根到某叶的线性消息序列（用于恢复 transcript）。
+    ///
+    /// 仅定义于叶节点：传入不存在的 id 或**非叶节点**（`children` 非空）均返回
+    /// `None`，调用方据此区分完整 transcript 与中间路径，避免误恢复非活跃分支。
     pub fn path_to(&self, leaf: NodeId) -> Option<Vec<&Message>> {
+        let node = self.nodes.get(&leaf)?;
+        if !node.children.is_empty() {
+            return None;
+        }
         let mut path = Vec::new();
         let mut cursor = Some(leaf);
         while let Some(id) = cursor {
@@ -108,6 +115,9 @@ pub enum SessionError {
     /// 检测到环。
     #[error("cycle detected")]
     Cycle,
+    /// 节点 id 游标耗尽（已达 `u64::MAX`，无法分配新 id）。
+    #[error("node id cursor exhausted")]
+    IdExhausted,
 }
 
 /// 会话存储（落定 architecture 3.8 预留接口）。
@@ -169,10 +179,15 @@ impl JsonlSessionStorage {
             }
             Err(err) => return Err(err.into()),
         }
+        // 恢复续写游标：max(id) + 1；max(id) == u64::MAX 时游标耗尽（不回绕为 0）。
+        let next_id = match max_id {
+            None => 0,
+            Some(m) => m.checked_add(1).ok_or(SessionError::IdExhausted)?,
+        };
         Ok(Self {
             path,
             session_id: session_id.into(),
-            next_id: AtomicU64::new(max_id.map_or(0, |m| m + 1)),
+            next_id: AtomicU64::new(next_id),
         })
     }
 }
@@ -184,7 +199,25 @@ impl SessionStorage for JsonlSessionStorage {
         parent_id: Option<NodeId>,
         message: Message,
     ) -> Result<NodeId, SessionError> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        // 原子认领下一个 id：游标达 u64::MAX 时返回 IdExhausted，绝不回绕。
+        // CAS 循环保证并发下不回绕（fetch_add 在 u64::MAX 会静默回绕为 0）。
+        // 注意：id 认领后若写盘失败，该 id 成为空洞（monotonic cursor 语义，允许）。
+        let mut cursor = self.next_id.load(Ordering::SeqCst);
+        loop {
+            if cursor == u64::MAX {
+                return Err(SessionError::IdExhausted);
+            }
+            match self.next_id.compare_exchange_weak(
+                cursor,
+                cursor + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(actual) => cursor = actual,
+            }
+        }
+        let id = cursor;
         let mut line = serde_json::to_string(&SessionEntry {
             id,
             parent_id,
@@ -220,8 +253,10 @@ impl SessionStorage for JsonlSessionStorage {
         }
         let tree = reduce_for(entries, &self.session_id)?;
         // 恢复续写游标：next_id = max(id) + 1（单调不减，不回退）。
+        // max(id) == u64::MAX 时游标耗尽（不回绕为 0）。
         if let Some((max_id, _)) = tree.nodes.last_key_value() {
-            self.next_id.fetch_max(max_id + 1, Ordering::SeqCst);
+            let next = max_id.checked_add(1).ok_or(SessionError::IdExhausted)?;
+            self.next_id.fetch_max(next, Ordering::SeqCst);
         }
         Ok(tree)
     }

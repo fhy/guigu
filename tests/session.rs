@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use guigu::core::event::AgentEvent;
 use guigu::core::message::{Message, UserContent, UserMessage};
-use guigu::core::session::{JsonlSessionStorage, SessionEntry, SessionRecorder, SessionStorage};
+use guigu::core::session::{
+    JsonlSessionStorage, SessionEntry, SessionError, SessionRecorder, SessionStorage,
+};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
 
@@ -158,6 +160,82 @@ async fn load_restores_next_id_cursor() {
     assert_eq!(storage.next_id(), 4); // load 恢复游标
     let i4 = storage.append(Some(3), user_msg("e")).await.unwrap();
     assert_eq!(i4, 4);
+}
+
+#[tokio::test]
+async fn open_with_max_id_returns_id_exhausted() {
+    // 外部注入 id = u64::MAX 的行：open 恢复游标时 max+1 溢出 → IdExhausted（不回绕为 0）。
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    tokio::fs::write(&path, line(u64::MAX, None, "a"))
+        .await
+        .unwrap();
+    let err = match JsonlSessionStorage::open(&path, "s1").await {
+        Err(e) => e,
+        Ok(_) => panic!("expected open to fail with IdExhausted"),
+    };
+    assert!(matches!(err, SessionError::IdExhausted));
+}
+
+#[tokio::test]
+async fn load_with_max_id_returns_id_exhausted() {
+    // open 时 max = u64::MAX - 1（成功，游标 = u64::MAX）；
+    // 外部再追加 id = u64::MAX 的行后 load → max+1 溢出 → IdExhausted。
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    tokio::fs::write(&path, line(u64::MAX - 1, None, "a"))
+        .await
+        .unwrap();
+    let storage = JsonlSessionStorage::open(&path, "s1").await.unwrap();
+    assert_eq!(storage.next_id(), u64::MAX);
+    let mut f = tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .await
+        .unwrap();
+    f.write_all(line(u64::MAX, Some(u64::MAX - 1), "b").as_bytes())
+        .await
+        .unwrap();
+    let err = storage.load().await.unwrap_err();
+    assert!(matches!(err, SessionError::IdExhausted));
+}
+
+#[tokio::test]
+async fn append_with_exhausted_cursor_returns_id_exhausted() {
+    // 游标停在 u64::MAX：append 返回 IdExhausted 且游标不回绕（仍为 u64::MAX）。
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    tokio::fs::write(&path, line(u64::MAX - 1, None, "a"))
+        .await
+        .unwrap();
+    let storage = JsonlSessionStorage::open(&path, "s1").await.unwrap();
+    assert_eq!(storage.next_id(), u64::MAX);
+    let err = storage.append(None, user_msg("b")).await.unwrap_err();
+    assert!(matches!(err, SessionError::IdExhausted));
+    assert_eq!(storage.next_id(), u64::MAX); // 未回绕
+}
+
+#[tokio::test]
+async fn append_allocates_up_to_max_minus_one_then_exhausts() {
+    // 验证「最后可分配 id = u64::MAX - 1」的边界语义：
+    // 游标到 u64::MAX 后 append 耗尽（IdExhausted），且不再分配 id = u64::MAX。
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    tokio::fs::write(&path, line(u64::MAX - 2, None, "a"))
+        .await
+        .unwrap();
+    let storage = JsonlSessionStorage::open(&path, "s1").await.unwrap();
+    assert_eq!(storage.next_id(), u64::MAX - 1);
+    // 分配最后一个合法 id = u64::MAX - 1
+    let last = storage
+        .append(Some(u64::MAX - 2), user_msg("b"))
+        .await
+        .unwrap();
+    assert_eq!(last, u64::MAX - 1);
+    assert_eq!(storage.next_id(), u64::MAX);
+    // 再 append → 耗尽
+    let err = storage.append(Some(last), user_msg("c")).await.unwrap_err();
+    assert!(matches!(err, SessionError::IdExhausted));
 }
 
 #[tokio::test]
