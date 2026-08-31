@@ -23,6 +23,7 @@ pub use core::{
     message::*,
     provider::*,
     runtime::*,
+    session::*,
     tool::*,
 };
 pub use tools::*;

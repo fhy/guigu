@@ -6,6 +6,7 @@ pub mod event;
 pub mod message;
 pub mod provider;
 pub mod runtime;
+pub mod session;
 pub mod tool;
 
 pub use agent::{Agent, AgentConfig, AgentError, AgentHandle, AgentSnapshot};
@@ -19,4 +20,8 @@ pub use provider::{
     ToolSpec,
 };
 pub use runtime::{AgentRuntime, LoopConfig, ToolExecutionMode};
+pub use session::{
+    JsonlSessionStorage, NodeId, SessionEntry, SessionError, SessionNode, SessionRecorder,
+    SessionStorage, SessionTree, reduce,
+};
 pub use tool::{ResourceScope, Tool, ToolError, ToolResult};

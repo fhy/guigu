@@ -28,6 +28,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 [dev-dependencies]
 tokio-test = "0.4"
 wiremock = "0.6"
+# Task 009：session JSONL 集成测试的临时目录。
+tempfile = "3"
 
 [[bin]]
 name = "guigu"
