@@ -17,8 +17,8 @@
 - [x] 006 — bash 工具 + file_mutation_queue（Exclusive + 跨 agent 同文件写串行化）
 - [x] 007 — adapters（OpenAI/Anthropic，reqwest feature-gated）
 - [x] 008 — 上下文摘要压缩 Compactor（依赖 007 真实现）
-- [ ] 009 — Session 树 + JSONL 崩溃恢复（规格 v1.0 已就绪，待开发）
-- [ ] 010 — 远程协议
+- [x] 009 — Session 树 + JSONL 崩溃恢复（r3 审查通过，四门禁全绿）
+- [ ] 010 — 远程协议（规格 v1.0 已就绪，待开发）
 
 ## 备注
 
@@ -37,3 +37,5 @@
 - 007 已于 r5 审查通过（2026-08-27，docs/reviews/007-review-r5.md）：四门禁全绿、180 测试通过（含 `--no-default-features` 75 通过，验证 default-features=false 可剥离 reqwest）；r2/r3/r4 打回项（重复 block index / 重复 stop / OpenAI 错误路径状态一致）均核销，r5 无阻塞问题
 - 008 已于 r2 审查通过（2026-08-28，docs/reviews/008-review-r2.md）：四门禁全绿、r1 三项问题全部核销；规格 v1.1 消除正文与伪代码矛盾
 - 009 规格 v1.0（2026-08-28，Architect）：落定 architecture 3.8 预留 `SessionStorage` trait；树用 parent_id 指针隐式表达（fork=任意历史节点追加）；append 为 O(1) 追加不校验结构、结构校验集中 reduce；崩溃恢复=逐行解析跳半行+全量重放+next_id 续写恢复；sync_all 保证进程崩溃级持久性（不保证断电）；单 writer 边界、多 lane 并发属 010；提供可选 SessionRecorder 桥接复用 001 subscribe() 事件流，不改 003 主循环
+- 009 已于 r3 审查通过（2026-08-31，docs/reviews/009-review-r3.md）：四门禁全绿、139 测试通过；r1（id 溢出 / path_to 叶契约）→ r2（单文件 408 行超限）→ r3 无阻塞问题，`session.rs` 已拆分 `JsonlSessionStorage` 至 `jsonl.rs` 子模块
+- 010 规格 v1.0（2026-08-31，Architect）：跨进程远程协议 = serde + newline-delimited JSON 在线双向流；命令面与 001 `AgentCommand` 一一对应；`RemoteServer`（serve 一条连接）/ `RemoteClient`（watch+broadcast 本地重建进程内契约）；connector 复用同一 codec（stdio/tcp）；连接即推初始快照对齐「lag→重读 snapshot」；单 agent 边界、多 lane 并发写 session 排除（后续任务）；无新增依赖
