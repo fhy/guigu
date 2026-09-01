@@ -19,7 +19,7 @@
 - [x] 008 — 上下文摘要压缩 Compactor（依赖 007 真实现）
 - [x] 009 — Session 树 + JSONL 崩溃恢复（r3 审查通过，四门禁全绿）
 - [x] 010 — 远程协议（serde + newline-delimited JSON 双向流，r3 审查通过）
-- [ ] 011 — 工具惰性加载 DeferredTool（DeferredToolSpec 分离 schema 与执行体，OnceLock 惰性构建）
+- [~] 011 — 工具惰性加载 DeferredTool（DeferredToolSpec 分离 schema 与执行体，OnceLock 惰性构建）
 
 ## 三期 Backlog（多 client / 多 lane / ACP / CLI；插件延后）
 
@@ -53,3 +53,4 @@
 - 011 规格 v1.0（2026-09-01，Architect）：补 architecture 二期 deferred tools 缺口。DeferredToolSpec（owned schema：name/description/parameters/resource_scope）与执行体分离，DeferredTool 实现 Tool trait 惰性包装——schema 方法只读 spec 不触发工厂，execute 首次经 `std::sync::OnceLock` 构建并缓存（进程内仅一次，不跨 await 持锁）；工厂同步 + infallible，async 实例化留后续「插件」任务。零破坏：DeferredTool 本身是合法 Tool，仍入 `Vec<Arc<dyn Tool>>`，不改 003 主循环与注册契约
 - 011 规格 v1.1（2026-09-01，Architect，依据 Developer 架构审查）：新类型 `ToolSpec` 改名 `DeferredToolSpec`，消除与既有 `core::provider::ToolSpec`（003/007 定稿 wire 格式）顶层 glob 重导出撞名歧义。方案 A（改名不动 provider 侧），零破坏
 - 三期拆分（2026-09-01，Architect，依据 PM 定稿意见「多 client / 多 lane session / CLI 独立运行 / ACP，插件延后」）：012 多 lane session（底层）→ 013 Agent Server（多 session 注册表 + 多 lane 调度核心 + 多连接 TCP）→ 014 ACP 适配（Agent Client Protocol v1，stdio 必做 / SSE 可选）→ 015 CLI（clap）。关键决策见 architecture.md §7：ACP 为对外标准协议、010 协议保持单连接不扩展、多 lane 仅进程内、插件延后（011 为前置）
+- 011 实现已提交（2026-09-01，b872ecc feat(tools)，src/tools/deferred.rs + tests/deferred.rs），但**尚无审查记录**（docs/reviews/ 缺 011-review 文件），TASK_BOARD 标 [~] 待审查。下一动作：reviewer 审查 011 → 通过后 developer 实现 012（规格 v1.0 已就绪）
