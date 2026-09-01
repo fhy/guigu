@@ -206,11 +206,24 @@ impl RemoteClient {
     }
 
     /// 中止当前操作（入队即返回，不等待应答）。
+    ///
+    /// 入队前后均检查 `closed`：写 task 失败后会标记 `closed` 并排空 pending，
+    /// 但其 `rx` 在 task 退出前仍存活，`tx.send` 可能成功入队却无人消费。
+    /// 一旦观察到 `closed=true` 必须返回 `Err`，不得返回 `Ok`。
     pub fn abort(&self) -> Result<(), RemoteError> {
+        if *self.closed.borrow() {
+            return Err(RemoteError::Protocol("connection closed".into()));
+        }
         let id = self.next_id();
-        self.tx
-            .send(RemoteRequest::Abort { id })
-            .map_err(|_| RemoteError::Protocol("write channel closed".into()))
+        if self.tx.send(RemoteRequest::Abort { id }).is_err() {
+            return Err(RemoteError::Protocol("write channel closed".into()));
+        }
+        // 入队后再次检查关闭状态（写 task 可能在入队前已失败并标记 closed，
+        // 此时该请求无人消费，不得返回 Ok）。
+        if *self.closed.borrow() {
+            return Err(RemoteError::Protocol("connection closed".into()));
+        }
+        Ok(())
     }
 
     /// 重置 agent（清空 transcript 与队列，入队即返回）。

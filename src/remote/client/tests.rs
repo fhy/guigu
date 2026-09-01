@@ -338,3 +338,55 @@ async fn test_read_eof_fails_inflight_commands_immediately() {
         "inflight command should fail after read EOF"
     );
 }
+
+/// 回归（问题1）：写 task 写失败后（`closed=true`），`abort()` 必须返回 `Err`，
+/// 不得因 `tx.send()` 仍成功（写 task 尚未退出、`rx` 仍存活）而错误返回 `Ok`。
+///
+/// 通过持有 `pending` 锁阻塞写 task 失败后的 drain，精确制造「`closed=true`
+/// 但 `rx` 仍存活」的竞态窗口：修复前 `abort()` 仅 `tx.send` 成功即返回 `Ok`，
+/// 修复后入队后的 `closed` 检查使其返回 `Err`。
+#[tokio::test]
+async fn test_abort_returns_err_after_write_failure() {
+    // 序列化初始 Snapshot 为 JSON 行（读半返回，供客户端读 task 处理）。
+    let snapshot_msg = ServerMessage::Snapshot {
+        id: 0,
+        snapshot: initial_snapshot(),
+    };
+    let mut read_data = serde_json::to_vec(&snapshot_msg).expect("serialize");
+    read_data.push(b'\n');
+
+    // 创建自定义流：读半返回初始 Snapshot 后阻塞；写半总是失败。
+    let stream = FailingWriteStream::new(read_data);
+    let client = RemoteClient::connect(stream).await.expect("connect");
+
+    // 持有 pending 锁，阻塞写 task 失败后的 drain（使 rx 保持存活）。
+    let pending_guard = client.pending.lock().await;
+
+    // 第一次 abort：入队 Abort 请求，触发写 task 写失败（closed=true）。
+    // 其结果取决于时序（写 task 可能已失败），此处仅用于触发，不断言。
+    let _ = client.abort();
+
+    // 等待写 task 设置 closed=true（写失败后、drain 前；drain 被锁阻塞）。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if *client.closed.borrow() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "closed should be set after write failure"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    // 第二次 abort：closed=true 但 rx 仍存活（写 task 被 pending 锁阻塞）。
+    // 修复前：tx.send() 成功 → 错误返回 Ok。修复后：入队后 closed 检查 → 返回 Err。
+    let second = client.abort();
+    assert!(
+        second.is_err(),
+        "abort should return Err after write failure (closed=true), got {second:?}"
+    );
+
+    // 释放 pending 锁，写 task 完成 drain 并退出。
+    drop(pending_guard);
+}
