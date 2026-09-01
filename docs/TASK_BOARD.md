@@ -25,7 +25,7 @@
 
 实施顺序：012 → 013 → 014 → 015
 
-- [ ] 012 — 多 lane session（SharedSessionStorage 串行化 append + LaneWriter 每 lane 游标，进程内多 lane 并发写同一 session 树）
+- [x] 012 — 多 lane session（SharedSessionStorage 串行化 append + LaneWriter 每 lane 游标，进程内多 lane 并发写同一 session 树）
 - [ ] 013 — Agent Server（多 session 注册表 + 多 lane 调度核心 + 多连接 TCP 协议）
 - [ ] 014 — ACP 适配（Agent Client Protocol v1：stdio 必做 / SSE 可选，session/prompt/cancel/fs/权限映射到 013）
 - [ ] 015 — CLI 独立运行（clap：交互式 REPL + `--acp` 模式，复用 013/007/005/006/009）
@@ -54,3 +54,4 @@
 - 011 规格 v1.1（2026-09-01，Architect，依据 Developer 架构审查）：新类型 `ToolSpec` 改名 `DeferredToolSpec`，消除与既有 `core::provider::ToolSpec`（003/007 定稿 wire 格式）顶层 glob 重导出撞名歧义。方案 A（改名不动 provider 侧），零破坏
 - 三期拆分（2026-09-01，Architect，依据 PM 定稿意见「多 client / 多 lane session / CLI 独立运行 / ACP，插件延后」）：012 多 lane session（底层）→ 013 Agent Server（多 session 注册表 + 多 lane 调度核心 + 多连接 TCP）→ 014 ACP 适配（Agent Client Protocol v1，stdio 必做 / SSE 可选）→ 015 CLI（clap）。关键决策见 architecture.md §7：ACP 为对外标准协议、010 协议保持单连接不扩展、多 lane 仅进程内、插件延后（011 为前置）
 - 011 已于 r1 审查通过（2026-09-01，docs/reviews/011-review-r1.md）：四门禁全绿、170 单测 + 集成测试通过，无阻塞问题。非阻塞建议：b872ecc 混入 docs/ 规格与历史审查文件，后续 Developer 提交只含 src/tests，按角色边界拆分。下一动作：启动 012 开发（规格 v1.0 已就绪）
+- 012 已于 r1 审查通过（2026-09-01，docs/reviews/012-review-r1.md）：代码审查无阻塞问题（SharedSessionStorage 全程持 tokio Mutex 串行化 append、LaneWriter 独立 head 游标、fork 分支语义与 009 reduce 一致），r1 三条非阻塞建议（inner() footgun、LaneWriter 未强制共享写入口、并发测试未覆盖每 lane 多步写）留待后续。注：审查环境无 cargo，四门禁以 Developer 执行记录（全绿）为准，非 reviewer 独立复跑——建议 PM 在具备工具链环境补一次独立门禁复核。下一动作：启动 013 开发（规格 v1.0 已就绪）
