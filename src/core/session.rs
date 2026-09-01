@@ -275,5 +275,110 @@ impl SessionRecorder {
     }
 }
 
+/// 进程内多 lane 共享的 session 写入口：串行化 `append`，委托 `inner`。
+///
+/// 多个 lane（多个 agent run / 分支）并发写同一 session 时，`append` 经
+/// `write_lock` 互斥，保证 id 单调、落盘不交错；`load` / `next_id` 透传不串行。
+///
+/// 边界：仅进程内多 lane（跨进程文件锁属 006/009 声明的后续）；`load` 与并发
+/// `append` 不互斥——约定 `load` 只在「无活跃 lane 写」时调用（崩溃恢复入口）。
+pub struct SharedSessionStorage {
+    inner: Arc<dyn SessionStorage>,
+    write_lock: tokio::sync::Mutex<()>,
+}
+
+impl SharedSessionStorage {
+    /// 包装一个内层 storage（通常为 `JsonlSessionStorage`）。
+    pub fn new(inner: Arc<dyn SessionStorage>) -> Self {
+        Self {
+            inner,
+            write_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// 取出内层 storage（`load` / `next_id` 透传，不串行）。
+    ///
+    /// 注意：对返回的 inner 直接调用 `append` 会绕过 `write_lock` 串行化，
+    /// 破坏并发安全——并发写场景请一律经 `SharedSessionStorage::append`。
+    pub fn inner(&self) -> &Arc<dyn SessionStorage> {
+        &self.inner
+    }
+}
+
+#[async_trait]
+impl SessionStorage for SharedSessionStorage {
+    async fn append(
+        &self,
+        parent_id: Option<NodeId>,
+        message: Message,
+    ) -> Result<NodeId, SessionError> {
+        // 串行化：锁全程持有（含 inner 的 id 认领 + 落盘），不跨其它 await。
+        let _guard = self.write_lock.lock().await;
+        self.inner.append(parent_id, message).await
+    }
+
+    async fn load(&self) -> Result<SessionTree, SessionError> {
+        self.inner.load().await
+    }
+
+    fn next_id(&self) -> NodeId {
+        self.inner.next_id()
+    }
+}
+
+/// lane 标识（进程内唯一即可；调度 / 与 AgentHandle 绑定属 013）。
+pub type LaneId = String;
+
+/// 一个 lane 的写游标：`head` 指向树中本 lane 当前节点，`append` 挂到 `head`
+/// 之后并推进；`fork_at` 从任意历史节点分支。
+///
+/// 单 lane 内 `&mut self` 顺序写；多 lane 并发由各自 `LaneWriter` + 共享
+/// `SharedSessionStorage` 的 `write_lock` 保证 `append` 互斥。
+pub struct LaneWriter {
+    storage: Arc<dyn SessionStorage>,
+    lane_id: LaneId,
+    head: Option<NodeId>,
+}
+
+impl LaneWriter {
+    /// 创建 lane 写游标。`head = None` 表示尚无节点（首次 `append` 成为根）。
+    pub fn new(
+        storage: Arc<dyn SessionStorage>,
+        lane_id: impl Into<String>,
+        head: Option<NodeId>,
+    ) -> Self {
+        Self {
+            storage,
+            lane_id: lane_id.into(),
+            head,
+        }
+    }
+
+    /// lane 标识。
+    pub fn lane_id(&self) -> &LaneId {
+        &self.lane_id
+    }
+
+    /// 当前 head（`None` = 尚无节点）。
+    pub fn head(&self) -> Option<NodeId> {
+        self.head
+    }
+
+    /// 追加一条消息为 `head` 的子节点，推进 `head`，返回新节点 id。
+    pub async fn append(&mut self, message: Message) -> Result<NodeId, SessionError> {
+        let id = self.storage.append(self.head, message).await?;
+        self.head = Some(id);
+        Ok(id)
+    }
+
+    /// 从指定历史节点 fork：后续 `append` 挂到该节点之后（产生分支）。
+    ///
+    /// `parent = None` 表示重置到「无 head」，下次 `append` 成为新根——仅对空树
+    /// 合法；非空树会产生多根，`load` / `reduce` 以 `MultipleRoots` 拒绝。
+    pub fn fork_at(&mut self, parent: Option<NodeId>) {
+        self.head = parent;
+    }
+}
+
 #[cfg(test)]
 mod tests;

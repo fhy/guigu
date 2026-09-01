@@ -233,3 +233,93 @@ async fn recorder_attach_consumes_message_end_only() {
     assert_eq!(entries[0].parent_id, None);
     assert_eq!(entries[1].parent_id, Some(0));
 }
+
+// ===== Task 012：SharedSessionStorage + LaneWriter =====
+
+#[tokio::test]
+async fn shared_storage_delegates_append_load_next_id() {
+    let inner = Arc::new(MemStorage::default());
+    let shared = Arc::new(SharedSessionStorage::new(inner.clone()));
+    assert_eq!(shared.next_id(), 0);
+    let id0 = shared.append(None, user_msg("a")).await.unwrap();
+    let id1 = shared.append(Some(id0), user_msg("b")).await.unwrap();
+    assert_eq!((id0, id1), (0, 1));
+    assert_eq!(shared.next_id(), 2);
+    let tree = shared.load().await.unwrap();
+    assert_eq!(tree.nodes.len(), 2);
+    assert_eq!(tree.leaves(), vec![1]);
+}
+
+#[tokio::test]
+async fn shared_storage_concurrent_appends_unique_ids() {
+    let inner = Arc::new(MemStorage::default());
+    let shared = Arc::new(SharedSessionStorage::new(inner.clone()));
+    // 星型拓扑：先建根，再并发挂子（全 parent=None 会触发 MultipleRoots）。
+    let root = shared.append(None, user_msg("root")).await.unwrap();
+    let n = 16;
+    let mut handles = Vec::new();
+    for _ in 0..n {
+        let shared = shared.clone();
+        handles.push(tokio::spawn(async move {
+            shared.append(Some(root), user_msg("x")).await
+        }));
+    }
+    let results = futures::future::join_all(handles).await;
+    let ids: Vec<u64> = results.into_iter().map(|r| r.unwrap().unwrap()).collect();
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.len(), n, "并发 append 产生重复 id");
+    assert_eq!(shared.next_id(), n as NodeId + 1);
+    let tree = shared.load().await.unwrap();
+    assert_eq!(tree.nodes.len(), n + 1);
+    assert_eq!(tree.nodes[&root].children.len(), n);
+}
+
+#[tokio::test]
+async fn lane_writer_append_advances_head() {
+    let storage = Arc::new(MemStorage::default());
+    let mut lane = LaneWriter::new(storage.clone(), "lane-1", None);
+    assert_eq!(lane.lane_id(), "lane-1");
+    assert_eq!(lane.head(), None);
+    let id0 = lane.append(user_msg("a")).await.unwrap();
+    let id1 = lane.append(user_msg("b")).await.unwrap();
+    let id2 = lane.append(user_msg("c")).await.unwrap();
+    assert_eq!((id0, id1, id2), (0, 1, 2));
+    assert_eq!(lane.head(), Some(2));
+    let tree = storage.load().await.unwrap();
+    assert_eq!(tree.leaves(), vec![2]);
+    assert_eq!(tree.path_to(2).unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn lane_writer_fork_at_redirects_head() {
+    let storage = Arc::new(MemStorage::default());
+    let mut lane = LaneWriter::new(storage.clone(), "lane-1", None);
+    lane.append(user_msg("a")).await.unwrap(); // 0
+    lane.append(user_msg("b")).await.unwrap(); // 1
+    lane.fork_at(Some(0));
+    let id = lane.append(user_msg("c")).await.unwrap(); // 2，parent = 0
+    assert_eq!(id, 2);
+    assert_eq!(lane.head(), Some(2));
+    let tree = storage.load().await.unwrap();
+    assert_eq!(tree.leaves(), vec![1, 2]);
+}
+
+#[tokio::test]
+async fn lane_writer_two_lanes_same_head_two_leaves() {
+    let storage = Arc::new(MemStorage::default());
+    let root = storage.append(None, user_msg("root")).await.unwrap(); // 0
+    let mut lane_a = LaneWriter::new(storage.clone(), "a", Some(root));
+    let mut lane_b = LaneWriter::new(storage.clone(), "b", Some(root));
+    let id_a = lane_a.append(user_msg("a")).await.unwrap();
+    let id_b = lane_b.append(user_msg("b")).await.unwrap();
+    assert_ne!(id_a, id_b);
+    let tree = storage.load().await.unwrap();
+    assert_eq!(tree.nodes.len(), 3);
+    let leaves = tree.leaves();
+    assert_eq!(leaves.len(), 2);
+    assert!(leaves.contains(&id_a));
+    assert!(leaves.contains(&id_b));
+    assert_eq!(tree.nodes[&root].children.len(), 2);
+}

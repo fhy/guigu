@@ -8,7 +8,8 @@ use std::sync::Arc;
 use guigu::core::event::AgentEvent;
 use guigu::core::message::{Message, UserContent, UserMessage};
 use guigu::core::session::{
-    JsonlSessionStorage, SessionEntry, SessionError, SessionRecorder, SessionStorage,
+    JsonlSessionStorage, LaneWriter, SessionEntry, SessionError, SessionRecorder, SessionStorage,
+    SharedSessionStorage,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
@@ -265,4 +266,98 @@ async fn recorder_attach_end_to_end() {
     assert_eq!(tree.root, Some(0));
     let leaf = tree.leaves().pop().unwrap();
     assert_eq!(tree.path_to(leaf).unwrap().len(), 2);
+}
+
+// ===== Task 012：SharedSessionStorage + LaneWriter（JsonlSessionStorage 组合）=====
+
+#[tokio::test]
+async fn shared_storage_concurrent_appends_no_interleave() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let inner = Arc::new(JsonlSessionStorage::open(&path, "s1").await.unwrap());
+    let shared = Arc::new(SharedSessionStorage::new(inner));
+
+    // 星型拓扑：先建根，再并发挂子（全 parent=None 会触发 MultipleRoots）。
+    let root = shared.append(None, user_msg("root")).await.unwrap();
+    let n = 32;
+    let mut handles = Vec::new();
+    for i in 0..n {
+        let shared = shared.clone();
+        handles.push(tokio::spawn(async move {
+            shared.append(Some(root), user_msg(&format!("m{i}"))).await
+        }));
+    }
+    let results = futures::future::join_all(handles).await;
+    let ids: Vec<u64> = results.into_iter().map(|r| r.unwrap().unwrap()).collect();
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.len(), n, "并发 append 产生重复 id");
+
+    // load 得到全部节点
+    let tree = shared.load().await.unwrap();
+    assert_eq!(tree.nodes.len(), n + 1);
+    assert_eq!(tree.root, Some(root));
+    assert_eq!(tree.nodes[&root].children.len(), n);
+
+    // 无交错半行：逐行解析，全部为完整合法 JSON
+    let raw = tokio::fs::read_to_string(&path).await.unwrap();
+    let lines: Vec<&str> = raw.lines().collect();
+    assert_eq!(lines.len(), n + 1);
+    for line in &lines {
+        let _: SessionEntry = serde_json::from_str(line).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn lane_writer_fork_branches() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let inner = Arc::new(JsonlSessionStorage::open(&path, "s1").await.unwrap());
+    let shared = Arc::new(SharedSessionStorage::new(inner));
+
+    let root = shared.append(None, user_msg("root")).await.unwrap();
+    let mut lane_a = LaneWriter::new(shared.clone(), "lane-a", Some(root));
+    let mut lane_b = LaneWriter::new(shared.clone(), "lane-b", Some(root));
+    let id_a = lane_a.append(user_msg("a")).await.unwrap();
+    let id_b = lane_b.append(user_msg("b")).await.unwrap();
+    assert_ne!(id_a, id_b);
+
+    let tree = shared.load().await.unwrap();
+    assert_eq!(tree.nodes.len(), 3);
+    let leaves = tree.leaves();
+    assert_eq!(leaves.len(), 2);
+    assert!(leaves.contains(&id_a));
+    assert!(leaves.contains(&id_b));
+    assert_eq!(tree.nodes[&root].children.len(), 2);
+}
+
+#[tokio::test]
+async fn shared_storage_crash_recovery_after_concurrent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let inner = Arc::new(JsonlSessionStorage::open(&path, "s1").await.unwrap());
+    let shared = Arc::new(SharedSessionStorage::new(inner));
+
+    let root = shared.append(None, user_msg("root")).await.unwrap();
+    let n = 16;
+    let mut handles = Vec::new();
+    for i in 0..n {
+        let shared = shared.clone();
+        handles.push(tokio::spawn(async move {
+            shared.append(Some(root), user_msg(&format!("m{i}"))).await
+        }));
+    }
+    let results = futures::future::join_all(handles).await;
+    for r in results {
+        r.unwrap().unwrap();
+    }
+
+    // 模拟进程重启：新建 storage 实例（重新 open 读全量恢复游标）
+    let reopened = JsonlSessionStorage::open(&path, "s1").await.unwrap();
+    assert_eq!(reopened.next_id(), n as u64 + 1);
+    let tree = reopened.load().await.unwrap();
+    assert_eq!(tree.nodes.len(), n + 1);
+    assert_eq!(tree.root, Some(root));
+    assert_eq!(tree.nodes[&root].children.len(), n);
 }
