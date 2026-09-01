@@ -217,17 +217,23 @@ If any gate is red, do not commit. Fix and re-run.
 
 ## Git Discipline
 
-**Developer:**
-- Only `git add src/` `tests/`
-- No blanket `git add .`
+**所有 agent（强制）：**
+- 提交时必须使用**显式文件路径**，逐条列出本次改动涉及的具体文件
+- 禁止 `git add -A`、`git add .`、`git add -u` 等任何目录级/全局暂存命令
+- 先 `git status` 确认改动范围，只暂存自己负责的文件
 - One commit per task, code + tests together
 
+**Developer:**
+- 显式 `git add src/xxx.rs tests/xxx.rs`（列出具体文件，不是整个目录）
+- 只 add `src/` `tests/` 下的文件
+
 **Architect:**
-- Only `git add docs/`
-- Never touch `src/` `tests/`
+- 显式 `git add docs/xxx.md`（列出具体文件）
+- 只 add `docs/` 下的文件，Never touch `src/` `tests/`
 
 **Reviewer:**
 - Does not commit code
+- 显式 `git add docs/reviews/NNN-review-rN.md`
 - Can commit review results to `docs/reviews/`
 - Review results also posted in the group chat
 
