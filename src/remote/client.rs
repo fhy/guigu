@@ -105,15 +105,31 @@ impl RemoteClient {
             });
         }
 
-        // 单一写 task：从 mpsc 取 RemoteRequest 写入写半。
+        // 单一写 task：从 mpsc 取 RemoteRequest 写入写半。写失败时标记
+        // closed 并排空 pending，使在途请求立即失败（不等 30s 超时）。
         {
             let mut write_half = write_half;
+            let closed_tx_clone = closed_tx.clone();
+            let pending_clone = pending.clone();
+            let pending_snapshots_clone = pending_snapshots.clone();
             tokio::spawn(async move {
-                while let Some(req) = rx.recv().await {
-                    if let Err(e) = write_line(&mut write_half, &req).await {
-                        tracing::warn!("remote client: write error: {e}");
-                        break;
+                let write_failed = loop {
+                    match rx.recv().await {
+                        Some(req) => {
+                            if let Err(e) = write_line(&mut write_half, &req).await {
+                                tracing::warn!("remote client: write error: {e}");
+                                break true;
+                            }
+                        }
+                        None => break false, // channel closed
                     }
+                };
+                if write_failed {
+                    // 写失败：标记 closed，排空 pending 与 pending_snapshots，
+                    // 使等待中的命令 / 快照请求立即以 Protocol 错误返回。
+                    let _ = closed_tx_clone.send(true);
+                    pending_clone.lock().await.drain();
+                    pending_snapshots_clone.lock().await.drain();
                 }
             });
         }
@@ -145,6 +161,12 @@ impl RemoteClient {
         if self.tx.send(req).is_err() {
             self.pending.lock().await.remove(&id);
             return Err(RemoteError::Protocol("write channel closed".into()));
+        }
+        // 入队后再次检查关闭状态（连接可能在入队前关闭，写 task 已排空
+        // pending，使本请求立即失败）。
+        if *self.closed.borrow() {
+            self.pending.lock().await.remove(&id);
+            return Err(RemoteError::Protocol("connection closed".into()));
         }
         match tokio::time::timeout(COMMAND_TIMEOUT, rx).await {
             Ok(Ok(result)) => result.map_err(RemoteError::Command),
@@ -210,6 +232,11 @@ impl RemoteClient {
         if self.tx.send(RemoteRequest::GetSnapshot { id }).is_err() {
             self.pending_snapshots.lock().await.remove(&id);
             return Err(RemoteError::Protocol("write channel closed".into()));
+        }
+        // 入队后再次检查关闭状态（连接可能在入队前关闭）。
+        if *self.closed.borrow() {
+            self.pending_snapshots.lock().await.remove(&id);
+            return Err(RemoteError::Protocol("connection closed".into()));
         }
         match tokio::time::timeout(COMMAND_TIMEOUT, rx).await {
             Ok(Ok(snapshot)) => Ok(snapshot),

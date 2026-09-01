@@ -12,8 +12,12 @@ use crate::core::runtime::{AgentRuntime, LoopConfig};
 use crate::remote::server::RemoteServer;
 use async_trait::async_trait;
 use futures::stream;
+use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::duplex;
+use std::task::{Context, Poll};
+use tokio::io::{ReadBuf, duplex};
+use tokio_util::bytes::BufMut;
 
 /// 最小 provider：单文本 turn。
 struct NoopProvider;
@@ -196,4 +200,141 @@ async fn test_command_error() {
     }
 
     let _ = server_task.await;
+}
+
+/// 自定义流：读半返回初始 Snapshot 后阻塞（不 EOF）；写半总是失败。
+///
+/// 用于测试写 task 失败场景：`duplex` 缓冲满且对端读半关闭时写半会阻塞
+/// 而非报错，无法触发写失败路径，故用自定义流精确触发。
+struct FailingWriteStream {
+    read_data: Vec<u8>,
+    read_pos: usize,
+}
+
+impl FailingWriteStream {
+    fn new(read_data: Vec<u8>) -> Self {
+        Self {
+            read_data,
+            read_pos: 0,
+        }
+    }
+}
+
+impl AsyncRead for FailingWriteStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.read_pos >= self.read_data.len() {
+            // 阻塞（不 EOF），等待更多数据（永远不会来）。
+            return Poll::Pending;
+        }
+        let n = buf
+            .remaining_mut()
+            .min(self.read_data.len() - self.read_pos);
+        buf.put_slice(&self.read_data[self.read_pos..self.read_pos + n]);
+        self.read_pos += n;
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for FailingWriteStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Poll::Ready(Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "write failed",
+        )))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// 回归（问题2）：写 task 写失败后，命令立即失败（不等 30s 超时），后续命令
+/// 也因 closed 立即失败。
+///
+/// 用自定义流（写半总是失败）精确触发写失败。
+#[tokio::test]
+async fn test_write_failure_fails_commands_immediately() {
+    // 序列化初始 Snapshot 为 JSON 行（读半返回，供客户端读 task 处理）。
+    let snapshot_msg = ServerMessage::Snapshot {
+        id: 0,
+        snapshot: initial_snapshot(),
+    };
+    let mut read_data = serde_json::to_vec(&snapshot_msg).expect("serialize");
+    read_data.push(b'\n');
+
+    // 创建自定义流：读半返回初始 Snapshot 后阻塞；写半总是失败。
+    let stream = FailingWriteStream::new(read_data);
+    let client = RemoteClient::connect(stream).await.expect("connect");
+
+    // 发命令（客户端写 task 将尝试写，失败）。应立即失败（不等 30s 超时）。
+    let start = std::time::Instant::now();
+    let result = client.prompt(vec![user_msg("hello")]).await;
+    let elapsed = start.elapsed();
+    assert!(result.is_err(), "command should fail after write failure");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "command should fail immediately, not wait for timeout (elapsed: {elapsed:?})"
+    );
+
+    // 后续命令也应立即失败（closed 已标记）。
+    let result = client.prompt(vec![user_msg("hello")]).await;
+    assert!(
+        result.is_err(),
+        "subsequent command should fail after closed"
+    );
+}
+
+/// 回归（问题2）：对端关闭写端（客户端读 task 收到 EOF）后，在途命令立即
+/// 失败（不等 30s 超时）。
+#[tokio::test]
+async fn test_read_eof_fails_inflight_commands_immediately() {
+    let (client_stream, server_stream) = duplex(4096);
+
+    // 客户端连接（Arc 共享，供在途命令 task 使用）。
+    let client = Arc::new(RemoteClient::connect(client_stream).await.expect("connect"));
+
+    // 拆分 server_stream 为读半和写半。
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+    let server_reader = LineReader::new(server_read);
+
+    // 发初始 Snapshot（客户端基线）。
+    write_line(
+        &mut server_write,
+        &ServerMessage::Snapshot {
+            id: 0,
+            snapshot: initial_snapshot(),
+        },
+    )
+    .await
+    .expect("write");
+
+    // 发命令（在途，等待应答）。
+    let client_clone = Arc::clone(&client);
+    let cmd_task = tokio::spawn(async move { client_clone.prompt(vec![user_msg("hello")]).await });
+
+    // 关闭 server 写半（客户端读 task 收到 EOF）。
+    drop(server_write);
+    drop(server_reader);
+
+    // 在途命令应立即失败（不等 30s 超时）。
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), cmd_task)
+        .await
+        .expect("cmd task should finish")
+        .expect("cmd task should not panic");
+    assert!(
+        result.is_err(),
+        "inflight command should fail after read EOF"
+    );
 }

@@ -6,7 +6,7 @@
 //! 时 clone 后消费以干净关闭 runtime）。
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use super::codec::{LineReader, write_line};
 use super::protocol::{RemoteError, RemoteRequest, ServerMessage};
@@ -36,10 +36,43 @@ impl RemoteServer {
 
         // 写半归单一 writer task：mpsc 汇入 → 写循环。
         let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+        // writer 失败通知：writer task 写失败时置 true，主读循环据此立即终止
+        // （避免继续向无人消费的无界队列生产消息）。
+        let (writer_failed_tx, mut writer_failed_rx) = watch::channel(false);
 
-        // 事件订阅转发 task。
-        let tx_event = tx.clone();
+        // writer task：从 mpsc 取消息写入写半；写失败时通知主读循环。
+        let writer_task = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                if let Err(e) = write_line(&mut write_half, &msg).await {
+                    tracing::warn!("remote server: write failed: {e}");
+                    let _ = writer_failed_tx.send(true);
+                    break;
+                }
+            }
+        });
+
+        // 订阅事件（捕获此后所有事件）+ 取初始快照（基线）。
         let mut events_rx = self.handle.subscribe();
+        let initial = self.handle.snapshot();
+
+        // 先发初始 Snapshot（id = 0 保留）：在 spawn 事件转发 task 之前入队，
+        // 借助 mpsc FIFO 保证 writer 写出的第一条消息恒为初始 Snapshot。
+        if send_msg(
+            &tx,
+            ServerMessage::Snapshot {
+                id: 0,
+                snapshot: initial,
+            },
+        )
+        .is_err()
+        {
+            let _ = writer_task.await;
+            return Ok(());
+        }
+
+        // 事件订阅转发 task（在初始 Snapshot 入队后 spawn，保证初始 Snapshot
+        // 恒为首条消息，事件不会抢先破坏快照基线顺序）。
+        let tx_event = tx.clone();
         let event_task = tokio::spawn(async move {
             loop {
                 match events_rx.recv().await {
@@ -54,48 +87,28 @@ impl RemoteServer {
             }
         });
 
-        // writer task：从 mpsc 取消息写入写半。
-        let writer_task = tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                if let Err(e) = write_line(&mut write_half, &msg).await {
-                    tracing::warn!("remote server: write failed: {e}");
-                    break;
+        // 读循环：逐条解析 RemoteRequest 分发；writer 失败时立即终止。
+        let result: Result<(), RemoteError> = loop {
+            let req_result = tokio::select! {
+                req = reader.next::<RemoteRequest>() => req,
+                _ = writer_failed_rx.changed() => {
+                    break Err(RemoteError::Protocol("writer failed".into()));
                 }
-            }
-        });
-
-        // 先发初始 Snapshot（id = 0 保留）。
-        let initial = self.handle.snapshot();
-        if send_msg(
-            &tx,
-            ServerMessage::Snapshot {
-                id: 0,
-                snapshot: initial,
-            },
-        )
-        .is_err()
-        {
-            event_task.abort();
-            let _ = writer_task.await;
-            return Ok(());
-        }
-
-        // 读循环：逐条解析 RemoteRequest 分发。
-        let result = loop {
-            match reader.next::<RemoteRequest>().await? {
-                Some(req) => {
-                    let keep_going = dispatch(&self.handle, req, &tx).await?;
-                    if !keep_going {
+            };
+            match req_result {
+                Ok(Some(req)) => match dispatch(&self.handle, req, &tx).await {
+                    Ok(true) => {}
+                    Ok(false) => {
                         // Shutdown：clone handle 后消费，干净关闭 runtime。
-                        self.handle
-                            .clone()
-                            .shutdown()
-                            .await
-                            .map_err(|e| RemoteError::Command(e.to_string()))?;
-                        break Ok(());
+                        match self.handle.clone().shutdown().await {
+                            Ok(()) => break Ok(()),
+                            Err(e) => break Err(RemoteError::Command(e.to_string())),
+                        }
                     }
-                }
-                None => break Ok(()), // EOF
+                    Err(e) => break Err(e),
+                },
+                Ok(None) => break Ok(()), // EOF
+                Err(e) => break Err(e),
             }
         };
 

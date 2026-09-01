@@ -29,7 +29,8 @@ use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
-use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::process::{ChildStdin, ChildStdout};
+use tokio_util::sync::CancellationToken;
 
 /// 把一个读半与一个写半组合为单一双工流（满足 codec 的 `AsyncRead + AsyncWrite`
 /// 泛型约束）。`tokio::io::split` 的逆操作。
@@ -82,7 +83,8 @@ pub fn process_stdio() -> SplitDuplex<tokio::io::Stdin, tokio::io::Stdout> {
 /// stdio connector：启动 agent 子进程，返回双工流。
 ///
 /// 客户端侧以 `tokio::process::Command` 启动 agent 子进程，取 stdin/stdout
-/// 组合为双工流。drop 时 kill 子进程。
+/// 组合为双工流。drop 时 kill 子进程并异步回收（`kill().await` 后
+/// `wait().await`），避免 zombie。
 pub async fn spawn_stdio(cmd: &mut tokio::process::Command) -> Result<StdioStream, RemoteError> {
     let mut child = cmd
         .stdin(Stdio::piped())
@@ -97,10 +99,30 @@ pub async fn spawn_stdio(cmd: &mut tokio::process::Command) -> Result<StdioStrea
         .stdout
         .take()
         .ok_or_else(|| RemoteError::Protocol("stdout not piped".into()))?;
+    let pid = child.id();
+
+    // 子进程回收 task：等待子进程自然退出，或 drop 触发 kill + wait（回收）。
+    let token = CancellationToken::new();
+    let token_clone = token.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            result = child.wait() => {
+                // 子进程自然退出（已回收）。
+                let _ = result;
+            }
+            _ = token_clone.cancelled() => {
+                // drop 触发：kill 子进程并等待其退出（回收，避免 zombie）。
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+            }
+        }
+    });
+
     Ok(StdioStream {
         stdin,
         stdout,
-        child,
+        pid,
+        token,
     })
 }
 
@@ -119,11 +141,22 @@ pub async fn listen_tcp(addr: impl ToSocketAddrs) -> Result<TcpStream, RemoteErr
 
 /// stdio 双工流：组合子进程的 stdin/stdout。
 ///
-/// 读侧委托 `stdout`，写侧委托 `stdin`。drop 时 kill 子进程。
+/// 读侧委托 `stdout`，写侧委托 `stdin`。drop 时 kill 子进程并异步回收
+/// （`kill().await` 后 `wait().await`），避免 zombie。
 pub struct StdioStream {
     stdin: ChildStdin,
     stdout: ChildStdout,
-    child: Child,
+    /// 子进程 PID（用于测试验证回收）。
+    pid: Option<u32>,
+    /// 子进程回收 task 的取消信号（drop 时触发 kill + wait）。
+    token: CancellationToken,
+}
+
+impl StdioStream {
+    /// 获取子进程 PID。
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
 }
 
 impl AsyncRead for StdioStream {
@@ -156,6 +189,37 @@ impl AsyncWrite for StdioStream {
 
 impl Drop for StdioStream {
     fn drop(&mut self) {
-        let _ = self.child.start_kill();
+        // 触发 kill 信号（回收 task 会 kill + wait，避免 zombie）。
+        self.token.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// 回归（问题4）：drop StdioStream 后，子进程被 kill 并回收（无 zombie）。
+    #[tokio::test]
+    async fn test_stdio_stream_reaps_child() {
+        // Spawn a child process that sleeps.
+        let mut cmd = tokio::process::Command::new("sleep");
+        cmd.arg("10");
+        let stream = spawn_stdio(&mut cmd).await.expect("spawn");
+        let pid = stream.pid().expect("pid available after spawn");
+
+        // Drop the stream (triggers kill + reap).
+        drop(stream);
+
+        // Wait for the reaping task to complete.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Verify the child process is gone (no zombie).
+        // On Linux, a reaped process has no /proc/<pid>/ entry.
+        let proc_path = format!("/proc/{pid}");
+        assert!(
+            !std::path::Path::new(&proc_path).exists(),
+            "child process should be reaped (no /proc/{pid} entry)"
+        );
     }
 }
