@@ -281,3 +281,32 @@ loop {
 **二期（稳定接口之外）**：Session 树 / JSONL 崩溃恢复 / 上下文摘要 / 插件与远程协议 / deferred tools。
 
 一期验收：`cargo check` / `cargo clippy -D warnings` / `cargo test` / `cargo fmt --check` 四门全绿。
+
+## 7. 三期：多 client / 多 lane / ACP / CLI（2026-09-01 规划）
+
+> 依据 PM 定稿意见：需要多 client、多 lane session、CLI 独立运行、ACP 支持；插件机制延后（011 deferred tools 已为其前置）。
+
+### 7.1 分层
+
+```
+┌─ CLI (015) ───────────────────┐   ┌─ 外部编辑器/客户端 ────────┐
+│ 交互式 REPL / --acp 模式       │   │ ACP client（stdio / SSE）   │
+└────────────┬──────────────────┘   └────────────┬───────────────┘
+             │                                   │
+             ▼                                   ▼
+          ACP 适配 (014)  ← JSON-RPC 2.0：stdio（本地 1:1）、SSE+HTTP（远程多 client）
+             │
+             ▼
+          Agent Server (013)  ← 多 session 注册表 + 多 lane 调度（transport 无关核心）
+             │
+             ├─ AgentHandle / Runtime（001/003）
+             └─ 多 lane session (012)  ← SharedSessionStorage + LaneWriter（进程内多 lane 并发写同一 session 树）
+```
+
+### 7.2 关键决策
+
+- **ACP 为三期对外标准协议**（Agent Client Protocol v1，JSON-RPC 2.0）：本地 stdio（1 进程 = 1 client）、远程 SSE+HTTP（多 client）。多 client 由「013 多 session 核心 + 014 ACP 远程 transport」共同交付。
+- **010 远程协议保持单连接**：不扩展多 client（避免与 ACP 双协议漂移）；需要多 client 走 ACP；010 仍用于轻量单连接场景。
+- **多 lane = 每 lane 一个写游标**（`LaneWriter`）+ 共享 append 串行化的 `SharedSessionStorage`（012），**仅进程内多 lane**；跨进程多写者（文件锁）仍不在范围（009/006 已声明）。
+- **插件机制延后**：012–015 均不涉插件；011 deferred tools（schema 与执行体分离）为未来插件注册表前置。
+- **CLI 复用嵌入库**：015 走 clap + 013 AgentServer + 007 adapters + 005/006 tools 装配真实 agent，验证「Embeddable + 可独立运行」双目标。

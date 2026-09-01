@@ -19,6 +19,16 @@
 - [x] 008 — 上下文摘要压缩 Compactor（依赖 007 真实现）
 - [x] 009 — Session 树 + JSONL 崩溃恢复（r3 审查通过，四门禁全绿）
 - [x] 010 — 远程协议（serde + newline-delimited JSON 双向流，r3 审查通过）
+- [ ] 011 — 工具惰性加载 DeferredTool（DeferredToolSpec 分离 schema 与执行体，OnceLock 惰性构建）
+
+## 三期 Backlog（多 client / 多 lane / ACP / CLI；插件延后）
+
+实施顺序：012 → 013 → 014 → 015
+
+- [ ] 012 — 多 lane session（SharedSessionStorage 串行化 append + LaneWriter 每 lane 游标，进程内多 lane 并发写同一 session 树）
+- [ ] 013 — Agent Server（多 session 注册表 + 多 lane 调度核心 + 多连接 TCP 协议）
+- [ ] 014 — ACP 适配（Agent Client Protocol v1：stdio 必做 / SSE 可选，session/prompt/cancel/fs/权限映射到 013）
+- [ ] 015 — CLI 独立运行（clap：交互式 REPL + `--acp` 模式，复用 013/007/005/006/009）
 
 ## 备注
 
@@ -40,3 +50,6 @@
 - 009 已于 r3 审查通过（2026-08-31，docs/reviews/009-review-r3.md）：四门禁全绿、139 测试通过；r1（id 溢出 / path_to 叶契约）→ r2（单文件 408 行超限）→ r3 无阻塞问题，`session.rs` 已拆分 `JsonlSessionStorage` 至 `jsonl.rs` 子模块
 - 010 规格 v1.0（2026-08-31，Architect）：跨进程远程协议 = serde + newline-delimited JSON 在线双向流；命令面与 001 `AgentCommand` 一一对应；`RemoteServer`（serve 一条连接）/ `RemoteClient`（watch+broadcast 本地重建进程内契约）；connector 复用同一 codec（stdio/tcp）；连接即推初始快照对齐「lag→重读 snapshot」；单 agent 边界、多 lane 并发写 session 排除（后续任务）；无新增依赖
 - 010 已于 r3 审查通过（2026-09-01，docs/reviews/010-review-r3.md）：r1（初始 Snapshot 顺序 / 连接关闭传播 / writer 失败传播 / 子进程回收）→ r2（abort 关闭检查）→ r3 无阻塞，164 测试通过。注：审查环境无 cargo，四门禁以 Developer 执行记录（164 全绿）为准，非 reviewer 独立复跑——建议 PM 在具备工具链环境补一次独立门禁复核
+- 011 规格 v1.0（2026-09-01，Architect）：补 architecture 二期 deferred tools 缺口。DeferredToolSpec（owned schema：name/description/parameters/resource_scope）与执行体分离，DeferredTool 实现 Tool trait 惰性包装——schema 方法只读 spec 不触发工厂，execute 首次经 `std::sync::OnceLock` 构建并缓存（进程内仅一次，不跨 await 持锁）；工厂同步 + infallible，async 实例化留后续「插件」任务。零破坏：DeferredTool 本身是合法 Tool，仍入 `Vec<Arc<dyn Tool>>`，不改 003 主循环与注册契约
+- 011 规格 v1.1（2026-09-01，Architect，依据 Developer 架构审查）：新类型 `ToolSpec` 改名 `DeferredToolSpec`，消除与既有 `core::provider::ToolSpec`（003/007 定稿 wire 格式）顶层 glob 重导出撞名歧义。方案 A（改名不动 provider 侧），零破坏
+- 三期拆分（2026-09-01，Architect，依据 PM 定稿意见「多 client / 多 lane session / CLI 独立运行 / ACP，插件延后」）：012 多 lane session（底层）→ 013 Agent Server（多 session 注册表 + 多 lane 调度核心 + 多连接 TCP）→ 014 ACP 适配（Agent Client Protocol v1，stdio 必做 / SSE 可选）→ 015 CLI（clap）。关键决策见 architecture.md §7：ACP 为对外标准协议、010 协议保持单连接不扩展、多 lane 仅进程内、插件延后（011 为前置）
