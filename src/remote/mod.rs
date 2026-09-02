@@ -9,7 +9,7 @@
 //! 不在本任务（属后续，009 已声明）。
 
 mod client;
-mod codec;
+pub mod codec;
 mod protocol;
 mod server;
 

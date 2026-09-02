@@ -12,6 +12,7 @@
 pub mod adapters;
 pub mod core;
 pub mod remote;
+pub mod server;
 pub mod tools;
 
 #[cfg(feature = "providers-http")]
@@ -27,5 +28,6 @@ pub use core::{
     session::*,
     tool::*,
 };
-pub use remote::{RemoteClient, RemoteError, RemoteRequest, RemoteServer, ServerMessage};
+pub use remote::{RemoteClient, RemoteError, RemoteRequest, RemoteServer};
+pub use server::{AgentServer, ServerError, ServerMessage, ServerRequest, SessionId};
 pub use tools::*;
