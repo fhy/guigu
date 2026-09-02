@@ -23,6 +23,11 @@ impl AgentServer {
     ///
     /// `session_id` 不存在 → `SessionNotFound`；`lane_id` 已存在 →
     /// `LaneAlreadyExists`。
+    ///
+    /// 并发：runtime spawn 在锁外，预检查与最终入表不是原子操作。故第二次取锁
+    /// 后必须再次校验 session 存在且 lane 不存在；校验失败时显式 shutdown 已
+    /// spawn 的 handle（桥接 task 随事件流关闭退出），避免覆盖已有 lane 或泄漏
+    /// runtime。
     pub async fn spawn_lane(
         &self,
         session_id: &str,
@@ -49,21 +54,34 @@ impl AgentServer {
             lane_id.to_string(),
             None,
         )));
-        // 4. spawn 桥接 task（订阅事件流 → 串行落盘 MessageEnd）。
+        // 4. spawn 桥接 task（先于登记订阅，保证事件不丢持久化）。
         spawn_bridge(handle.clone(), writer.clone(), lane_id);
-        // 5. 入表。
-        {
+        // 5. 二次校验并入表（原子）：session 被并发移除（如 shutdown）或 lane 被
+        //    并发登记时，显式清理已 spawn 的 handle 并返回对应错误。
+        let insert_err = {
             let mut sessions = self.inner.sessions.lock().await;
-            if let Some(session) = sessions.get_mut(session_id) {
-                session.lanes.insert(
-                    lane_id.to_string(),
-                    LaneRuntime {
-                        lane_id: lane_id.to_string(),
-                        handle,
-                        writer,
-                    },
-                );
+            match sessions.get_mut(session_id) {
+                Some(session) => {
+                    if session.lanes.contains_key(lane_id) {
+                        Some(ServerError::LaneAlreadyExists(lane_id.to_string()))
+                    } else {
+                        session.lanes.insert(
+                            lane_id.to_string(),
+                            LaneRuntime {
+                                lane_id: lane_id.to_string(),
+                                handle: handle.clone(),
+                                writer: writer.clone(),
+                            },
+                        );
+                        None
+                    }
+                }
+                None => Some(ServerError::SessionNotFound(session_id.to_string())),
             }
+        };
+        if let Some(e) = insert_err {
+            Self::cleanup_handle(handle).await;
+            return Err(e);
         }
         Ok(())
     }
@@ -74,6 +92,10 @@ impl AgentServer {
     /// transcript 起步（`AgentHandle` 不支持种子 transcript，不改既有签名）。
     /// `session_id` 不存在 → `SessionNotFound`；`from_lane` 不存在 → `LaneNotFound`；
     /// `new_lane` 已存在 → `LaneAlreadyExists`。
+    ///
+    /// 并发：与 `spawn_lane` 相同——runtime spawn 在锁外，第二次取锁后再次校验
+    /// session 存在、`new_lane` 不存在、`from_lane` 仍存在；校验失败时显式
+    /// shutdown 已 spawn 的 handle，避免覆盖已有 lane 或泄漏 runtime。
     pub async fn fork_lane(
         &self,
         session_id: &str,
@@ -107,21 +129,36 @@ impl AgentServer {
             new_lane.to_string(),
             source_head,
         )));
-        // 5. spawn 桥接 task。
+        // 5. spawn 桥接 task（先于登记订阅，保证事件不丢持久化）。
         spawn_bridge(handle.clone(), writer.clone(), new_lane);
-        // 6. 入表。
-        {
+        // 6. 二次校验并入表（原子）：session 被并发移除、`new_lane` 被并发登记、
+        //    或 `from_lane` 被并发移除时，显式清理已 spawn 的 handle 并返回错误。
+        let insert_err = {
             let mut sessions = self.inner.sessions.lock().await;
-            if let Some(session) = sessions.get_mut(session_id) {
-                session.lanes.insert(
-                    new_lane.to_string(),
-                    LaneRuntime {
-                        lane_id: new_lane.to_string(),
-                        handle,
-                        writer,
-                    },
-                );
+            match sessions.get_mut(session_id) {
+                Some(session) => {
+                    if session.lanes.contains_key(new_lane) {
+                        Some(ServerError::LaneAlreadyExists(new_lane.to_string()))
+                    } else if !session.lanes.contains_key(from_lane) {
+                        Some(ServerError::LaneNotFound(from_lane.to_string()))
+                    } else {
+                        session.lanes.insert(
+                            new_lane.to_string(),
+                            LaneRuntime {
+                                lane_id: new_lane.to_string(),
+                                handle: handle.clone(),
+                                writer: writer.clone(),
+                            },
+                        );
+                        None
+                    }
+                }
+                None => Some(ServerError::SessionNotFound(session_id.to_string())),
             }
+        };
+        if let Some(e) = insert_err {
+            Self::cleanup_handle(handle).await;
+            return Err(e);
         }
         Ok(())
     }
@@ -229,6 +266,14 @@ impl AgentServer {
             .get(lane_id)
             .ok_or_else(|| ServerError::LaneNotFound(lane_id.to_string()))?;
         Ok(lane.handle.clone())
+    }
+
+    /// 清理已 spawn 但未登记的 handle：显式 shutdown（等 runtime task 退出），
+    /// 桥接 task 随事件流关闭退出。shutdown 失败仅告警（调用方已拿到主错误）。
+    async fn cleanup_handle(handle: AgentHandle) {
+        if let Err(e) = handle.shutdown().await {
+            tracing::warn!("server: failed to clean up unregistered lane handle: {e}");
+        }
     }
 }
 

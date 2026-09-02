@@ -4,9 +4,10 @@
 //! - `serve_connection`：读 `ServerRequest` → 分发到 `AgentServer` 方法；订阅事件转发。
 //!
 //! 复用 010 codec（newline-delimited JSON）+ 写半单 writer task 模式（不持锁跨
-//! await）。连接关闭只移除该连接的订阅，不关 session/lane（多 client 共享 session
-//! 语义）。`SpawnLane` / `ForkLane` / `CreateSession` 的 runtime / storage 由服务端
-//! 工厂构造（wire 不携带不可序列化的 runtime / storage）。
+//! await）。连接断开（EOF）只移除该连接的订阅，不关 session/lane（多 client 共享
+//! session 语义）；`Shutdown` 请求则全局关闭所有 session/lane（协议语义）。
+//! `SpawnLane` / `ForkLane` / `CreateSession` 的 runtime / storage 由服务端工厂构造
+//! （wire 不携带不可序列化的 runtime / storage）。
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -25,6 +26,9 @@ use crate::core::event::AgentEvent;
 use crate::core::runtime::AgentRuntime;
 use crate::remote::codec::{LineReader, write_line};
 
+/// 订阅条目：取消 token + forwarder task 句柄（cancel 后可 await 其退出）。
+type Subscription = (CancellationToken, tokio::task::JoinHandle<()>);
+
 impl AgentServer {
     /// 监听 TCP，accept 循环；每连接 spawn 一个 task 跑 `serve_connection`。
     pub async fn serve_tcp(self: Arc<Self>, addr: SocketAddr) -> Result<(), ServerError> {
@@ -40,9 +44,9 @@ impl AgentServer {
 
     /// 服务一条连接：读 `ServerRequest` → 分发到 `AgentServer` 方法；订阅事件转发。
     ///
-    /// 写半归单一 writer task（`mpsc` 汇入 → 写循环）；每个 `Subscribe` 起一个事件
-    /// 转发 task（per-lane `CancellationToken` 管理，`Unsubscribe` / 连接关闭时
-    /// cancel）。连接关闭只移除该连接的订阅，不关 session/lane。
+    /// 写半归单一 writer task；每个 `Subscribe` 起一个事件转发 task（per-lane
+    /// `CancellationToken` 管理，`Unsubscribe` / 连接关闭时 cancel）。连接关闭只
+    /// 移除该连接的订阅，不关 session/lane。
     pub async fn serve_connection<S>(self: Arc<Self>, stream: S) -> Result<(), ServerError>
     where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
@@ -63,8 +67,8 @@ impl AgentServer {
             }
         });
 
-        // per-lane 订阅 token：`Subscribe` 插入，`Unsubscribe` / 连接关闭时 cancel。
-        let mut subscriptions: HashMap<(SessionId, String), CancellationToken> = HashMap::new();
+        // per-lane 订阅（重复订阅 / Unsubscribe / 连接关闭时 cancel 并 await 退出）。
+        let mut subscriptions: HashMap<(SessionId, String), Subscription> = HashMap::new();
 
         // 读循环：逐条解析 ServerRequest 分发；writer 失败时立即终止。
         let result: Result<(), ServerError> = loop {
@@ -85,9 +89,10 @@ impl AgentServer {
             }
         };
 
-        // 关闭：cancel 所有订阅 token，drop tx 让 writer task 退出。
-        for token in subscriptions.values() {
+        // 关闭：cancel 所有订阅并等待 forwarder task 退出，再 drop tx 让 writer task 退出。
+        for (_, (token, task)) in subscriptions.drain() {
             token.cancel();
+            let _ = task.await;
         }
         drop(tx);
         let _ = writer_task.await;
@@ -122,7 +127,7 @@ async fn dispatch(
     server: &AgentServer,
     req: ServerRequest,
     tx: &mpsc::UnboundedSender<ServerMessage>,
-    subscriptions: &mut HashMap<(SessionId, String), CancellationToken>,
+    subscriptions: &mut HashMap<(SessionId, String), Subscription>,
 ) -> Result<bool, ServerError> {
     let id = req.id();
     match req {
@@ -276,15 +281,22 @@ async fn dispatch(
         } => {
             match server.subscribe(&session_id, &lane_id).await {
                 Some(receiver) => {
+                    // 重复订阅同一 (session, lane)：先 cancel 旧 forwarder 并等待其退出，避免重复投递与 task 泄漏。
+                    if let Some((old_token, old_task)) =
+                        subscriptions.remove(&(session_id.clone(), lane_id.clone()))
+                    {
+                        old_token.cancel();
+                        let _ = old_task.await;
+                    }
                     let lane_token = CancellationToken::new();
-                    spawn_event_forwarder(
+                    let task = spawn_event_forwarder(
                         tx,
                         &lane_token,
                         session_id.clone(),
                         lane_id.clone(),
                         receiver,
                     );
-                    subscriptions.insert((session_id, lane_id), lane_token);
+                    subscriptions.insert((session_id, lane_id), (lane_token, task));
                     send_msg(
                         tx,
                         ServerMessage::Response {
@@ -308,8 +320,11 @@ async fn dispatch(
             lane_id,
             ..
         } => {
-            if let Some(token) = subscriptions.remove(&(session_id.clone(), lane_id.clone())) {
+            if let Some((token, task)) =
+                subscriptions.remove(&(session_id.clone(), lane_id.clone()))
+            {
                 token.cancel();
+                let _ = task.await;
             }
             send_msg(
                 tx,
@@ -321,28 +336,28 @@ async fn dispatch(
             Ok(true)
         }
         ServerRequest::Shutdown { .. } => {
-            send_msg(
-                tx,
-                ServerMessage::Response {
-                    id,
-                    result: Ok(serde_json::Value::Null),
-                },
-            )?;
-            Ok(false) // 关闭连接（不关 session/lane，多 client 共享语义）
+            // 全局关闭：关闭所有 session/lane（协议语义），再关闭当前连接。
+            let result = server
+                .shutdown()
+                .await
+                .map(|_| serde_json::Value::Null)
+                .map_err(|e| e.to_string());
+            send_msg(tx, ServerMessage::Response { id, result })?;
+            Ok(false)
         }
     }
 }
 
-/// 启动事件转发 task：消费 lane 的 `broadcast::Receiver`，把 `AgentEvent` 包成
-/// `Event` 消息（带 session/lane 前缀）发到写通道。`token` cancel（`Unsubscribe` /
-/// 连接关闭）或写通道关闭 / 事件流关闭时退出。
+/// 启动事件转发 task：消费 lane 的 `broadcast::Receiver`，把 `AgentEvent` 包成 `Event`
+/// 消息（带 session/lane 前缀）发到写通道。`token` cancel / 写通道关闭 / 事件流关闭时
+/// 退出。返回 `JoinHandle` 供 cancel 后等待 task 真正退出（避免残留 forwarder）。
 fn spawn_event_forwarder(
     tx: &mpsc::UnboundedSender<ServerMessage>,
     token: &CancellationToken,
     session_id: SessionId,
     lane_id: String,
     receiver: broadcast::Receiver<AgentEvent>,
-) {
+) -> tokio::task::JoinHandle<()> {
     let tx = tx.clone();
     let token = token.clone();
     tokio::spawn(async move {
@@ -368,7 +383,7 @@ fn spawn_event_forwarder(
                 },
             }
         }
-    });
+    })
 }
 
 /// 发送一条 `ServerMessage` 到写通道。

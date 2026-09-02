@@ -22,7 +22,7 @@ use guigu::core::session::{
 };
 use guigu::core::{AgentRuntime, LoopConfig, ToolExecutionMode};
 use guigu::remote::codec::{LineReader, write_line};
-use guigu::server::{AgentServer, ServerMessage, ServerRequest};
+use guigu::server::{AgentServer, ServerError, ServerMessage, ServerRequest};
 use tokio::io::duplex;
 
 /// 内存存储（测试用，同步构造；满足 `storage_factory` 同步闭包约束）。
@@ -154,7 +154,7 @@ async fn wait_tree_leaves(storage: &Arc<SharedSessionStorage>, min_leaves: usize
 }
 
 /// 单个 client 的完整流程：create session + spawn lane + subscribe + prompt，
-/// 验证事件路由（session/lane 前缀正确），最后 Shutdown 关闭连接。
+/// 验证事件路由（session/lane 前缀正确），最后断开连接（不关 session/lane）。
 async fn client_flow(
     server: Arc<AgentServer>,
     session_id: &str,
@@ -253,17 +253,28 @@ async fn client_flow(
         "should receive AgentEnd for {session_id}/{lane_id}"
     );
 
-    // Shutdown 关闭连接。
-    write_line(&mut write_half, &ServerRequest::Shutdown { id: 5 })
-        .await
-        .map_err(|e| e.to_string())?;
-    read_response(&mut reader, 5).await?;
-
+    // 断开连接（EOF）：只移除该连接的订阅，不关 session/lane。
     drop(reader);
     drop(write_half);
     let _ = server_task.await;
 
     Ok(())
+}
+
+/// 建立 duplex 连接，返回客户端读 / 写侧（服务端 spawn 为 task）。
+async fn connect_client(
+    server: &Arc<AgentServer>,
+) -> (
+    LineReader<impl tokio::io::AsyncRead + Unpin>,
+    impl tokio::io::AsyncWrite + Unpin,
+) {
+    let (client_stream, server_stream) = duplex(4096);
+    let server2 = Arc::clone(server);
+    tokio::spawn(async move {
+        let _ = server2.serve_connection(server_stream).await;
+    });
+    let (read_half, write_half) = tokio::io::split(client_stream);
+    (LineReader::new(read_half), write_half)
 }
 
 /// 多 client 并发：两 client 连同一 `AgentServer`，各自 create session + spawn
@@ -383,4 +394,443 @@ async fn test_fork_lane_branches() {
         .await
         .expect("prompt l1 again");
     wait_tree_leaves(&storage, 2).await;
+}
+
+/// 并发重复 spawn_lane：恰好一个成功，另一个 `LaneAlreadyExists`
+/// （不覆盖已有 lane、不泄漏 runtime）。
+#[tokio::test]
+async fn test_concurrent_spawn_lane_race() {
+    let provider = common::FakeProvider::new(vec![]);
+    let server = AgentServer::new();
+    server
+        .create_session("s1".to_string(), Arc::new(InMemoryStorage::new()))
+        .await
+        .expect("create");
+
+    let (r1, r2) = tokio::join!(
+        server.spawn_lane(
+            "s1",
+            "l1",
+            common::make_config(),
+            common::make_runtime(
+                provider.clone(),
+                vec![],
+                ToolExecutionMode::Sequential,
+                8192
+            ),
+        ),
+        server.spawn_lane(
+            "s1",
+            "l1",
+            common::make_config(),
+            common::make_runtime(
+                provider.clone(),
+                vec![],
+                ToolExecutionMode::Sequential,
+                8192
+            ),
+        ),
+    );
+
+    let results = [r1, r2];
+    let ok = results.iter().filter(|r| r.is_ok()).count();
+    let dup = results
+        .iter()
+        .filter(|r| matches!(r, Err(ServerError::LaneAlreadyExists(_))))
+        .count();
+    assert_eq!(ok, 1, "exactly one spawn should succeed: {results:?}");
+    assert_eq!(
+        dup, 1,
+        "the other should get LaneAlreadyExists: {results:?}"
+    );
+
+    // 登记的 lane 可用（未被失败的 spawn 覆盖）。
+    assert!(server.snapshot("s1", "l1").await.is_some());
+    // shutdown 完成（失败 spawn 的 runtime 已清理，不挂起）。
+    server.shutdown().await.expect("shutdown");
+}
+
+/// 并发重复 fork_lane：恰好一个成功，另一个 `LaneAlreadyExists`。
+#[tokio::test]
+async fn test_concurrent_fork_lane_race() {
+    let provider = common::FakeProvider::new(vec![]);
+    let server = AgentServer::new();
+    server
+        .create_session("s1".to_string(), Arc::new(InMemoryStorage::new()))
+        .await
+        .expect("create");
+    server
+        .spawn_lane(
+            "s1",
+            "l1",
+            common::make_config(),
+            common::make_runtime(
+                provider.clone(),
+                vec![],
+                ToolExecutionMode::Sequential,
+                8192,
+            ),
+        )
+        .await
+        .expect("spawn l1");
+
+    let (r1, r2) = tokio::join!(
+        server.fork_lane(
+            "s1",
+            "l1",
+            "l2",
+            common::make_config(),
+            common::make_runtime(
+                provider.clone(),
+                vec![],
+                ToolExecutionMode::Sequential,
+                8192
+            ),
+        ),
+        server.fork_lane(
+            "s1",
+            "l1",
+            "l2",
+            common::make_config(),
+            common::make_runtime(
+                provider.clone(),
+                vec![],
+                ToolExecutionMode::Sequential,
+                8192
+            ),
+        ),
+    );
+
+    let results = [r1, r2];
+    let ok = results.iter().filter(|r| r.is_ok()).count();
+    let dup = results
+        .iter()
+        .filter(|r| matches!(r, Err(ServerError::LaneAlreadyExists(_))))
+        .count();
+    assert_eq!(ok, 1, "exactly one fork should succeed: {results:?}");
+    assert_eq!(
+        dup, 1,
+        "the other should get LaneAlreadyExists: {results:?}"
+    );
+
+    assert!(server.snapshot("s1", "l2").await.is_some());
+    server.shutdown().await.expect("shutdown");
+}
+
+/// spawn_lane 与 shutdown 并发：无「spawn 成功但未登记」的幽灵态——
+/// 要么 Ok（已登记，随后被 shutdown 关闭），要么 SessionNotFound（session 被并发关闭）。
+#[tokio::test]
+async fn test_spawn_lane_vs_shutdown() {
+    for _ in 0..20 {
+        let provider = common::FakeProvider::new(vec![]);
+        let server = AgentServer::new();
+        server
+            .create_session("s1".to_string(), Arc::new(InMemoryStorage::new()))
+            .await
+            .expect("create");
+
+        let spawn_task = {
+            let server = server.clone();
+            let provider = provider.clone();
+            tokio::spawn(async move {
+                server
+                    .spawn_lane(
+                        "s1",
+                        "l1",
+                        common::make_config(),
+                        common::make_runtime(provider, vec![], ToolExecutionMode::Sequential, 8192),
+                    )
+                    .await
+            })
+        };
+        let shutdown_task = {
+            let server = server.clone();
+            tokio::spawn(async move { server.shutdown().await })
+        };
+
+        let spawn_outcome = spawn_task.await.expect("spawn task");
+        let shutdown_outcome = shutdown_task.await.expect("shutdown task");
+        assert!(
+            shutdown_outcome.is_ok(),
+            "shutdown should succeed: {shutdown_outcome:?}"
+        );
+        assert!(
+            server.list_sessions().await.is_empty(),
+            "registry should be empty after shutdown"
+        );
+        match spawn_outcome {
+            Ok(()) => {}                               // 已登记，随后被 shutdown 关闭
+            Err(ServerError::SessionNotFound(_)) => {} // session 被并发关闭
+            other => panic!("unexpected spawn outcome: {other:?}"),
+        }
+    }
+}
+
+/// Shutdown 全局语义：一个 client 的 Shutdown 关闭所有 session/lane（不只当前连接）。
+#[tokio::test]
+async fn test_shutdown_global_semantics() {
+    let provider =
+        common::FakeProvider::new(vec![common::text_turn("ok1"), common::text_turn("ok2")]);
+    let server = Arc::new(make_server(provider));
+
+    // Client A：create s1 + spawn l1。
+    let (mut a_reader, mut a_writer) = connect_client(&server).await;
+    write_line(
+        &mut a_writer,
+        &ServerRequest::CreateSession {
+            id: 1,
+            session_id: Some("s1".to_string()),
+        },
+    )
+    .await
+    .expect("write");
+    read_response(&mut a_reader, 1).await.expect("create s1");
+    write_line(
+        &mut a_writer,
+        &ServerRequest::SpawnLane {
+            id: 2,
+            session_id: "s1".to_string(),
+            lane_id: "l1".to_string(),
+        },
+    )
+    .await
+    .expect("write");
+    read_response(&mut a_reader, 2).await.expect("spawn l1");
+
+    // Client B：create s2 + spawn l2。
+    let (mut b_reader, mut b_writer) = connect_client(&server).await;
+    write_line(
+        &mut b_writer,
+        &ServerRequest::CreateSession {
+            id: 1,
+            session_id: Some("s2".to_string()),
+        },
+    )
+    .await
+    .expect("write");
+    read_response(&mut b_reader, 1).await.expect("create s2");
+    write_line(
+        &mut b_writer,
+        &ServerRequest::SpawnLane {
+            id: 2,
+            session_id: "s2".to_string(),
+            lane_id: "l2".to_string(),
+        },
+    )
+    .await
+    .expect("write");
+    read_response(&mut b_reader, 2).await.expect("spawn l2");
+
+    assert_eq!(
+        server.list_sessions().await,
+        vec!["s1".to_string(), "s2".to_string()]
+    );
+
+    // Client A 发 Shutdown → Ok 应答，随后连接关闭（EOF）。
+    write_line(&mut a_writer, &ServerRequest::Shutdown { id: 3 })
+        .await
+        .expect("write");
+    read_response(&mut a_reader, 3).await.expect("shutdown ok");
+    let eof = a_reader.next::<ServerMessage>().await.expect("read");
+    assert!(eof.is_none(), "expected EOF after Shutdown");
+
+    // 全局语义：所有 session/lane 关闭（不只 A 的）。
+    assert!(
+        server.list_sessions().await.is_empty(),
+        "Shutdown should close all sessions"
+    );
+
+    // Client B 连接仍在，但其 session 已消失：GetSnapshot → Err。
+    write_line(
+        &mut b_writer,
+        &ServerRequest::GetSnapshot {
+            id: 3,
+            session_id: "s2".to_string(),
+            lane_id: "l2".to_string(),
+        },
+    )
+    .await
+    .expect("write");
+    let msg = b_reader
+        .next::<ServerMessage>()
+        .await
+        .expect("read")
+        .expect("some");
+    match msg {
+        ServerMessage::Response { id, result } => {
+            assert_eq!(id, 3);
+            assert!(result.is_err(), "expected Err after global shutdown");
+        }
+        other => panic!("expected Response, got {other:?}"),
+    }
+
+    // 清理 client B 连接。
+    drop(b_reader);
+    drop(b_writer);
+}
+
+/// 重复 Subscribe 同一 lane：旧 forwarder 被取消，每个事件只收到一次（不重复）。
+#[tokio::test]
+async fn test_duplicate_subscribe_no_duplicate_events() {
+    let provider = common::FakeProvider::new(vec![common::text_turn("ok")]);
+    let server = Arc::new(make_server(provider));
+
+    let (mut reader, mut writer) = connect_client(&server).await;
+    write_line(
+        &mut writer,
+        &ServerRequest::CreateSession {
+            id: 1,
+            session_id: Some("s1".to_string()),
+        },
+    )
+    .await
+    .expect("write");
+    read_response(&mut reader, 1).await.expect("create");
+    write_line(
+        &mut writer,
+        &ServerRequest::SpawnLane {
+            id: 2,
+            session_id: "s1".to_string(),
+            lane_id: "l1".to_string(),
+        },
+    )
+    .await
+    .expect("write");
+    read_response(&mut reader, 2).await.expect("spawn");
+
+    // 订阅两次（重复订阅）。
+    write_line(
+        &mut writer,
+        &ServerRequest::Subscribe {
+            id: 3,
+            session_id: "s1".to_string(),
+            lane_id: "l1".to_string(),
+        },
+    )
+    .await
+    .expect("write");
+    read_response(&mut reader, 3).await.expect("subscribe 1");
+    write_line(
+        &mut writer,
+        &ServerRequest::Subscribe {
+            id: 4,
+            session_id: "s1".to_string(),
+            lane_id: "l1".to_string(),
+        },
+    )
+    .await
+    .expect("write");
+    read_response(&mut reader, 4).await.expect("subscribe 2");
+
+    // Prompt。
+    write_line(
+        &mut writer,
+        &ServerRequest::Prompt {
+            id: 5,
+            session_id: "s1".to_string(),
+            lane_id: "l1".to_string(),
+            messages: vec![user_msg("hi")],
+        },
+    )
+    .await
+    .expect("write");
+    read_response(&mut reader, 5).await.expect("prompt");
+
+    // 读事件直到 AgentEnd：AgentStart / AgentEnd 各恰好出现一次
+    // （若旧 forwarder 未取消，会各出现两次）。
+    let mut agent_start = 0usize;
+    let mut agent_end = 0usize;
+    for _ in 0..200 {
+        let msg = reader
+            .next::<ServerMessage>()
+            .await
+            .expect("read")
+            .expect("some");
+        if let ServerMessage::Event { event, .. } = msg {
+            if matches!(event, AgentEvent::AgentStart) {
+                agent_start += 1;
+            }
+            if matches!(event, AgentEvent::AgentEnd { .. }) {
+                agent_end += 1;
+                break;
+            }
+        }
+    }
+    assert_eq!(agent_start, 1, "AgentStart should be received exactly once");
+    assert_eq!(agent_end, 1, "AgentEnd should be received exactly once");
+}
+
+/// Unsubscribe 后不再收到该 lane 的事件。
+#[tokio::test]
+async fn test_unsubscribe_stops_events() {
+    let provider = common::FakeProvider::new(vec![common::text_turn("ok")]);
+    let server = Arc::new(make_server(provider));
+
+    let (mut reader, mut writer) = connect_client(&server).await;
+    write_line(
+        &mut writer,
+        &ServerRequest::CreateSession {
+            id: 1,
+            session_id: Some("s1".to_string()),
+        },
+    )
+    .await
+    .expect("write");
+    read_response(&mut reader, 1).await.expect("create");
+    write_line(
+        &mut writer,
+        &ServerRequest::SpawnLane {
+            id: 2,
+            session_id: "s1".to_string(),
+            lane_id: "l1".to_string(),
+        },
+    )
+    .await
+    .expect("write");
+    read_response(&mut reader, 2).await.expect("spawn");
+
+    write_line(
+        &mut writer,
+        &ServerRequest::Subscribe {
+            id: 3,
+            session_id: "s1".to_string(),
+            lane_id: "l1".to_string(),
+        },
+    )
+    .await
+    .expect("write");
+    read_response(&mut reader, 3).await.expect("subscribe");
+
+    write_line(
+        &mut writer,
+        &ServerRequest::Unsubscribe {
+            id: 4,
+            session_id: "s1".to_string(),
+            lane_id: "l1".to_string(),
+        },
+    )
+    .await
+    .expect("write");
+    read_response(&mut reader, 4).await.expect("unsubscribe");
+
+    write_line(
+        &mut writer,
+        &ServerRequest::Prompt {
+            id: 5,
+            session_id: "s1".to_string(),
+            lane_id: "l1".to_string(),
+            messages: vec![user_msg("hi")],
+        },
+    )
+    .await
+    .expect("write");
+    read_response(&mut reader, 5).await.expect("prompt");
+
+    // Unsubscribe 后不应再收到任何事件（超时 = 无消息）。
+    let pending =
+        tokio::time::timeout(Duration::from_millis(300), reader.next::<ServerMessage>()).await;
+    assert!(
+        pending.is_err(),
+        "should not receive any message after Unsubscribe"
+    );
 }
