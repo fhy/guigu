@@ -27,7 +27,7 @@
 
 - [x] 012 — 多 lane session（SharedSessionStorage 串行化 append + LaneWriter 每 lane 游标，进程内多 lane 并发写同一 session 树）
 - [x] 013 — Agent Server（多 session 注册表 + 多 lane 调度核心 + 多连接 TCP 协议）
-- [ ] 014 — ACP 适配（Agent Client Protocol v1：stdio 必做 / SSE 可选，session/prompt/cancel/fs/权限映射到 013）
+- [x] 014 — ACP 适配（Agent Client Protocol v1：stdio 必做 / SSE 可选，session/prompt/cancel/fs/权限映射到 013）
 - [ ] 015 — CLI 独立运行（clap：交互式 REPL + `--acp` 模式，复用 013/007/005/006/009）
 
 ## 备注
@@ -57,3 +57,4 @@
 - 012 已于 r1 审查通过（2026-09-01，docs/reviews/012-review-r1.md）：代码审查无阻塞问题（SharedSessionStorage 全程持 tokio Mutex 串行化 append、LaneWriter 独立 head 游标、fork 分支语义与 009 reduce 一致），r1 三条非阻塞建议（inner() footgun、LaneWriter 未强制共享写入口、并发测试未覆盖每 lane 多步写）留待后续。注：审查环境无 cargo，四门禁以 Developer 执行记录（全绿）为准，非 reviewer 独立复跑——建议 PM 在具备工具链环境补一次独立门禁复核。下一动作：启动 013 开发（规格 v1.0 已就绪）
 - 013 规格 v1.0（2026-09-01，Architect）：多 session 注册表（create/load/close）+ 多 lane 调度核心（spawn_lane/fork_lane/abort/shutdown）+ 多连接 TCP 协议（server/protocol/transport/lane）；复用 012 SharedSessionStorage 与 009 持久化，协议面复用 010 codec 思路（NDJSON）；无新增依赖
 - 013 已于 r2 审查通过（2026-09-02，docs/reviews/013-review-r2.md）：r1 三项 Critical/High（spawn_lane/fork_lane 入表非原子竞态、Shutdown 未走全局语义、重复 Subscribe 未取消旧 forwarder）均已核销，新增回归测试断言有效结果；四门禁全绿、198 lib 测试 + server 9/9 集成通过。下一动作：启动 014 开发（规格 v1.0 已就绪）
+- 014 已于 r4 审查通过（2026-09-03，docs/reviews/014-review-r4.md）：四门禁全绿、243 单测 + 集成测试全绿（含 tests/acp.rs）；r1→r4 三轮打回项（authenticate/RequestId/session 级 mode、writer 错误通知读循环、FailingWriter Pin 签名/Tool trait 导入等）全部核销。非阻塞建议：tests.rs(476)/tests_transport.rs(413) 略超 400 行单文件上限（后续再拆）、规格措辞 cancellation vs 官方 wire cancelled 待统一。下一动作：启动 015 开发（规格 v1.0 已就绪）
