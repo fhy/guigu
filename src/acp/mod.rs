@@ -8,7 +8,9 @@
 //! - `types`：ACP wire 类型（`ContentBlock` / `AcpStopReason` / `PermissionOutcome` 等）
 //! - `mapping`：`AgentEvent` → `SessionUpdate`、`StopReason` → ACP `stopReason` 映射
 //! - `handlers`：各 ACP 方法处理（`impl AcpAgent`）
-//! - `transport`：`serve_stdio`（JSON-RPC 2.0 分帧）+ `StdioClient`
+//! - `jsonrpc`：JSON-RPC 2.0 wire 类型 + 入站消息校验 / 分类
+//! - `stdio_client`：`StdioClient`（`AcpClient` 实现）+ `StdioConnection`（连接资源）
+//! - `transport`：`serve_stdio` / `serve_connection`（stdio 连接循环 + writer task）
 //! - `fs_tool`：`AcpFsTool`（fs 读写经 `AcpClient` 代理，实现 `Tool` trait）
 //!
 //! 边界声明（同任务规格）：一期不支持 authenticate（`authMethods: []`）；不做 MCP
@@ -17,12 +19,20 @@
 
 mod fs_tool;
 mod handlers;
+mod jsonrpc;
 mod mapping;
+mod stdio_client;
 mod transport;
 mod types;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_fs;
+#[cfg(test)]
+mod tests_transport;
+#[cfg(test)]
+mod testutil;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,7 +45,7 @@ use crate::server::{AgentServer, ServerError};
 
 pub use fs_tool::AcpFsTool;
 pub use mapping::{acp_stop_reason, content_blocks_to_messages, map_event_to_update};
-pub use transport::StdioClient;
+pub use stdio_client::{StdioClient, StdioConnection};
 pub use types::{
     AcpStopReason, AgentCapabilities, ContentBlock, PROTOCOL_VERSION, PermissionOutcome,
     PromptCapabilities,

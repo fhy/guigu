@@ -10,358 +10,30 @@
 //! - **应答**（无 `method`、有 `id`）：路由到 `StdioClient` 的 pending 请求。
 //!
 //! 写半归单一 writer task（`mpsc` 汇入 → 写循环），避免多任务持锁跨 await。
+//! **writer 写失败**经 oneshot 通知读循环（Issue 1）：读循环 `select` 该错误与
+//! 输入，统一执行 `shutdown.cancel()` + `client.cancel_all()` + handler 回收，
+//! 返回明确 IO 错误，避免 `serve_connection` 永久阻塞、pending 请求泄漏。
+//!
+//! handler task 用 `JoinSet` 承载（Issue 2/4）：主循环持续 `try_join_next()` 回收
+//! 已完成任务（避免长连接无界增长），并观察 `JoinError`（panic 不静默）。
+//!
+//! 模块拆分（单文件 ≤ 400 行约束）：JSON-RPC 类型 / 分类见 `jsonrpc`，
+//! `StdioClient` / `StdioConnection` 见 `stdio_client`。
 //!
 //! SSE+HTTP 为可选加分项（`acp-sse` feature），本任务降级为后续（`serve_sse` 存根）。
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::acp::{AcpAgent, AcpClient, AcpError};
+use crate::acp::jsonrpc::{InboundKind, InboundMessage, OutboundMessage, classify_inbound};
+use crate::acp::stdio_client::{StdioClient, StdioConnection};
+use crate::acp::{AcpAgent, AcpError};
+use crate::remote::RemoteError;
 use crate::remote::codec::{LineReader, write_line};
-
-/// JSON-RPC 错误对象。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JsonRpcErrorObj {
-    /// 错误码（`-32603` = Internal error）。
-    pub code: i64,
-    /// 错误消息。
-    pub message: String,
-    /// 附加数据（可选）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<Value>,
-}
-
-/// JSON-RPC 请求 id（string 或 number）。
-///
-/// JSON-RPC 2.0 允许 id 为 string / number / null。guigu 只接受 string / number
-/// 作为 pending key（`null` 仅用于错误应答，不作为 key）。number 用 `i64` 承载
-/// （含负数），使合法的字符串 id / 负数 id 都能正确路由，而非被静默忽略。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum RequestId {
-    /// 数字 id（含负数）。
-    Number(i64),
-    /// 字符串 id。
-    String(String),
-}
-
-impl RequestId {
-    /// 从 JSON-RPC `id` 值解析（仅 string / number 合法；其余 → `None`）。
-    pub fn from_value(v: &Value) -> Option<Self> {
-        if let Some(n) = v.as_i64() {
-            Some(RequestId::Number(n))
-        } else {
-            v.as_str().map(|s| RequestId::String(s.to_string()))
-        }
-    }
-
-    /// 转回 JSON-RPC `id` 值（用于出站请求 / 应答）。
-    pub fn to_value(&self) -> Value {
-        match self {
-            RequestId::Number(n) => Value::from(*n),
-            RequestId::String(s) => Value::String(s.clone()),
-        }
-    }
-}
-
-/// 入站 JSON-RPC 消息（client→agent）：请求 / notification / 应答。
-///
-/// 有 `method` → 请求（有 `id`）或 notification（无 `id`）；无 `method` 且有 `id`
-/// → 对 agent 请求的应答。
-#[derive(Debug, Clone, Deserialize)]
-pub struct InboundMessage {
-    /// JSON-RPC 版本（须为 `"2.0"`，由 `classify_inbound` 校验）。
-    #[serde(default)]
-    pub jsonrpc: Option<String>,
-    /// 关联号；notification 缺省。
-    pub id: Option<Value>,
-    /// 方法名；应答缺省。
-    pub method: Option<String>,
-    /// 请求参数。
-    pub params: Option<Value>,
-    /// 应答结果。
-    pub result: Option<Value>,
-    /// 应答错误。
-    pub error: Option<JsonRpcErrorObj>,
-}
-
-/// 出站 JSON-RPC 消息（agent→client）：请求 / notification / 应答。
-#[derive(Debug, Clone, Serialize)]
-pub struct OutboundMessage {
-    pub jsonrpc: String,
-    /// 关联号；notification 缺省。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<Value>,
-    /// 方法名；应答缺省。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub method: Option<String>,
-    /// 请求参数。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub params: Option<Value>,
-    /// 应答结果。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<Value>,
-    /// 应答错误。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<JsonRpcErrorObj>,
-}
-
-impl OutboundMessage {
-    /// 构造对 client 请求的应答（成功）。
-    pub fn result(id: Value, result: Value) -> Self {
-        Self {
-            jsonrpc: "2.0".into(),
-            id: Some(id),
-            method: None,
-            params: None,
-            result: Some(result),
-            error: None,
-        }
-    }
-
-    /// 构造对 client 请求的应答（错误）。
-    pub fn error(id: Value, code: i64, message: String) -> Self {
-        Self {
-            jsonrpc: "2.0".into(),
-            id: Some(id),
-            method: None,
-            params: None,
-            result: None,
-            error: Some(JsonRpcErrorObj {
-                code,
-                message,
-                data: None,
-            }),
-        }
-    }
-
-    /// 构造 agent→client 请求（期望应答）。
-    pub fn request(id: &RequestId, method: &str, params: Value) -> Self {
-        Self {
-            jsonrpc: "2.0".into(),
-            id: Some(id.to_value()),
-            method: Some(method.into()),
-            params: Some(params),
-            result: None,
-            error: None,
-        }
-    }
-
-    /// 构造 agent→client notification（无应答）。
-    pub fn notification(method: &str, params: Value) -> Self {
-        Self {
-            jsonrpc: "2.0".into(),
-            id: None,
-            method: Some(method.into()),
-            params: Some(params),
-            result: None,
-            error: None,
-        }
-    }
-}
-
-/// pending 请求表：完整 JSON-RPC id（string / number）→ 应答 oneshot。
-type PendingMap = HashMap<RequestId, oneshot::Sender<Result<Value, AcpError>>>;
-
-/// stdio 传输的 `AcpClient` 实现：经 writer 通道向 client 发请求 / notification，
-/// pending 请求由读循环的应答路由唤醒。
-pub struct StdioClient {
-    /// 写通道（汇入 writer task）。
-    writer: mpsc::UnboundedSender<OutboundMessage>,
-    /// pending 请求：完整 JSON-RPC id → 应答 oneshot。
-    pending: Arc<Mutex<PendingMap>>,
-    /// 请求 id 分配器（单调递增，agent 出站请求用正整数 id）。
-    next_id: AtomicU64,
-}
-
-impl StdioClient {
-    /// 创建 stdio client（绑定写通道）。
-    pub fn new(writer: mpsc::UnboundedSender<OutboundMessage>) -> Self {
-        Self {
-            writer,
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            next_id: AtomicU64::new(1),
-        }
-    }
-
-    /// 路由一条 client 应答到 pending 请求（读循环调用）。
-    pub async fn resolve_pending(&self, id: RequestId, result: Result<Value, AcpError>) {
-        let mut pending = self.pending.lock().await;
-        if let Some(tx) = pending.remove(&id) {
-            let _ = tx.send(result);
-        }
-    }
-
-    /// 取消全部 pending 请求（连接断开时调用）：以明确错误结束所有 oneshot 并清空表，
-    /// 使等待中的 `request` 立即返回而非永久挂起（Issue 5）。
-    pub async fn cancel_all(&self) {
-        let mut pending = self.pending.lock().await;
-        for (_, tx) in pending.drain() {
-            let _ = tx.send(Err(AcpError::JsonRpc("connection closed".into())));
-        }
-    }
-
-    /// pending 请求数（测试 / 诊断用）。
-    pub async fn pending_len(&self) -> usize {
-        self.pending.lock().await.len()
-    }
-
-    /// 测试用：插入一个 pending entry（任意 id），返回其 oneshot receiver。
-    ///
-    /// 用于验证字符串 / 负数 id 的应答路由（`request` 只分配正整数 id，无法覆盖
-    /// 这些路径）。
-    #[cfg(test)]
-    pub async fn insert_pending_for_test(
-        &self,
-        id: RequestId,
-    ) -> oneshot::Receiver<Result<Value, AcpError>> {
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-        rx
-    }
-}
-
-#[async_trait]
-impl AcpClient for StdioClient {
-    async fn request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let key = RequestId::Number(id as i64);
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(key.clone(), tx);
-        let msg = OutboundMessage::request(&key, method, params);
-        // 发送失败（writer 已关闭）：移除 pending entry，避免 oneshot 泄漏（Issue 4）。
-        if self.writer.send(msg).is_err() {
-            self.pending.lock().await.remove(&key);
-            return Err(AcpError::JsonRpc("writer closed".into()));
-        }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => Err(AcpError::JsonRpc("request cancelled".into())),
-        }
-    }
-
-    async fn notify(&self, method: &str, params: Value) -> Result<(), AcpError> {
-        let msg = OutboundMessage::notification(method, params);
-        self.writer
-            .send(msg)
-            .map_err(|_| AcpError::JsonRpc("writer closed".into()))
-    }
-}
-
-/// 校验后的入站消息分类。
-#[derive(Debug)]
-pub(crate) enum InboundKind {
-    /// 请求（有 `method` + `id`）：spawn 处理并回 JSON-RPC 应答。
-    Request {
-        /// 关联号（原样回显）。
-        id: Value,
-        /// 方法名。
-        method: String,
-        /// 请求参数。
-        params: Value,
-    },
-    /// notification（有 `method`，无 `id`）：spawn 处理，不应答。
-    Notification {
-        /// 方法名。
-        method: String,
-        /// 请求参数。
-        params: Value,
-    },
-    /// 应答（无 `method`，有合法 `id`）：路由到 pending 请求。
-    Response {
-        /// 关联号（完整 JSON-RPC id）。
-        id: RequestId,
-        /// 应答结果（`Ok` = result，`Err` = error）。
-        result: Result<Value, AcpError>,
-    },
-}
-
-/// 校验并分类一条入站 JSON-RPC 2.0 消息（建议 1）。
-///
-/// 返回 `Ok(kind)` 表示合法；`Err((id, code, message))` 表示非法，调用方应回
-/// `OutboundMessage::error(id, code, message)`（`id` 为原消息的合法 id 或 `null`）。
-///
-/// 校验规则：
-/// - `jsonrpc` 若存在须为 `"2.0"`；
-/// - 含 `method` 时不得同时含 `result` / `error`；
-/// - 无 `method`（应答）时须有合法 `id` 且恰含 `result` / `error` 之一。
-pub(crate) fn classify_inbound(msg: &InboundMessage) -> Result<InboundKind, (Value, i64, String)> {
-    // 1. 校验 jsonrpc 版本。
-    if let Some(v) = &msg.jsonrpc
-        && v != "2.0"
-    {
-        return Err((
-            Value::Null,
-            -32600,
-            format!("invalid jsonrpc version: {v} (expected \"2.0\")"),
-        ));
-    }
-
-    let has_result = msg.result.is_some();
-    let has_error = msg.error.is_some();
-
-    if let Some(method) = &msg.method {
-        // 请求 / notification。
-        if has_result || has_error {
-            return Err((
-                msg.id.clone().unwrap_or(Value::Null),
-                -32600,
-                "invalid request: both method and result/error present".into(),
-            ));
-        }
-        let params = msg.params.clone().unwrap_or(Value::Null);
-        match &msg.id {
-            Some(id) => Ok(InboundKind::Request {
-                id: id.clone(),
-                method: method.clone(),
-                params,
-            }),
-            None => Ok(InboundKind::Notification {
-                method: method.clone(),
-                params,
-            }),
-        }
-    } else {
-        // 应答：须有合法 id + 恰含 result / error 之一。
-        if has_result && has_error {
-            return Err((
-                msg.id.clone().unwrap_or(Value::Null),
-                -32600,
-                "invalid response: both result and error present".into(),
-            ));
-        }
-        if !has_result && !has_error {
-            return Err((
-                msg.id.clone().unwrap_or(Value::Null),
-                -32600,
-                "invalid response: missing result and error".into(),
-            ));
-        }
-        let id = msg
-            .id
-            .as_ref()
-            .and_then(RequestId::from_value)
-            .ok_or_else(|| {
-                (
-                    Value::Null,
-                    -32600,
-                    "invalid response: missing or invalid id".to_string(),
-                )
-            })?;
-        let result = match (&msg.result, &msg.error) {
-            (Some(result), None) => Ok(result.clone()),
-            (None, Some(error)) => Err(AcpError::JsonRpc(error.message.clone())),
-            _ => unreachable!("checked above"),
-        };
-        Ok(InboundKind::Response { id, result })
-    }
-}
 
 impl AcpAgent {
     /// stdio：对 stdin/stdout 跑 JSON-RPC 2.0（1 进程 = 1 client）。
@@ -380,23 +52,49 @@ impl AcpAgent {
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        self.serve_connection_with(reader, writer, StdioConnection::new())
+            .await
+    }
+
+    /// 用注入的连接资源跑 JSON-RPC 2.0（测试 / 嵌入方可注入 `StdioClient`）。
+    ///
+    /// 与 `serve_connection` 相同，但 `StdioClient` 由 `conn` 提供，调用方可经
+    /// `conn.client()` 取得句柄驱动 agent→client 请求（如测试 writer 错误路径下
+    /// 的 pending 清理）。
+    pub async fn serve_connection_with<R, W>(
+        self,
+        reader: R,
+        writer: W,
+        conn: StdioConnection,
+    ) -> Result<(), AcpError>
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let (client, mut writer_rx) = conn.into_parts();
         let mut reader = LineReader::new(reader);
         let mut writer = writer;
 
-        // 写半归单一 writer task：mpsc 汇入 → 写循环。
-        let (tx, mut rx) = mpsc::unbounded_channel::<OutboundMessage>();
-        // EOF / 错误时显式通知 writer task 退出：`StdioClient` 持有 `tx` 克隆且
-        // 生命周期与 `serve_connection` 相同，故 `rx.recv()` 不会因 sender 归零而
-        // 返回 `None`，须用取消令牌兜底。
+        // 写半归单一 writer task：mpsc 汇入 → 写循环。首个写错误经 mpsc 通知读循环
+        // （Issue 1）；EOF / 错误时由读循环 `shutdown.cancel()` 兜底退出。
+        // 用 mpsc（容量 1）而非 oneshot：mpsc receiver 是 `Unpin`，可在 `select!`
+        // 循环中复用；oneshot receiver 非 `Unpin`，循环内会被移动导致编译失败。
+        let (writer_error_tx, mut writer_error_rx) = mpsc::channel::<AcpError>(1);
         let shutdown = CancellationToken::new();
         let writer_shutdown = shutdown.clone();
         let writer_task = tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    msg = rx.recv() => match msg {
+                    msg = writer_rx.recv() => match msg {
                         Some(msg) => {
                             if let Err(e) = write_line(&mut writer, &msg).await {
                                 tracing::warn!("acp stdio: write failed: {e}");
+                                // 首个写错误通知读循环：读循环据此统一清理并返回 IO 错误。
+                                let acp_err = match e {
+                                    RemoteError::Io(io_err) => AcpError::Io(io_err),
+                                    other => AcpError::JsonRpc(other.to_string()),
+                                };
+                                let _ = writer_error_tx.send(acp_err).await;
                                 break;
                             }
                         }
@@ -407,81 +105,120 @@ impl AcpAgent {
             }
         });
 
-        let client = Arc::new(StdioClient::new(tx.clone()));
         let agent = Arc::new(self);
-        // in-flight handler task（请求 / notification 各 spawn 一个）；连接断开时统一
-        // abort + 回收，避免 `session/prompt` 等长任务在 client 断开后永久挂起（Issue 5）。
-        let mut handler_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        // in-flight handler task（JoinSet 持续回收，避免无界增长 + 观察 panic，Issue 2/4）。
+        let mut handlers = JoinSet::new();
 
-        // 读循环：逐条解析入站消息。
-        loop {
-            match reader.next::<InboundMessage>().await {
-                Ok(Some(msg)) => match classify_inbound(&msg) {
-                    Ok(InboundKind::Request { id, method, params }) => {
-                        // 请求：spawn 独立 task 处理并回 JSON-RPC 应答（双工）。
-                        let agent = Arc::clone(&agent);
-                        let client = Arc::clone(&client);
-                        let tx = tx.clone();
-                        let handle = tokio::spawn(async move {
-                            let result = agent.handle(&*client, &method, params).await;
-                            let resp = match result {
-                                Ok(value) => OutboundMessage::result(id, value),
-                                Err(e) => OutboundMessage::error(id, -32603, e.to_string()),
-                            };
-                            let _ = tx.send(resp);
-                        });
-                        handler_tasks.push(handle);
+        // 读循环：select 入站消息 与 writer 错误。返回 `Ok(())`（EOF）或 `Err`。
+        let result: Result<(), AcpError> = loop {
+            // 先回收已完成的 handler task（Issue 2/4）：清理句柄 + 观察 panic。
+            reap_handlers(&mut handlers);
+
+            tokio::select! {
+                maybe_msg = reader.next::<InboundMessage>() => {
+                    match maybe_msg {
+                        Ok(Some(msg)) => match classify_inbound(&msg) {
+                            Ok(InboundKind::Request { id, method, params }) => {
+                                spawn_request(&mut handlers, &agent, &client, id, method, params);
+                            }
+                            Ok(InboundKind::Notification { method, params }) => {
+                                spawn_notification(&mut handlers, &agent, &client, method, params);
+                            }
+                            Ok(InboundKind::Response { id, result }) => {
+                                // 对 agent 请求的应答：路由到 pending（完整 JSON-RPC id）。
+                                client.resolve_pending(id, result).await;
+                            }
+                            Err((error_id, code, message)) => {
+                                // 非法消息：回标准 JSON-RPC 错误（id 为原合法 id 或 null）。
+                                let resp = OutboundMessage::error(error_id, code, message);
+                                let _ = client.send_outbound(resp);
+                            }
+                        },
+                        Ok(None) => break Ok(()), // EOF
+                        Err(e) => break Err(AcpError::JsonRpc(format!("read error: {e}"))),
                     }
-                    Ok(InboundKind::Notification { method, params }) => {
-                        // notification：spawn 独立 task 处理，不应答。
-                        let agent = Arc::clone(&agent);
-                        let client = Arc::clone(&client);
-                        let handle = tokio::spawn(async move {
-                            let _ = agent.handle(&*client, &method, params).await;
-                        });
-                        handler_tasks.push(handle);
-                    }
-                    Ok(InboundKind::Response { id, result }) => {
-                        // 对 agent 请求的应答：路由到 pending（完整 JSON-RPC id）。
-                        client.resolve_pending(id, result).await;
-                    }
-                    Err((error_id, code, message)) => {
-                        // 非法消息：回标准 JSON-RPC 错误（id 为原合法 id 或 null）。
-                        let resp = OutboundMessage::error(error_id, code, message);
-                        let _ = tx.send(resp);
-                    }
-                },
-                Ok(None) => break, // EOF
-                Err(e) => {
-                    // 读错误：取消连接，清理 pending + handler task + writer task。
-                    shutdown.cancel();
-                    client.cancel_all().await;
-                    let tasks = std::mem::take(&mut handler_tasks);
-                    for task in &tasks {
-                        task.abort();
-                    }
-                    for task in tasks {
-                        let _ = task.await;
-                    }
-                    let _ = writer_task.await;
-                    return Err(AcpError::JsonRpc(e.to_string()));
+                }
+                maybe_err = writer_error_rx.recv() => {
+                    // writer 写失败（Issue 1）：统一清理并返回 IO 错误。
+                    // `None`（sender 已 drop 且无错误）表示 writer task 异常退出。
+                    let err = match maybe_err {
+                        Some(e) => e,
+                        None => AcpError::JsonRpc("writer task exited unexpectedly".into()),
+                    };
+                    break Err(err);
                 }
             }
-        }
+        };
 
-        // EOF：取消连接（writer task 退出 + pending 请求以错误结束 + handler task 回收）。
-        shutdown.cancel();
-        client.cancel_all().await;
-        for task in &handler_tasks {
-            task.abort();
-        }
-        for task in handler_tasks {
-            let _ = task.await;
-        }
-        drop(tx);
-        let _ = writer_task.await;
-        Ok(())
+        // 统一清理（EOF / 读错误 / writer 错误都走这里）：
+        // 取消 writer task + 取消全部 pending 请求 + abort 并回收 handler task。
+        teardown(&shutdown, &client, &mut handlers, writer_task).await;
+        result
     }
+}
+
+/// 回收已完成的 handler task（Issue 2/4）：清理句柄 + 观察 `JoinError`（panic 不静默）。
+fn reap_handlers(handlers: &mut JoinSet<()>) {
+    while let Some(res) = handlers.try_join_next() {
+        if let Err(e) = res {
+            if e.is_panic() {
+                tracing::error!("acp stdio: handler task panicked: {e}");
+            } else {
+                tracing::warn!("acp stdio: handler task cancelled: {e}");
+            }
+        }
+    }
+}
+
+/// spawn 一个请求 handler task（处理并回 JSON-RPC 应答）。
+fn spawn_request(
+    handlers: &mut JoinSet<()>,
+    agent: &Arc<AcpAgent>,
+    client: &Arc<StdioClient>,
+    id: Value,
+    method: String,
+    params: Value,
+) {
+    let agent = Arc::clone(agent);
+    let client = Arc::clone(client);
+    handlers.spawn(async move {
+        let result = agent.handle(&*client, &method, params).await;
+        let resp = match result {
+            Ok(value) => OutboundMessage::result(id, value),
+            Err(e) => OutboundMessage::error(id, -32603, e.to_string()),
+        };
+        let _ = client.send_outbound(resp);
+    });
+}
+
+/// spawn 一个 notification handler task（处理，不应答）。
+fn spawn_notification(
+    handlers: &mut JoinSet<()>,
+    agent: &Arc<AcpAgent>,
+    client: &Arc<StdioClient>,
+    method: String,
+    params: Value,
+) {
+    let agent = Arc::clone(agent);
+    let client = Arc::clone(client);
+    handlers.spawn(async move {
+        let _ = agent.handle(&*client, &method, params).await;
+    });
+}
+
+/// 连接清理（EOF / 读错误 / writer 错误统一走这里）：
+/// 取消 writer task + 取消全部 pending 请求 + abort 并回收 handler task。
+async fn teardown(
+    shutdown: &CancellationToken,
+    client: &Arc<StdioClient>,
+    handlers: &mut JoinSet<()>,
+    writer_task: tokio::task::JoinHandle<()>,
+) {
+    shutdown.cancel();
+    client.cancel_all().await;
+    handlers.abort_all();
+    while handlers.join_next().await.is_some() {}
+    let _ = writer_task.await;
 }
 
 #[cfg(feature = "acp-sse")]

@@ -123,7 +123,12 @@ impl AcpAgent {
                 Ok(event) => {
                     if let Some(update) = map_event_to_update(&event) {
                         let notify_params = json!({ "sessionId": session_id, "update": update });
-                        let _ = client.notify("session/update", notify_params).await;
+                        // 通知失败（client 已断开）：立即结束 prompt（中止 lane）并返回
+                        // 错误，避免客户端已断开但 prompt 继续消耗 runtime（建议 1）。
+                        if let Err(e) = client.notify("session/update", notify_params).await {
+                            let _ = self.server.abort(&session_id, DEFAULT_LANE).await;
+                            return Err(e);
+                        }
                     }
                     if let AgentEvent::TurnEnd { message, .. } = &event
                         && let Some(sr) = &message.stop_reason
