@@ -59,7 +59,7 @@ impl AcpAgent {
 ```
 
 - **双工要点**：`handle` 在收到 `session/prompt` 时，需「边跑 runtime 边向 client 推 `session/update`」——实现为：spawn 一个 task 消费 `server.subscribe(session, lane)` 事件流，逐条 `client.notify("session/update", ...)`，`session/prompt` 主请求在 lane run 结束后返回 `PromptResponse`。
-- `PermissionMode` 用 `serde_repr` 或 `#[serde(rename_all)]` 对齐 ACP 枚举；`stopReason` 映射：001 的 `stop_reason`（completed/length/error/aborted）→ ACP `end_turn/max_tokens/refusal/cancellation`（无直接对应的按最相近映射，映射表写入 doc 注释）。
+- `PermissionMode` 用 `serde_repr` 或 `#[serde(rename_all)]` 对齐 ACP 枚举；`stopReason` 映射：001 的 `stop_reason`（completed/length/error/aborted）→ ACP `end_turn/max_tokens/refusal/cancelled`（无直接对应的按最相近映射，映射表写入 doc 注释）。
 
 ### 传输层（src/acp/transport.rs）
 
@@ -124,3 +124,4 @@ pub enum AcpError {
 ## 修订记录
 
 - v1.0（2026-09-01，Architect）：初稿。ACP v1 stable 为 wire 权威（官方 spec 为准）；guigu 实现最小可用面（initialize/session/new/load/prompt/cancel/set_mode + session/update + fs/read+write + request_permission）；双工经 `AcpClient` 句柄注入；stdio 必做、SSE 可选加分项；工具装配下沉到 015 CLI/嵌入方，fs 工具经 client 代理（权限隔离）。
+- v1.1（2026-09-03，Architect，依据 r4 审查建议）：统一 stopReason 措辞——正文将 `cancellation` 更正为官方 wire 值 `cancelled`（`end_turn/max_tokens/refusal/cancelled`），消除规格与实现/官方 spec 的措辞歧义。
