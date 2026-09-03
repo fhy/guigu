@@ -36,11 +36,11 @@ impl AcpAgent {
         }))
     }
 
-    /// `authenticate`（c→a）：一期不支持 auth → 返回错误（`initialize` 已声明 `authMethods: []`）。
+    /// `authenticate`（c→a）：一期不支持 auth → 返回 `authMethods: []`（对齐任务规格
+    /// 方法映射与边界声明；不能仅依赖 `initialize` 的空能力声明，兼容客户端可能在
+    /// 初始化后仍调用该方法）。
     pub(crate) async fn handle_authenticate(&self, _params: Value) -> Result<Value, AcpError> {
-        Err(AcpError::JsonRpc(
-            "authentication is not supported in this phase".into(),
-        ))
+        Ok(json!({ "authMethods": [] }))
     }
 
     /// `session/new`（c→a）：分配 sessionId → 建 session → spawn 默认 lane → 返回 `{ sessionId }`。
@@ -55,7 +55,7 @@ impl AcpAgent {
         Ok(json!({ "sessionId": session_id }))
     }
 
-    /// `session/load`（c→a）：从持久化恢复 session → spawn 默认 lane → 返回 `null`。
+    /// `session/load`（c→a）：从持久化恢复 session → spawn 默认 lane → 返回 `{ sessionId }`。
     pub(crate) async fn handle_load_session(&self, params: Value) -> Result<Value, AcpError> {
         let session_id = params
             .get("sessionId")
@@ -89,14 +89,12 @@ impl AcpAgent {
             .and_then(Value::as_str)
             .ok_or_else(|| AcpError::JsonRpc("missing sessionId".into()))?
             .to_string();
-        let blocks: Vec<ContentBlock> = params
-            .get("prompt")
-            .and_then(Value::as_array)
-            .ok_or_else(|| AcpError::JsonRpc("missing prompt".into()))?
-            .iter()
-            .map(|b| serde_json::from_value(b.clone()))
-            .collect::<Result<_, _>>()
-            .map_err(AcpError::Serde)?;
+        let blocks = parse_content_blocks(
+            params
+                .get("prompt")
+                .and_then(Value::as_array)
+                .ok_or_else(|| AcpError::JsonRpc("missing prompt".into()))?,
+        )?;
 
         let messages = content_blocks_to_messages(&blocks);
         if messages.is_empty() {
@@ -163,14 +161,28 @@ impl AcpAgent {
         Ok(Value::Null)
     }
 
-    /// `session/set_mode`（c→a，notification）：更新权限模式。
+    /// `session/set_mode`（c→a，notification）：更新 **目标 session** 的权限模式。
+    ///
+    /// 权限模式为 session 级（按 `sessionId` 隔离）：必须解析并校验 `sessionId`
+    /// 存在，只更新该 session 的模式，不影响其他 session（避免权限串改 / 绕过）。
     pub(crate) async fn handle_set_mode(&self, params: Value) -> Result<Value, AcpError> {
+        let session_id = params
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AcpError::JsonRpc("missing sessionId".into()))?
+            .to_string();
         let mode_id = params
             .get("modeId")
             .and_then(Value::as_str)
             .ok_or_else(|| AcpError::JsonRpc("missing modeId".into()))?;
+        // 校验 session 存在（不存在的 session 不能修改任何权限状态）。
+        let sessions = self.server.list_sessions().await;
+        if !sessions.contains(&session_id) {
+            return Err(AcpError::Server(ServerError::SessionNotFound(session_id)));
+        }
         let mode = PermissionMode::from_mode_id(mode_id);
-        let mut guard = self.mode.write().await;
+        let mode_handle = self.mode_for(&session_id).await;
+        let mut guard = mode_handle.write().await;
         *guard = mode;
         Ok(Value::Null)
     }
@@ -187,4 +199,33 @@ impl AcpAgent {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// 解析 `prompt` 的 `ContentBlock[]`（一期仅文本）。
+///
+/// 对合法但暂不支持的非文本块（`image` / `resource` 等）返回可诊断的
+/// 「不支持内容类型」错误，而非让整个请求落入泛化 serde 错误（建议 3）。
+fn parse_content_blocks(prompt: &[Value]) -> Result<Vec<ContentBlock>, AcpError> {
+    let mut blocks = Vec::with_capacity(prompt.len());
+    for (i, b) in prompt.iter().enumerate() {
+        match b.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                let block: ContentBlock = serde_json::from_value(b.clone()).map_err(|e| {
+                    AcpError::JsonRpc(format!("invalid text block at prompt[{i}]: {e}"))
+                })?;
+                blocks.push(block);
+            }
+            Some(other) => {
+                return Err(AcpError::JsonRpc(format!(
+                    "unsupported content type at prompt[{i}]: {other} (phase 1 supports text only)"
+                )));
+            }
+            None => {
+                return Err(AcpError::JsonRpc(format!(
+                    "invalid content block at prompt[{i}]: missing or non-string 'type'"
+                )));
+            }
+        }
+    }
+    Ok(blocks)
 }

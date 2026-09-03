@@ -16,7 +16,9 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::acp::mapping::{acp_stop_reason, content_blocks_to_messages, map_event_to_update};
-use crate::acp::transport::{InboundMessage, OutboundMessage};
+use crate::acp::transport::{
+    InboundKind, InboundMessage, OutboundMessage, RequestId, StdioClient, classify_inbound,
+};
 use crate::acp::types::{AcpStopReason, ContentBlock, PermissionOutcome};
 use crate::acp::{AcpAgent, AcpClient, AcpError, AcpFsTool, PermissionMode};
 use crate::core::agent::AgentConfig;
@@ -390,8 +392,87 @@ async fn test_set_mode_updates_permission() {
         .await
         .expect("set_mode");
 
-    let mode = *agent.mode().read().await;
+    let mode = *agent.mode_for(&session_id).await.read().await;
     assert_eq!(mode, PermissionMode::Plan);
+}
+
+/// `authenticate` 一期不支持 → 返回 `authMethods: []`（对齐任务规格，非 JSON-RPC 错误）。
+#[tokio::test]
+async fn test_authenticate_returns_empty_auth_methods() {
+    let agent = make_agent(Arc::new(NoopProvider));
+    let client = FakeClient::new();
+    let result = agent
+        .handle(&client, "authenticate", json!({ "methodId": "token" }))
+        .await
+        .expect("authenticate should succeed (not error)");
+    assert_eq!(result["authMethods"].as_array().unwrap().len(), 0);
+}
+
+/// 多 session 权限隔离：session A 设 `plan` 不影响 session B（仍 `default`）。
+#[tokio::test]
+async fn test_set_mode_session_isolation() {
+    let agent = make_agent(Arc::new(NoopProvider));
+    let client = FakeClient::new();
+
+    let a = agent
+        .handle(&client, "session/new", json!({}))
+        .await
+        .expect("new A");
+    let a_id = a["sessionId"].as_str().unwrap().to_string();
+    let b = agent
+        .handle(&client, "session/new", json!({}))
+        .await
+        .expect("new B");
+    let b_id = b["sessionId"].as_str().unwrap().to_string();
+
+    // session A 设 plan。
+    agent
+        .handle(
+            &client,
+            "session/set_mode",
+            json!({ "sessionId": a_id, "modeId": "plan" }),
+        )
+        .await
+        .expect("set A");
+
+    // A 是 plan，B 仍是 default（隔离，未串改）。
+    let a_mode = *agent.mode_for(&a_id).await.read().await;
+    let b_mode = *agent.mode_for(&b_id).await.read().await;
+    assert_eq!(a_mode, PermissionMode::Plan);
+    assert_eq!(b_mode, PermissionMode::Default);
+}
+
+/// `set_mode` 对不存在的 session 返回错误（不修改任何权限状态）。
+#[tokio::test]
+async fn test_set_mode_unknown_session_errors() {
+    let agent = make_agent(Arc::new(NoopProvider));
+    let client = FakeClient::new();
+    let result = agent
+        .handle(
+            &client,
+            "session/set_mode",
+            json!({ "sessionId": "nonexistent", "modeId": "plan" }),
+        )
+        .await;
+    assert!(result.is_err(), "should error for unknown session");
+    // 不存在的 session 不应在 modes 表中留下任何状态。
+    let mode = *agent.mode_for("nonexistent").await.read().await;
+    assert_eq!(
+        mode,
+        PermissionMode::Default,
+        "unknown session mode untouched"
+    );
+}
+
+/// `set_mode` 缺 `sessionId` → 错误（session 级操作必须携带 sessionId）。
+#[tokio::test]
+async fn test_set_mode_missing_session_id_errors() {
+    let agent = make_agent(Arc::new(NoopProvider));
+    let client = FakeClient::new();
+    let result = agent
+        .handle(&client, "session/set_mode", json!({ "modeId": "plan" }))
+        .await;
+    assert!(result.is_err(), "should error when sessionId missing");
 }
 
 /// 事件映射：`TextDelta` → `agent_message_chunk`。
@@ -827,5 +908,257 @@ async fn test_jsonrpc_framing_roundtrip() {
             .expect("read")
             .expect("some");
         assert!(decoded.id.is_some() || decoded.method.is_some());
+    }
+}
+
+// ===== RequestId（Issue 2：string / 负数 id 路由）=====
+
+/// `RequestId::from_value`：string / 正数 / 负数合法；bool / null / 对象 → `None`。
+#[test]
+fn test_request_id_from_value() {
+    assert_eq!(
+        RequestId::from_value(&Value::from("abc")),
+        Some(RequestId::String("abc".into()))
+    );
+    assert_eq!(
+        RequestId::from_value(&Value::from(42)),
+        Some(RequestId::Number(42))
+    );
+    assert_eq!(
+        RequestId::from_value(&Value::from(-7)),
+        Some(RequestId::Number(-7))
+    );
+    // 非法类型 → None。
+    assert_eq!(RequestId::from_value(&Value::Bool(true)), None);
+    assert_eq!(RequestId::from_value(&Value::Null), None);
+    assert_eq!(RequestId::from_value(&json!({})), None);
+    assert_eq!(RequestId::from_value(&json!([1])), None);
+}
+
+/// `RequestId::to_value` 往返：string / 负数 id 序列化后与 `from_value` 一致。
+#[test]
+fn test_request_id_roundtrip() {
+    for id in [
+        RequestId::String("req-1".into()),
+        RequestId::Number(0),
+        RequestId::Number(-1),
+        RequestId::Number(i64::MAX),
+    ] {
+        let v = id.to_value();
+        assert_eq!(
+            RequestId::from_value(&v),
+            Some(id.clone()),
+            "roundtrip {id:?}"
+        );
+    }
+}
+
+/// 应答路由：字符串 id / 负数 id 都能正确唤醒对应 pending（Issue 2）。
+#[tokio::test]
+async fn test_resolve_pending_string_and_negative_id() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<OutboundMessage>();
+    let client = StdioClient::new(tx);
+
+    // 字符串 id。
+    let s_rx = client
+        .insert_pending_for_test(RequestId::String("abc".into()))
+        .await;
+    client
+        .resolve_pending(RequestId::String("abc".into()), Ok(json!({ "ok": true })))
+        .await;
+    let result = s_rx.await.expect("string id should resolve").expect("ok");
+    assert_eq!(result["ok"], true);
+
+    // 负数 id。
+    let n_rx = client.insert_pending_for_test(RequestId::Number(-5)).await;
+    client
+        .resolve_pending(RequestId::Number(-5), Ok(json!({ "neg": true })))
+        .await;
+    let result = n_rx.await.expect("negative id should resolve").expect("ok");
+    assert_eq!(result["neg"], true);
+
+    // 不匹配的 id 不应误唤醒（pending 已清空）。
+    assert_eq!(client.pending_len().await, 0);
+}
+
+// ===== pending 清理（Issue 4 / Issue 5）=====
+
+/// writer 已关闭时 `request` 失败，且 pending entry 被清理（无泄漏，Issue 4）。
+#[tokio::test]
+async fn test_pending_cleanup_on_send_failure() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<OutboundMessage>();
+    let client = StdioClient::new(tx);
+    drop(rx); // 关闭 writer 接收端，使 send 失败。
+
+    let result = client.request("fs/read_text_file", json!({})).await;
+    assert!(result.is_err(), "should error when writer closed");
+    assert_eq!(
+        client.pending_len().await,
+        0,
+        "pending should be cleaned up"
+    );
+}
+
+/// `cancel_all`：连接断开时全部 pending 以明确错误结束并清空（Issue 5）。
+#[tokio::test]
+async fn test_cancel_all_resolves_pending() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<OutboundMessage>();
+    let client = StdioClient::new(tx);
+
+    let rx1 = client.insert_pending_for_test(RequestId::Number(1)).await;
+    let rx2 = client
+        .insert_pending_for_test(RequestId::String("in-flight".into()))
+        .await;
+    assert_eq!(client.pending_len().await, 2);
+
+    client.cancel_all().await;
+    assert_eq!(client.pending_len().await, 0, "pending should be cleared");
+
+    // 两个等待中的请求都以「连接关闭」错误结束（而非永久挂起）。
+    let e1 = rx1
+        .await
+        .expect("rx1 resolved")
+        .expect_err("should be cancelled");
+    assert!(e1.to_string().contains("connection closed"));
+    let e2 = rx2
+        .await
+        .expect("rx2 resolved")
+        .expect_err("should be cancelled");
+    assert!(e2.to_string().contains("connection closed"));
+}
+
+// ===== ContentBlock 不支持类型（建议 3）=====
+
+/// `session/prompt` 含非文本块（image）→ 明确「不支持内容类型」错误（非泛化 serde 错误）。
+#[tokio::test]
+async fn test_prompt_unsupported_content_type() {
+    let agent = make_agent(Arc::new(NoopProvider));
+    let client = FakeClient::new();
+
+    let new_result = agent
+        .handle(&client, "session/new", json!({}))
+        .await
+        .expect("session/new");
+    let session_id = new_result["sessionId"].as_str().unwrap().to_string();
+
+    let result = agent
+        .handle(
+            &client,
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "image", "data": "xxx", "mimeType": "image/png" }]
+            }),
+        )
+        .await;
+    let err = result.expect_err("image block should be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unsupported content type"),
+        "should be a clear unsupported-type error, got: {msg}"
+    );
+    assert!(msg.contains("image"), "should name the offending type");
+}
+
+/// `session/prompt` 块缺 `type` 字段 → 明确「非法内容块」错误。
+#[tokio::test]
+async fn test_prompt_block_missing_type() {
+    let agent = make_agent(Arc::new(NoopProvider));
+    let client = FakeClient::new();
+
+    let new_result = agent
+        .handle(&client, "session/new", json!({}))
+        .await
+        .expect("session/new");
+    let session_id = new_result["sessionId"].as_str().unwrap().to_string();
+
+    let result = agent
+        .handle(
+            &client,
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "text": "no type field" }]
+            }),
+        )
+        .await;
+    let err = result.expect_err("block without type should be rejected");
+    assert!(err.to_string().contains("missing or non-string 'type'"));
+}
+
+// ===== 入站消息校验（建议 1）=====
+
+/// `classify_inbound`：`jsonrpc` 版本非法 → 错误。
+#[test]
+fn test_classify_inbound_bad_version() {
+    let msg: InboundMessage =
+        serde_json::from_str(r#"{"jsonrpc":"1.0","id":1,"method":"initialize"}"#).unwrap();
+    let err = classify_inbound(&msg).expect_err("bad version should error");
+    assert_eq!(err.1, -32600);
+    assert!(err.2.contains("invalid jsonrpc version"));
+}
+
+/// `classify_inbound`：同时含 `method` 与 `result` → 错误。
+#[test]
+fn test_classify_inbound_method_and_result() {
+    let msg: InboundMessage =
+        serde_json::from_str(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","result":{}}"#)
+            .unwrap();
+    let err = classify_inbound(&msg).expect_err("method+result should error");
+    assert_eq!(err.1, -32600);
+    assert!(err.2.contains("both method and result/error"));
+}
+
+/// `classify_inbound`：应答缺 `result` / `error` → 错误。
+#[test]
+fn test_classify_inbound_response_missing_body() {
+    let msg: InboundMessage = serde_json::from_str(r#"{"jsonrpc":"2.0","id":1}"#).unwrap();
+    let err = classify_inbound(&msg).expect_err("response without body should error");
+    assert_eq!(err.1, -32600);
+    assert!(err.2.contains("missing result and error"));
+}
+
+/// `classify_inbound`：应答 id 非法（bool）→ 错误。
+#[test]
+fn test_classify_inbound_response_bad_id() {
+    let msg: InboundMessage =
+        serde_json::from_str(r#"{"jsonrpc":"2.0","id":true,"result":{}}"#).unwrap();
+    let err = classify_inbound(&msg).expect_err("bad id should error");
+    assert_eq!(err.1, -32600);
+    assert!(err.2.contains("missing or invalid id"));
+}
+
+/// `classify_inbound`：合法请求 / notification / 应答（string id）正确分类。
+#[test]
+fn test_classify_inbound_valid_messages() {
+    // 请求。
+    let msg: InboundMessage =
+        serde_json::from_str(r#"{"jsonrpc":"2.0","id":7,"method":"session/new","params":{}}"#)
+            .unwrap();
+    match classify_inbound(&msg).expect("valid request") {
+        InboundKind::Request { id, method, .. } => {
+            assert_eq!(id, Value::from(7));
+            assert_eq!(method, "session/new");
+        }
+        _ => panic!("expected Request"),
+    }
+
+    // notification（无 id）。
+    let msg: InboundMessage =
+        serde_json::from_str(r#"{"jsonrpc":"2.0","method":"session/cancel"}"#).unwrap();
+    assert!(matches!(
+        classify_inbound(&msg).expect("valid notification"),
+        InboundKind::Notification { .. }
+    ));
+
+    // 应答（string id）。
+    let msg: InboundMessage =
+        serde_json::from_str(r#"{"jsonrpc":"2.0","id":"abc","result":{"ok":true}}"#).unwrap();
+    match classify_inbound(&msg).expect("valid response") {
+        InboundKind::Response { id, result } => {
+            assert_eq!(id, RequestId::String("abc".into()));
+            assert!(result.is_ok());
+        }
+        _ => panic!("expected Response"),
     }
 }

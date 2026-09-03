@@ -24,11 +24,12 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::server::{AgentServer, ServerError};
 
@@ -121,8 +122,9 @@ pub trait AcpClient: Send + Sync {
 
 /// ACP agent 侧适配器：实现 client→agent 方法，并经 `AcpClient` 句柄发起 agent→client 调用。
 ///
-/// 复用 013 `AgentServer` 做 session / lane 后端；`mode` 为当前权限模式
-/// （`session/set_mode` 更新，影响后续 fs / 权限判定）。
+/// 复用 013 `AgentServer` 做 session / lane 后端；权限模式为 **session 级**
+/// （`modes` 按 `sessionId` 隔离，`session/set_mode` 只影响目标 session，避免多
+/// session 并发时互相串改权限）。
 ///
 /// 双工要点：`handle` 收到 `session/prompt` 时，边消费 `AgentServer` 事件流边向
 /// client 推 `session/update`，lane run 结束后返回 `PromptResponse { stopReason }`。
@@ -131,19 +133,19 @@ pub trait AcpClient: Send + Sync {
 pub struct AcpAgent {
     /// 013 多 session 后端。
     server: AgentServer,
-    /// 当前权限模式（`session/set_mode` 更新）。
-    mode: Arc<RwLock<PermissionMode>>,
+    /// session 级权限模式：`sessionId` → 模式句柄（`session/set_mode` 更新）。
+    modes: Arc<Mutex<HashMap<String, Arc<RwLock<PermissionMode>>>>>,
 }
 
 impl AcpAgent {
-    /// 创建 ACP 适配器（初始权限模式为 `Default`）。
+    /// 创建 ACP 适配器（各 session 初始权限模式为 `Default`）。
     ///
     /// 嵌入方须先经 `server.with_runtime_factory` / `with_storage_factory` 配置工厂，
     /// 否则 `session/new` / `session/load` / `session/prompt` 会因工厂缺失返回错误。
     pub fn new(server: AgentServer) -> Self {
         Self {
             server,
-            mode: Arc::new(RwLock::new(PermissionMode::Default)),
+            modes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -169,9 +171,16 @@ impl AcpAgent {
         }
     }
 
-    /// 当前权限模式句柄（供 `AcpFsTool` 等读取 / 共享）。
-    pub fn mode(&self) -> Arc<RwLock<PermissionMode>> {
-        Arc::clone(&self.mode)
+    /// 获取 session 的权限模式句柄（不存在则创建为 `Default`）。
+    ///
+    /// 供嵌入方创建 `AcpFsTool` 时绑定 **session 级** 权限模式；`session/set_mode`
+    /// 更新同一句柄，故工具始终读到该 session 的最新模式，且不影响其他 session。
+    pub async fn mode_for(&self, session_id: &str) -> Arc<RwLock<PermissionMode>> {
+        let mut modes = self.modes.lock().await;
+        modes
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(RwLock::new(PermissionMode::Default)))
+            .clone()
     }
 
     /// 后端 `AgentServer`（供嵌入方 / 测试访问）。
