@@ -8,6 +8,7 @@
 //!   依赖 `reqwest`。嵌入方若只需核心运行时，可用
 //!   `guigu = { path = ..., default-features = false }` 剥离 HTTP 依赖。
 
+pub mod acp;
 #[cfg(feature = "providers-http")]
 pub mod adapters;
 pub mod core;
@@ -15,6 +16,7 @@ pub mod remote;
 pub mod server;
 pub mod tools;
 
+pub use acp::{AcpAgent, AcpClient, AcpError, AcpFsTool, PermissionMode};
 #[cfg(feature = "providers-http")]
 pub use adapters::{AnthropicConfig, AnthropicProvider, OpenAiConfig, OpenAiProvider};
 pub use core::{

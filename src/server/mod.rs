@@ -194,6 +194,60 @@ impl AgentServer {
         ids.sort();
         ids
     }
+
+    /// 分配一个单调递增的 session id（供 ACP 等 transport 生成 `sessionId`）。
+    pub fn allocate_session_id(&self) -> SessionId {
+        self.inner
+            .next_session_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .to_string()
+    }
+
+    /// 用已配置的 storage 工厂新建 session（工厂未配置 → `Protocol` 错误）。
+    pub async fn create_session_from_factory(
+        &self,
+        session_id: SessionId,
+    ) -> Result<(), ServerError> {
+        let factory = self
+            .inner
+            .storage_factory
+            .get()
+            .cloned()
+            .ok_or_else(|| ServerError::Protocol("no storage factory".into()))?;
+        let storage = factory(&session_id);
+        self.create_session(session_id, storage).await
+    }
+
+    /// 用已配置的 storage 工厂 load + 重建 session（工厂未配置 → `Protocol` 错误）。
+    pub async fn load_session_from_factory(
+        &self,
+        session_id: SessionId,
+    ) -> Result<(), ServerError> {
+        let factory = self
+            .inner
+            .storage_factory
+            .get()
+            .cloned()
+            .ok_or_else(|| ServerError::Protocol("no storage factory".into()))?;
+        let storage = factory(&session_id);
+        self.load_session(session_id, storage).await
+    }
+
+    /// 用已配置的 runtime 工厂在 session 内 spawn 一个 lane（工厂未配置 → `Protocol` 错误）。
+    pub async fn spawn_lane_from_factory(
+        &self,
+        session_id: &str,
+        lane_id: &str,
+    ) -> Result<(), ServerError> {
+        let factory = self
+            .inner
+            .runtime_factory
+            .get()
+            .cloned()
+            .ok_or_else(|| ServerError::Protocol("no runtime factory".into()))?;
+        let (config, runtime) = factory();
+        self.spawn_lane(session_id, lane_id, config, runtime).await
+    }
 }
 
 #[cfg(test)]

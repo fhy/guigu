@@ -10,6 +10,9 @@ repository = "https://github.com/fhy/guigu"
 [features]
 default = ["providers-http"]
 providers-http = ["dep:reqwest"]
+# Task 014：ACP SSE+HTTP 传输（多 client，可选加分项）。默认不含；stdio 为必做 DoD。
+# 本任务降级为后续（`serve_sse` 存根），启用后需补 axum/reqwest 依赖与实现。
+acp-sse = []
 
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
