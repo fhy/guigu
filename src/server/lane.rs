@@ -13,7 +13,7 @@ use crate::core::agent::{Agent, AgentConfig, AgentHandle, AgentSnapshot};
 use crate::core::event::AgentEvent;
 use crate::core::message::Message;
 use crate::core::runtime::AgentRuntime;
-use crate::core::session::LaneWriter;
+use crate::core::session::{LaneWriter, NodeId};
 
 use super::{AgentServer, LaneRuntime, ServerError};
 
@@ -21,19 +21,55 @@ impl AgentServer {
     /// 在 session 内 spawn 一个 lane：spawn `AgentRuntime` → 得到 `AgentHandle`
     /// → 挂 `LaneWriter` 桥接持久化 → 登记。
     ///
+    /// 空 transcript 起步，`LaneWriter` head = `None`（首次 append 成为根）。
     /// `session_id` 不存在 → `SessionNotFound`；`lane_id` 已存在 →
     /// `LaneAlreadyExists`。
-    ///
-    /// 并发：runtime spawn 在锁外，预检查与最终入表不是原子操作。故第二次取锁
-    /// 后必须再次校验 session 存在且 lane 不存在；校验失败时显式 shutdown 已
-    /// spawn 的 handle（桥接 task 随事件流关闭退出），避免覆盖已有 lane 或泄漏
-    /// runtime。
     pub async fn spawn_lane(
         &self,
         session_id: &str,
         lane_id: &str,
         config: AgentConfig,
         runtime: AgentRuntime,
+    ) -> Result<(), ServerError> {
+        self.spawn_lane_with(session_id, lane_id, config, runtime, Vec::new(), None)
+            .await
+    }
+
+    /// spawn 一个续写 lane（session 恢复用）：runtime 以 `transcript` 为初始
+    /// transcript（agent 可见历史上下文），`LaneWriter` head = `head`
+    /// （`None` = 空树，首次 append 成为根；`Some(leaf)` = 续写在活动叶之后）。
+    ///
+    /// `session_id` 不存在 → `SessionNotFound`；`lane_id` 已存在 →
+    /// `LaneAlreadyExists`。
+    pub async fn spawn_lane_resumed(
+        &self,
+        session_id: &str,
+        lane_id: &str,
+        config: AgentConfig,
+        runtime: AgentRuntime,
+        transcript: Vec<Arc<Message>>,
+        head: Option<NodeId>,
+    ) -> Result<(), ServerError> {
+        self.spawn_lane_with(session_id, lane_id, config, runtime, transcript, head)
+            .await
+    }
+
+    /// spawn lane 的共享实现：runtime 以 `transcript` 为初始 transcript，
+    /// `LaneWriter` head = `head`。`spawn_lane`（空 transcript / head `None`）与
+    /// `spawn_lane_resumed`（恢复 transcript / 活动叶 head）共用。
+    ///
+    /// 并发：runtime spawn 在锁外，预检查与最终入表不是原子操作。故第二次取锁
+    /// 后必须再次校验 session 存在且 lane 不存在；校验失败时显式 shutdown 已
+    /// spawn 的 handle（桥接 task 随事件流关闭退出），避免覆盖已有 lane 或泄漏
+    /// runtime。
+    async fn spawn_lane_with(
+        &self,
+        session_id: &str,
+        lane_id: &str,
+        config: AgentConfig,
+        runtime: AgentRuntime,
+        transcript: Vec<Arc<Message>>,
+        head: Option<NodeId>,
     ) -> Result<(), ServerError> {
         // 1. 检查 session 存在 + lane 不存在（不跨 await 持锁）。
         let storage = {
@@ -46,13 +82,13 @@ impl AgentServer {
             }
             session.storage.clone()
         };
-        // 2. spawn runtime（同步，不入锁）。
-        let handle = AgentHandle::spawn(config, runtime);
-        // 3. 建 writer（head = None，首次 append 成为根）。
+        // 2. spawn runtime（seeded transcript，同步，不入锁）。
+        let handle = AgentHandle::spawn_with_transcript(config, runtime, transcript);
+        // 3. 建 writer（head = 活动叶 / None）。
         let writer = Arc::new(Mutex::new(LaneWriter::new(
             storage,
             lane_id.to_string(),
-            None,
+            head,
         )));
         // 4. spawn 桥接 task（先于登记订阅，保证事件不丢持久化）。
         let bridge = spawn_bridge(handle.clone(), writer.clone(), lane_id);
@@ -85,6 +121,58 @@ impl AgentServer {
             return Err(e);
         }
         Ok(())
+    }
+
+    /// 恢复 session 并 spawn 一个续写 lane（崩溃恢复 / `--session` 续聊入口）：
+    /// load 树 → 取活动叶（max NodeId 叶）→ 以叶路径为初始 transcript spawn
+    /// runtime → `LaneWriter` head = 活动叶（空树 → `None`，首次 append 成为根）。
+    ///
+    /// `session_id` 须已注册（`load_session` / `create_session`）；runtime 工厂未
+    /// 配置 → `Protocol` 错误；`lane_id` 已存在 → `LaneAlreadyExists`。
+    ///
+    /// 活动叶取 max NodeId 叶：NodeId 单调递增，最新 append 的节点必为叶（若其
+    /// 有子节点则子节点 id 更大，矛盾），故 max 叶即最近续写点。
+    pub async fn resume_lane_from_factory(
+        &self,
+        session_id: &str,
+        lane_id: &str,
+    ) -> Result<(), ServerError> {
+        let factory = self
+            .inner
+            .runtime_factory
+            .get()
+            .cloned()
+            .ok_or_else(|| ServerError::Protocol("no runtime factory".into()))?;
+        let (config, runtime) = factory();
+
+        // 取 session storage（不跨 await 持锁）。
+        let storage = {
+            let sessions = self.inner.sessions.lock().await;
+            sessions
+                .get(session_id)
+                .ok_or_else(|| ServerError::SessionNotFound(session_id.to_string()))?
+                .storage
+                .clone()
+        };
+        // load 树（锁外）。
+        let tree = storage.load().await?;
+        // 取活动叶（max NodeId 叶）+ 叶路径 transcript。
+        let (head, transcript) = match tree.leaves().into_iter().max() {
+            Some(leaf) => {
+                let path = tree
+                    .path_to(leaf)
+                    .ok_or_else(|| ServerError::Protocol("active leaf path unavailable".into()))?;
+                (
+                    Some(leaf),
+                    path.iter()
+                        .map(|m| Arc::new((**m).clone()))
+                        .collect::<Vec<_>>(),
+                )
+            }
+            None => (None, Vec::new()),
+        };
+        self.spawn_lane_resumed(session_id, lane_id, config, runtime, transcript, head)
+            .await
     }
 
     /// 从 `from_lane` 的当前 head 分支出新 lane（新 runtime），后续写落到新分支。

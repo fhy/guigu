@@ -69,7 +69,12 @@ pub fn assemble(cli: &Cli) -> Result<Assembled, CliError> {
 }
 
 /// REPL 建 session：`--session` 存在则 `load_session` 续聊，否则新建；spawn 默认 lane。
+///
+/// 续聊（`--session`）：`resume_lane_from_factory` 恢复 transcript（agent 可见历史
+/// 上下文）+ 活动叶 head（新消息接在历史末尾，非新根）。新建：空 transcript +
+/// head `None`（首次 append 成为根）。
 pub async fn setup_session(assembled: &Assembled, cli: &Cli) -> Result<String, CliError> {
+    let resume = cli.session.is_some();
     let session_id = match &cli.session {
         Some(id) => {
             let storage = open_storage(&assembled.log_dir, id).await?;
@@ -89,10 +94,17 @@ pub async fn setup_session(assembled: &Assembled, cli: &Cli) -> Result<String, C
             id
         }
     };
-    assembled
-        .server
-        .spawn_lane_from_factory(&session_id, DEFAULT_LANE)
-        .await?;
+    if resume {
+        assembled
+            .server
+            .resume_lane_from_factory(&session_id, DEFAULT_LANE)
+            .await?;
+    } else {
+        assembled
+            .server
+            .spawn_lane_from_factory(&session_id, DEFAULT_LANE)
+            .await?;
+    }
     Ok(session_id)
 }
 

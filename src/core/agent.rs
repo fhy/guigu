@@ -217,16 +217,28 @@ impl Agent for AgentHandle {
 }
 
 impl AgentHandle {
-    /// 启动唯一 runtime task，返回句柄。
+    /// 启动唯一 runtime task，返回句柄（空 transcript）。
     ///
     /// `runtime` 注入 provider + 工具 + loop 配置（003 执行引擎依赖）。
     pub fn spawn(config: AgentConfig, runtime: AgentRuntime) -> Self {
+        Self::spawn_with_transcript(config, runtime, Vec::new())
+    }
+
+    /// 启动唯一 runtime task，以 `initial_transcript` 为初始 transcript（session 恢复用）。
+    ///
+    /// 恢复的 transcript 注入 runtime（agent 可见历史上下文），并作为初始
+    /// snapshot（`messages` 非空）。`runtime` 注入 provider + 工具 + loop 配置。
+    pub fn spawn_with_transcript(
+        config: AgentConfig,
+        runtime: AgentRuntime,
+        initial_transcript: Vec<Arc<Message>>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel::<AgentCommand>(100);
         let (snapshot_tx, snapshot_rx) = watch::channel(AgentSnapshot {
             system_prompt: config.system_prompt.clone(),
             model: config.model.clone(),
             thinking_level: config.thinking_level.clone(),
-            messages: Vec::new(),
+            messages: initial_transcript.clone(),
             is_streaming: false,
             streaming_message: None,
             pending_tool_calls: HashSet::new(),
@@ -245,6 +257,7 @@ impl AgentHandle {
             exited_tx,
             config,
             runtime,
+            initial_transcript,
         );
 
         AgentHandle {

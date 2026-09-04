@@ -20,6 +20,13 @@ use crate::core::message::Message;
 use crate::core::runtime::{AgentRuntime, RunContext, run_agent_loop};
 
 /// 启动唯一 runtime task，消费命令队列并驱动 agent loop。
+///
+/// `initial_transcript` 为初始 transcript（session 恢复时注入历史消息；空 = 新会话）。
+///
+/// 参数为 5 个通道 + config + runtime + initial_transcript（共 8 个）：通道是
+/// runtime task 的对外接口（命令/snapshot/事件/计数/退出），捆绑成结构体收益
+/// 不大（仅 `AgentHandle::spawn_with_transcript` 单点调用），故显式 allow。
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_runtime(
     mut rx: mpsc::Receiver<AgentCommand>,
     snapshot_tx: watch::Sender<AgentSnapshot>,
@@ -28,9 +35,10 @@ pub fn spawn_runtime(
     exited_tx: watch::Sender<bool>,
     config: AgentConfig,
     runtime: AgentRuntime,
+    initial_transcript: Vec<Arc<Message>>,
 ) {
     tokio::spawn(async move {
-        let mut transcript: Vec<Arc<Message>> = Vec::new();
+        let mut transcript: Vec<Arc<Message>> = initial_transcript;
         let mut queue: VecDeque<AgentCommand> = VecDeque::new();
         let mut processed: u64 = 0;
         let mut state = RuntimeState {

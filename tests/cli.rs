@@ -133,6 +133,91 @@ fn test_repl_session_new_and_resume() {
     );
 }
 
+/// `--session` 续聊恢复语义（跨进程）：首进程写入历史，第二进程以同一
+/// `--session` 续写，新消息接在历史末尾（parent 链有效，无多根），而非新根。
+///
+/// 覆盖 Task 015 Critical：续聊须恢复 agent 上下文（新消息 parent = 历史末节点，
+/// 非 `None`），且 JSONL 保持单一有效链（无多根）。仅断言行数增长不足以证明
+/// 恢复语义（旧实现行数也增长，但新消息成为新根）。
+#[test]
+fn test_repl_session_resume_restores_context() {
+    let log_dir = tempfile::tempdir().expect("tempdir");
+    let session_id = "s-015-resume-ctx";
+    let jsonl = log_dir.path().join(format!("{session_id}.jsonl"));
+
+    // 首进程：写入 "hello"（user + assistant，2 节点）。
+    let out1 = run_repl_once(log_dir.path(), Some(session_id), "hello");
+    assert!(
+        out1.status.success(),
+        "first process should exit 0, stderr: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    let entries1 = parse_jsonl(&jsonl);
+    assert_eq!(entries1.len(), 2, "first process should persist 2 entries");
+    let last_id_1 = entries1.last().expect("last entry")["id"]
+        .as_u64()
+        .expect("last entry id");
+
+    // 第二进程：续写 "again"（应接在历史末尾，非新根）。
+    let out2 = run_repl_once(log_dir.path(), Some(session_id), "again");
+    assert!(
+        out2.status.success(),
+        "second process should exit 0, stderr: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    let entries2 = parse_jsonl(&jsonl);
+    assert_eq!(
+        entries2.len(),
+        4,
+        "second process should append 2 entries (total 4)"
+    );
+
+    // 校验 parent 链：单一有效链（无多根）。
+    let roots: Vec<_> = entries2
+        .iter()
+        .filter(|e| e["parent_id"].is_null())
+        .collect();
+    assert_eq!(
+        roots.len(),
+        1,
+        "should have exactly one root (no multiple roots)"
+    );
+
+    // 第二进程的首条新消息（"again"）的 parent 应是首进程的末节点（last_id_1），非 None。
+    let again_entry = entries2
+        .iter()
+        .find(|e| is_user_text(e, "again"))
+        .expect("should find 'again' entry");
+    assert_eq!(
+        again_entry["parent_id"].as_u64(),
+        Some(last_id_1),
+        "'again' should be a child of the first process's last node (resume, not new root)"
+    );
+
+    // 校验整条链有效：从叶回溯到根，应经过 4 个节点。
+    let leaf_id = entries2
+        .iter()
+        .find(|e| {
+            !entries2
+                .iter()
+                .any(|other| other["parent_id"].as_u64() == Some(e["id"].as_u64().expect("id")))
+        })
+        .expect("should have a leaf")["id"]
+        .as_u64()
+        .expect("leaf id");
+    let mut count = 0;
+    let mut cursor = Some(leaf_id);
+    while let Some(id) = cursor {
+        count += 1;
+        let node = entries2
+            .iter()
+            .find(|e| e["id"].as_u64() == Some(id))
+            .expect("node exists");
+        cursor = node["parent_id"].as_u64();
+    }
+    assert_eq!(count, 4, "chain from leaf to root should have 4 nodes");
+}
+
 /// `guigu acp` stdio loopback：initialize → session/new 往返（不依赖编辑器）。
 ///
 /// 用 fake API key（provider 在 `session/prompt` 才调用，故 `initialize` /
@@ -308,6 +393,30 @@ fn count_jsonl_lines(path: &Path) -> usize {
         .expect("read jsonl")
         .lines()
         .count()
+}
+
+/// 解析 JSONL 为 `Vec<serde_json::Value>`（每行一个 entry，跳过空行）。
+fn parse_jsonl(path: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .expect("read jsonl")
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("parse entry"))
+        .collect()
+}
+
+/// 判断 entry 的 message 是否为指定文本的 user 消息。
+fn is_user_text(entry: &serde_json::Value, text: &str) -> bool {
+    entry["message"]["type"] == "user"
+        && entry["message"]["content"]
+            .as_array()
+            .map(|arr| {
+                arr.iter().any(|c| {
+                    c.get("type").and_then(|t| t.as_str()) == Some("text")
+                        && c.get("text").and_then(|t| t.as_str()) == Some(text)
+                })
+            })
+            .unwrap_or(false)
 }
 
 /// 写一条 JSON-RPC 请求（newline-delimited）。

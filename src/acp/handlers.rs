@@ -55,7 +55,10 @@ impl AcpAgent {
         Ok(json!({ "sessionId": session_id }))
     }
 
-    /// `session/load`（c→a）：从持久化恢复 session → spawn 默认 lane → 返回 `{ sessionId }`。
+    /// `session/load`（c→a）：从持久化恢复 session → 续写默认 lane → 返回 `{ sessionId }`。
+    ///
+    /// 续写 lane 经 `resume_lane_from_factory`：恢复 transcript（agent 可见历史
+    /// 上下文）+ 活动叶 head（新消息接在历史末尾，非新根）。
     pub(crate) async fn handle_load_session(&self, params: Value) -> Result<Value, AcpError> {
         let session_id = params
             .get("sessionId")
@@ -66,7 +69,7 @@ impl AcpAgent {
             .load_session_from_factory(session_id.clone())
             .await?;
         self.server
-            .spawn_lane_from_factory(&session_id, DEFAULT_LANE)
+            .resume_lane_from_factory(&session_id, DEFAULT_LANE)
             .await?;
         Ok(json!({ "sessionId": session_id }))
     }

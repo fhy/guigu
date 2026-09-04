@@ -205,6 +205,117 @@ async fn test_load_session() {
     assert!(!tree.nodes.is_empty());
 }
 
+/// resume_lane_from_factory：恢复 session 后 runtime 可见历史 transcript，
+/// 新消息续写在活动叶之后（parent 链有效，无多根）。
+///
+/// 覆盖 Task 015 Critical：`--session` 续聊须恢复 agent 上下文（非空 transcript）
+/// 且新消息接在历史末尾（非新根）。
+#[tokio::test]
+async fn test_resume_lane_restores_transcript() {
+    let dir = tempdir().expect("tempdir");
+
+    // 首轮：create + spawn + prompt "hello" → 持久化 user + assistant（2 节点）。
+    let server1 = AgentServer::new();
+    let storage = make_storage(dir.path(), "s1").await;
+    server1
+        .create_session("s1".to_string(), storage.clone())
+        .await
+        .expect("create");
+    server1
+        .spawn_lane("s1", "l1", make_config(), make_runtime())
+        .await
+        .expect("spawn");
+    server1
+        .prompt("s1", "l1", vec![user_msg("hello")])
+        .await
+        .expect("prompt");
+    wait_tree_nodes(&storage, 2).await;
+    server1.shutdown().await.expect("shutdown");
+
+    // 第二轮：load + resume（恢复 transcript + 活动叶 head）。
+    let server2 = AgentServer::new();
+    server2.with_runtime_factory(|| (make_config(), make_runtime()));
+    let storage2 = make_storage(dir.path(), "s1").await;
+    server2
+        .load_session("s1".to_string(), storage2.clone())
+        .await
+        .expect("load");
+    server2
+        .resume_lane_from_factory("s1", "l1")
+        .await
+        .expect("resume");
+
+    // 恢复后 snapshot 立即可见首轮历史（user "hello" + assistant "ok"）。
+    let snap = server2.snapshot("s1", "l1").await.expect("snapshot");
+    assert_eq!(
+        snap.messages.len(),
+        2,
+        "resumed transcript should have 2 messages"
+    );
+    assert!(
+        matches!(&*snap.messages[0], Message::User(u) if u.content.iter().any(|c| matches!(c, UserContent::Text { text } if text == "hello"))),
+        "first resumed message should be user 'hello'"
+    );
+
+    // 续写 "again"：新消息接在历史末尾（parent 链有效）。
+    server2
+        .prompt("s1", "l1", vec![user_msg("again")])
+        .await
+        .expect("prompt again");
+    wait_tree_nodes(&storage2, 4).await;
+
+    // 校验 parent 链：单一有效链（无多根），4 节点，1 叶。
+    let tree = storage2.load().await.expect("load");
+    assert_eq!(tree.nodes.len(), 4, "tree should have 4 nodes");
+    assert_eq!(
+        tree.leaves().len(),
+        1,
+        "tree should have 1 leaf (single chain, no multiple roots)"
+    );
+    assert!(tree.root.is_some(), "tree should have a root");
+    // 活动叶路径 = 4 条消息（hello/ok/again/ok）。
+    let leaf = tree.leaves()[0];
+    let path = tree.path_to(leaf).expect("path to leaf");
+    assert_eq!(path.len(), 4, "leaf path should have 4 messages");
+
+    server2.shutdown().await.expect("shutdown");
+}
+
+/// resume_lane_from_factory 空树（新 session）：无叶 → 空 transcript + head None，
+/// 首次 append 成为根（与 spawn_lane 行为一致）。
+#[tokio::test]
+async fn test_resume_lane_empty_session() {
+    let dir = tempdir().expect("tempdir");
+    let server = AgentServer::new();
+    server.with_runtime_factory(|| (make_config(), make_runtime()));
+    let storage = make_storage(dir.path(), "s1").await;
+    server
+        .create_session("s1".to_string(), storage.clone())
+        .await
+        .expect("create");
+    // 空 session resume：不 panic，lane 正常 spawn。
+    server
+        .resume_lane_from_factory("s1", "l1")
+        .await
+        .expect("resume");
+    // snapshot 为空（无历史）。
+    let snap = server.snapshot("s1", "l1").await.expect("snapshot");
+    assert!(
+        snap.messages.is_empty(),
+        "empty session should have empty transcript"
+    );
+    // prompt 后首次 append 成为根（parent_id = None）。
+    server
+        .prompt("s1", "l1", vec![user_msg("hi")])
+        .await
+        .expect("prompt");
+    wait_tree_nodes(&storage, 2).await;
+    let tree = storage.load().await.expect("load");
+    assert_eq!(tree.nodes.len(), 2, "tree should have 2 nodes");
+    assert!(tree.root.is_some(), "tree should have a root");
+    server.shutdown().await.expect("shutdown");
+}
+
 /// spawn_lane 后 prompt 路由正确（snapshot 反映 lane 状态）。
 #[tokio::test]
 async fn test_spawn_lane_and_prompt() {
