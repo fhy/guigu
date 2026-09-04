@@ -37,13 +37,14 @@
 - `LaneWriter` 的 `storage` 字段由 `Arc<dyn SessionStorage>` 改为 `Arc<SharedSessionStorage>`。
 - `LaneWriter::new(storage: Arc<SharedSessionStorage>, lane_id: impl Into<String>, head: Option<NodeId>)`。
 - 迁移所有 `LaneWriter::new` 调用点（013/014/015 及测试）：入参统一为 `Arc<SharedSessionStorage>`。
+- **桥接机制（方案C，v1.1）**：`srclane` 用 `SessionState.storage` 构造 `LaneWriter`，故 `SessionState.storage` 改为 `Arc<SharedSessionStorage>`（server 内部类型）。但 server 公共入口 `StorageFactory`/`with_storage_factory`/`create_session`/`load_session` **签名保持 `Arc<dyn SessionStorage>` 不变**——在 `create_session`/`load_session` 边界一次性 `Arc::new(SharedSessionStorage::new(storage))` 包裹后存入 `SessionState`。否决方案A（改公共签名为 `Arc<SharedSessionStorage>`，无必要的 breaking change）；否决方案B（运行时 downcast，引入失败路径）。
 
 ### 3. 每 lane 多步写并发测试
 
-在 `tests/session.rs` 新增（复用 012 既有 tempdir 组合，`SharedSessionStorage` 包 `JsonlSessionStorage`）：
+在 `tests/session_concurrency.rs` 新增（独立文件，复用 012 既有 tempdir 组合，`SharedSessionStorage` 包 `JsonlSessionStorage`；共享 helper 提取到测试辅助模块，避免把 `tests/session.rs` 推超 400 行）：
 
 - 两个 `LaneWriter` 共享同一 `Arc<SharedSessionStorage>`，从同一初始 head 各自**连续** append 3 条消息（`join_all` 并发跑两个 lane，lane 内顺序 await）。
-- 断言：`load()` 后共 6 节点；每个 lane 的 3 条消息形成各自的单链（第 i+1 条 parent = 第 i 条）；两条链的第一条互为兄弟（同 parent）；id 全局唯一；无交错半行（JSONL 完整）。
+- 断言：`load()` 后共 7 节点（1 个初始 head + 每 lane 3 条）；每个 lane 的 3 条消息形成各自的单链（第 i+1 条 parent = 第 i 条）；两条链的第一条互为兄弟（同 parent）；id 全局唯一；无交错半行（JSONL 完整）。
 
 ### 4. 边界说明订正
 
@@ -54,8 +55,8 @@
 
 - src/core/session.rs（移除 `inner()`、`LaneWriter` 类型约束、边界说明订正、单测）
 - src/core/mod.rs / src/lib.rs（若 re-export 含 `inner` 相关符号则清理；`LaneWriter` re-export 不变）
-- src/server/、src/acp/、src/bin/（**仅** 迁移 `inner()` / `LaneWriter::new` 调用点）
-- tests/session.rs（新增每 lane 多步写并发测试）
+- src/server/（`SessionState.storage` 改 `Arc<SharedSessionStorage>`，`create_session`/`load_session` 边界包裹 `SharedSessionStorage::new`；公共入口签名保持 `Arc<dyn SessionStorage>` 不变）；src/acp/、src/bin/（仅迁移 `inner()` / `LaneWriter::new` 调用点）
+- tests/session_concurrency.rs（新增每 lane 多步写并发测试，独立文件）
 
 ## Acceptance Criteria
 
@@ -73,3 +74,4 @@
 ## 修订记录
 
 - v1.0（2026-09-05，Architect）：初稿。打包 012 r1 四条非阻塞建议：移除 `inner()` 杜绝绕过写锁、`LaneWriter` storage 约束为 `Arc<SharedSessionStorage>` 强制共享写入口、补每 lane 多步写并发测试、订正模块级边界说明。不新增功能，纯加固。
+- v1.1（2026-09-05，Architect，依据 Developer 架构审查 + Reviewer r1）：① 明确桥接机制为方案C——`SessionState.storage` 改 `Arc<SharedSessionStorage>`（内部），server 公共入口签名保持 `Arc<dyn SessionStorage>` 不变，`create_session`/`load_session` 边界 `Arc::new(SharedSessionStorage::new(storage))` 包裹；否决方案A（改公共签名，无必要 breaking change）与方案B（运行时 downcast）；② 订正 §3 节点数 6→7（1 根 + 每 lane 3 条）；③ 测试拆至独立文件 `tests/session_concurrency.rs`（避免 `tests/session.rs` 超 400 行）。
