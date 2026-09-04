@@ -12,6 +12,7 @@ pub mod acp;
 #[cfg(feature = "providers-http")]
 pub mod adapters;
 pub mod core;
+pub mod plugin;
 pub mod remote;
 pub mod server;
 pub mod tools;
@@ -30,6 +31,7 @@ pub use core::{
     session::*,
     tool::*,
 };
+pub use plugin::{Plugin, PluginError, PluginRegistry, PluginTool};
 pub use remote::{RemoteClient, RemoteError, RemoteRequest, RemoteServer};
 pub use server::{AgentServer, ServerError, ServerMessage, ServerRequest, SessionId};
 pub use tools::*;
