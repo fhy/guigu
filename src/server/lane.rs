@@ -55,7 +55,7 @@ impl AgentServer {
             None,
         )));
         // 4. spawn 桥接 task（先于登记订阅，保证事件不丢持久化）。
-        spawn_bridge(handle.clone(), writer.clone(), lane_id);
+        let bridge = spawn_bridge(handle.clone(), writer.clone(), lane_id);
         // 5. 二次校验并入表（原子）：session 被并发移除（如 shutdown）或 lane 被
         //    并发登记时，显式清理已 spawn 的 handle 并返回对应错误。
         let insert_err = {
@@ -71,6 +71,7 @@ impl AgentServer {
                                 lane_id: lane_id.to_string(),
                                 handle: handle.clone(),
                                 writer: writer.clone(),
+                                bridge,
                             },
                         );
                         None
@@ -130,7 +131,7 @@ impl AgentServer {
             source_head,
         )));
         // 5. spawn 桥接 task（先于登记订阅，保证事件不丢持久化）。
-        spawn_bridge(handle.clone(), writer.clone(), new_lane);
+        let bridge = spawn_bridge(handle.clone(), writer.clone(), new_lane);
         // 6. 二次校验并入表（原子）：session 被并发移除、`new_lane` 被并发登记、
         //    或 `from_lane` 被并发移除时，显式清理已 spawn 的 handle 并返回错误。
         let insert_err = {
@@ -148,6 +149,7 @@ impl AgentServer {
                                 lane_id: new_lane.to_string(),
                                 handle: handle.clone(),
                                 writer: writer.clone(),
+                                bridge,
                             },
                         );
                         None
@@ -232,25 +234,39 @@ impl AgentServer {
         )
     }
 
-    /// 关闭 server：shutdown 所有 lane 并清空注册表。
+    /// 关闭 server：shutdown 所有 lane 并清空注册表，**等桥接 task 落盘完成**。
+    ///
+    /// 顺序：克隆 handle + 桥接 `JoinHandle` → 清空注册表 → 逐个 shutdown runtime
+    /// task（消费 handle，broadcast sender 归零）→ 等桥接 task 退出。桥接 task 在
+    /// sender 归零后处理完缓冲的 `MessageEnd` 才退出，故此处返回即保证持久化落盘
+    /// （否则 `#[tokio::main]` drop runtime 时取消桥接 task，末条持久化丢失）。
     pub async fn shutdown(&self) -> Result<(), ServerError> {
-        // 克隆所有 handle 并清空注册表（drop 注册表持有的 handle，释放 broadcast
-        // sender 引用），再逐个 shutdown（消费克隆，使 sender 归零、桥接 task 退出）。
-        let handles: Vec<AgentHandle> = {
-            let mut sessions = self.inner.sessions.lock().await;
-            let handles: Vec<AgentHandle> = sessions
-                .values()
-                .flat_map(|s| s.lanes.values())
-                .map(|l| l.handle.clone())
-                .collect();
-            sessions.clear();
-            handles
+        // 取走全部 session（drain 注册表），移出 handle + 桥接 JoinHandle
+        // （`JoinHandle` 不可 Clone，故直接移动而非克隆）。
+        let sessions: Vec<_> = {
+            let mut guard = self.inner.sessions.lock().await;
+            guard.drain().map(|(_, s)| s).collect()
         };
+        let mut handles = Vec::new();
+        let mut bridges = Vec::new();
+        for session in sessions {
+            for lane in session.lanes.into_values() {
+                handles.push(lane.handle);
+                bridges.push(lane.bridge);
+            }
+        }
         for handle in handles {
             handle
                 .shutdown()
                 .await
                 .map_err(|e| ServerError::Agent(e.to_string()))?;
+        }
+        // handles 已消费（broadcast sender 归零）→ 桥接 task 处理完缓冲事件后退出。
+        // 等其完成，保证 `MessageEnd` 全部落盘。
+        for bridge in bridges {
+            if let Err(e) = bridge.await {
+                tracing::warn!("server: bridge task panicked: {e}");
+            }
         }
         Ok(())
     }
@@ -282,7 +298,14 @@ impl AgentServer {
 ///
 /// 只把 `broadcast::Receiver` 移入 task（`handle` 在 `subscribe()` 后即 drop），
 /// 使 lane shutdown 后 broadcast sender 归零、task 的 `rx` 收到 `Closed` 而退出。
-fn spawn_bridge(handle: AgentHandle, writer: Arc<Mutex<LaneWriter>>, lane_id: &str) {
+///
+/// 返回 `JoinHandle`：`AgentServer::shutdown` 等其完成，保证进程退出前 `MessageEnd`
+/// 全部落盘（否则 `#[tokio::main]` drop runtime 时取消桥接 task，末条持久化丢失）。
+fn spawn_bridge(
+    handle: AgentHandle,
+    writer: Arc<Mutex<LaneWriter>>,
+    lane_id: &str,
+) -> tokio::task::JoinHandle<()> {
     let rx = handle.subscribe();
     let lane_id = lane_id.to_string();
     tokio::spawn(async move {
@@ -302,5 +325,5 @@ fn spawn_bridge(handle: AgentHandle, writer: Arc<Mutex<LaneWriter>>, lane_id: &s
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
-    });
+    })
 }

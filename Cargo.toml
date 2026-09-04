@@ -23,6 +23,8 @@ tracing = "0.1"
 tokio-util = "0.7"
 futures = "0.3"
 async-trait = "0.1"
+# Task 015：正式 CLI（clap derive）。
+clap = { version = "4", features = ["derive"] }
 # Optional：真实 LLM HTTP 适配器（OpenAI / Anthropic）。
 # 嵌入方 `default-features = false` 可剥离 reqwest，得到纯核心库。
 # 本构建环境无 OpenSSL 头文件，故用 rustls（纯 Rust）替代默认 native-tls。
@@ -36,4 +38,4 @@ tempfile = "3"
 
 [[bin]]
 name = "guigu"
-path = "src/bin/main.rs"
+path = "src/bin/guigu/main.rs"

@@ -70,13 +70,15 @@ pub enum ServerError {
 /// 一个 lane 的运行时：一个活跃 `AgentHandle`（一个 runtime task）+ 持久化写游标。
 ///
 /// `writer` 与桥接 task 共享（`Arc<Mutex<LaneWriter>>`）：桥接 task 串行落盘
-/// `MessageEnd`，`fork_lane` 读其 `head` 作为分支点。
+/// `MessageEnd`，`fork_lane` 读其 `head` 作为分支点。`bridge` 是桥接 task 的
+/// `JoinHandle`：`shutdown` 等其完成，保证进程退出前持久化落盘。
 struct LaneRuntime {
     /// lane 标识（与注册表 key 冗余，保留供日志 / 调试）。
     #[allow(dead_code)]
     lane_id: LaneId,
     handle: AgentHandle,
     writer: Arc<Mutex<LaneWriter>>,
+    bridge: tokio::task::JoinHandle<()>,
 }
 
 /// 一个 session 的运行时状态：存储 + 活跃 lane 集合。
