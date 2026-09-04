@@ -22,7 +22,7 @@ use guigu::core::provider::{
 };
 use guigu::core::runtime::{AgentRuntime, LoopConfig};
 use guigu::core::session::{
-    NodeId, SessionEntry, SessionError, SessionStorage, SessionTree, reduce,
+    NodeId, SessionEntry, SessionError, SessionStorage, SessionTree, SharedSessionStorage, reduce,
 };
 use guigu::remote::codec::{LineReader, write_line};
 use guigu::server::AgentServer;
@@ -116,7 +116,9 @@ fn make_agent() -> AcpAgent {
             },
         )
     });
-    server.with_storage_factory(|_id| Arc::new(InMemoryStorage::new()));
+    server.with_storage_factory(|_id| {
+        Arc::new(SharedSessionStorage::new(Arc::new(InMemoryStorage::new())))
+    });
     AcpAgent::new(server)
 }
 

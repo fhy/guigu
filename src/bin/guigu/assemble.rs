@@ -19,7 +19,7 @@ use guigu::core::message::{Message, ThinkingLevel};
 use guigu::core::provider::{Model, ModelProvider};
 use guigu::core::runtime::{AgentRuntime, LoopConfig};
 use guigu::core::session::{
-    JsonlSessionStorage, NodeId, SessionError, SessionStorage, SessionTree,
+    JsonlSessionStorage, NodeId, SessionError, SessionStorage, SessionTree, SharedSessionStorage,
 };
 use guigu::core::tool::Tool;
 use guigu::server::AgentServer;
@@ -80,7 +80,10 @@ pub async fn setup_session(assembled: &Assembled, cli: &Cli) -> Result<String, C
             let storage = open_storage(&assembled.log_dir, id).await?;
             assembled
                 .server
-                .load_session(id.clone(), Arc::new(storage))
+                .load_session(
+                    id.clone(),
+                    Arc::new(SharedSessionStorage::new(Arc::new(storage))),
+                )
                 .await?;
             id.clone()
         }
@@ -89,7 +92,10 @@ pub async fn setup_session(assembled: &Assembled, cli: &Cli) -> Result<String, C
             let storage = open_storage(&assembled.log_dir, &id).await?;
             assembled
                 .server
-                .create_session(id.clone(), Arc::new(storage))
+                .create_session(
+                    id.clone(),
+                    Arc::new(SharedSessionStorage::new(Arc::new(storage))),
+                )
                 .await?;
             id
         }
@@ -181,19 +187,22 @@ async fn open_storage(log_dir: &Path, session_id: &str) -> Result<JsonlSessionSt
 }
 
 /// 打开 session 存储（sync，storage 工厂用）：`block_in_place` + `block_on` 桥接 async。
-fn open_storage_sync(log_dir: &Path, session_id: &str) -> Arc<dyn SessionStorage> {
+///
+/// 返回 `Arc<SharedSessionStorage>`（017-a）：包一层共享写入口，满足 server 层
+/// `StorageFactory` / `LaneWriter` 的类型约束。
+fn open_storage_sync(log_dir: &Path, session_id: &str) -> Arc<SharedSessionStorage> {
     let path = log_dir.join(format!("{session_id}.jsonl"));
     let result = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current()
             .block_on(JsonlSessionStorage::open(path.clone(), session_id))
     });
     match result {
-        Ok(storage) => Arc::new(storage),
+        Ok(storage) => Arc::new(SharedSessionStorage::new(Arc::new(storage))),
         Err(e) => {
             tracing::error!("failed to open session storage for {session_id}: {e}");
-            Arc::new(FailingStorage {
+            Arc::new(SharedSessionStorage::new(Arc::new(FailingStorage {
                 reason: e.to_string(),
-            })
+            })))
         }
     }
 }

@@ -403,7 +403,10 @@ async fn test_concurrent_spawn_lane_race() {
     let provider = common::FakeProvider::new(vec![]);
     let server = AgentServer::new();
     server
-        .create_session("s1".to_string(), Arc::new(InMemoryStorage::new()))
+        .create_session(
+            "s1".to_string(),
+            Arc::new(SharedSessionStorage::new(Arc::new(InMemoryStorage::new()))),
+        )
         .await
         .expect("create");
 
@@ -456,7 +459,10 @@ async fn test_concurrent_fork_lane_race() {
     let provider = common::FakeProvider::new(vec![]);
     let server = AgentServer::new();
     server
-        .create_session("s1".to_string(), Arc::new(InMemoryStorage::new()))
+        .create_session(
+            "s1".to_string(),
+            Arc::new(SharedSessionStorage::new(Arc::new(InMemoryStorage::new()))),
+        )
         .await
         .expect("create");
     server
@@ -525,7 +531,10 @@ async fn test_spawn_lane_vs_shutdown() {
         let provider = common::FakeProvider::new(vec![]);
         let server = AgentServer::new();
         server
-            .create_session("s1".to_string(), Arc::new(InMemoryStorage::new()))
+            .create_session(
+                "s1".to_string(),
+                Arc::new(SharedSessionStorage::new(Arc::new(InMemoryStorage::new()))),
+            )
             .await
             .expect("create");
 

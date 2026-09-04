@@ -7,7 +7,8 @@
 //! - `SessionRecorder`：把 001 事件流桥接到存储（单 lane 游标）
 //!
 //! 边界声明：单 writer / 单进程 / 单 agent；`sync_all` 保证进程崩溃（`kill -9`）级
-//! 持久性，不保证断电级；多 lane 并发写属 010。
+//! 持久性，不保证断电级；多 lane 并发写已由 012 交付（仅进程内，`SharedSessionStorage`
+//! 串行化 append + `LaneWriter` 每 lane 游标）。
 
 mod jsonl;
 
@@ -295,14 +296,6 @@ impl SharedSessionStorage {
             write_lock: tokio::sync::Mutex::new(()),
         }
     }
-
-    /// 取出内层 storage（`load` / `next_id` 透传，不串行）。
-    ///
-    /// 注意：对返回的 inner 直接调用 `append` 会绕过 `write_lock` 串行化，
-    /// 破坏并发安全——并发写场景请一律经 `SharedSessionStorage::append`。
-    pub fn inner(&self) -> &Arc<dyn SessionStorage> {
-        &self.inner
-    }
 }
 
 #[async_trait]
@@ -334,8 +327,11 @@ pub type LaneId = String;
 ///
 /// 单 lane 内 `&mut self` 顺序写；多 lane 并发由各自 `LaneWriter` + 共享
 /// `SharedSessionStorage` 的 `write_lock` 保证 `append` 互斥。
+///
+/// `storage` 约束为 `Arc<SharedSessionStorage>`（017-a）：类型系统强制 lane 只经
+/// 共享写入口落盘，杜绝以裸 `Arc<dyn SessionStorage>` 绕过 `write_lock` 串行化。
 pub struct LaneWriter {
-    storage: Arc<dyn SessionStorage>,
+    storage: Arc<SharedSessionStorage>,
     lane_id: LaneId,
     head: Option<NodeId>,
 }
@@ -343,7 +339,7 @@ pub struct LaneWriter {
 impl LaneWriter {
     /// 创建 lane 写游标。`head = None` 表示尚无节点（首次 `append` 成为根）。
     pub fn new(
-        storage: Arc<dyn SessionStorage>,
+        storage: Arc<SharedSessionStorage>,
         lane_id: impl Into<String>,
         head: Option<NodeId>,
     ) -> Self {

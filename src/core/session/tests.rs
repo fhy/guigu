@@ -278,7 +278,7 @@ async fn shared_storage_concurrent_appends_unique_ids() {
 
 #[tokio::test]
 async fn lane_writer_append_advances_head() {
-    let storage = Arc::new(MemStorage::default());
+    let storage = Arc::new(SharedSessionStorage::new(Arc::new(MemStorage::default())));
     let mut lane = LaneWriter::new(storage.clone(), "lane-1", None);
     assert_eq!(lane.lane_id(), "lane-1");
     assert_eq!(lane.head(), None);
@@ -294,7 +294,7 @@ async fn lane_writer_append_advances_head() {
 
 #[tokio::test]
 async fn lane_writer_fork_at_redirects_head() {
-    let storage = Arc::new(MemStorage::default());
+    let storage = Arc::new(SharedSessionStorage::new(Arc::new(MemStorage::default())));
     let mut lane = LaneWriter::new(storage.clone(), "lane-1", None);
     lane.append(user_msg("a")).await.unwrap(); // 0
     lane.append(user_msg("b")).await.unwrap(); // 1
@@ -308,7 +308,7 @@ async fn lane_writer_fork_at_redirects_head() {
 
 #[tokio::test]
 async fn lane_writer_two_lanes_same_head_two_leaves() {
-    let storage = Arc::new(MemStorage::default());
+    let storage = Arc::new(SharedSessionStorage::new(Arc::new(MemStorage::default())));
     let root = storage.append(None, user_msg("root")).await.unwrap(); // 0
     let mut lane_a = LaneWriter::new(storage.clone(), "a", Some(root));
     let mut lane_b = LaneWriter::new(storage.clone(), "b", Some(root));

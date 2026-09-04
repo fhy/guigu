@@ -14,7 +14,7 @@ use crate::core::provider::{
     AssistantEvent, AssistantStream, Model, ModelProvider, ProviderError, ProviderRequest,
 };
 use crate::core::runtime::{AgentRuntime, LoopConfig};
-use crate::core::session::{JsonlSessionStorage, SharedSessionStorage};
+use crate::core::session::{JsonlSessionStorage, SessionStorage, SharedSessionStorage};
 use async_trait::async_trait;
 use futures::stream;
 use std::sync::Arc;

@@ -22,7 +22,7 @@ use crate::core::provider::{
 };
 use crate::core::runtime::{AgentRuntime, LoopConfig};
 use crate::core::session::{
-    NodeId, SessionEntry, SessionError, SessionStorage, SessionTree, reduce,
+    NodeId, SessionEntry, SessionError, SessionStorage, SessionTree, SharedSessionStorage, reduce,
 };
 use crate::server::AgentServer;
 
@@ -221,6 +221,8 @@ pub fn make_agent(provider: Arc<dyn ModelProvider>) -> AcpAgent {
             },
         )
     });
-    server.with_storage_factory(|_id| Arc::new(InMemoryStorage::new()));
+    server.with_storage_factory(|_id| {
+        Arc::new(SharedSessionStorage::new(Arc::new(InMemoryStorage::new())))
+    });
     AcpAgent::new(server)
 }

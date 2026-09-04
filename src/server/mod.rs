@@ -26,7 +26,9 @@ use tokio::sync::Mutex;
 
 use crate::core::agent::{AgentConfig, AgentHandle};
 use crate::core::runtime::AgentRuntime;
-use crate::core::session::{LaneId, LaneWriter, SessionError, SessionStorage};
+use crate::core::session::{
+    LaneId, LaneWriter, SessionError, SessionStorage, SharedSessionStorage,
+};
 
 pub use protocol::{ServerMessage, ServerRequest};
 
@@ -36,7 +38,10 @@ pub type SessionId = String;
 /// runtime 工厂：transport 的 `SpawnLane` / `ForkLane` 用它构造 `(config, runtime)`。
 pub type RuntimeFactory = Arc<dyn Fn() -> (AgentConfig, AgentRuntime) + Send + Sync>;
 /// storage 工厂：transport 的 `CreateSession` 用它构造 session 存储。
-pub type StorageFactory = Arc<dyn Fn(&str) -> Arc<dyn SessionStorage> + Send + Sync>;
+///
+/// 返回 `Arc<SharedSessionStorage>`（017-a）：强制 session 存储走共享写入口，
+/// 使 `LaneWriter` 类型约束（仅接受 `Arc<SharedSessionStorage>`）在 server 层成立。
+pub type StorageFactory = Arc<dyn Fn(&str) -> Arc<SharedSessionStorage> + Send + Sync>;
 
 /// server 错误类型。
 #[derive(Debug, thiserror::Error)]
@@ -86,7 +91,8 @@ struct SessionState {
     /// session 标识（与注册表 key 冗余，保留供日志 / 调试）。
     #[allow(dead_code)]
     session_id: SessionId,
-    storage: Arc<dyn SessionStorage>,
+    /// 共享写入口（017-a）：`Arc<SharedSessionStorage>` 使 `LaneWriter` 类型约束成立。
+    storage: Arc<SharedSessionStorage>,
     lanes: HashMap<LaneId, LaneRuntime>,
 }
 
@@ -137,7 +143,7 @@ impl AgentServer {
     /// 仅首次生效（`OnceLock`）；重复调用忽略。
     pub fn with_storage_factory(
         &self,
-        factory: impl Fn(&str) -> Arc<dyn SessionStorage> + Send + Sync + 'static,
+        factory: impl Fn(&str) -> Arc<SharedSessionStorage> + Send + Sync + 'static,
     ) {
         let _ = self.inner.storage_factory.set(Arc::new(factory));
     }
@@ -146,7 +152,7 @@ impl AgentServer {
     pub async fn create_session(
         &self,
         session_id: SessionId,
-        storage: Arc<dyn SessionStorage>,
+        storage: Arc<SharedSessionStorage>,
     ) -> Result<(), ServerError> {
         let mut sessions = self.inner.sessions.lock().await;
         if sessions.contains_key(&session_id) {
@@ -170,7 +176,7 @@ impl AgentServer {
     pub async fn load_session(
         &self,
         session_id: SessionId,
-        storage: Arc<dyn SessionStorage>,
+        storage: Arc<SharedSessionStorage>,
     ) -> Result<(), ServerError> {
         // load 在锁外执行（避免跨 await 持锁）；成功后恢复续写游标。
         storage.load().await?;

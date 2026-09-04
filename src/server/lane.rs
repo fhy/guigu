@@ -13,7 +13,7 @@ use crate::core::agent::{Agent, AgentConfig, AgentHandle, AgentSnapshot};
 use crate::core::event::AgentEvent;
 use crate::core::message::Message;
 use crate::core::runtime::AgentRuntime;
-use crate::core::session::{LaneWriter, NodeId};
+use crate::core::session::{LaneWriter, NodeId, SessionStorage};
 
 use super::{AgentServer, LaneRuntime, ServerError};
 
