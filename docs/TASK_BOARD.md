@@ -32,9 +32,12 @@
 
 ## 四期 Backlog（插件机制 + 技术债收尾）
 
-实施顺序：016 → 017（技术债收尾待排）
+实施顺序：016 → 017-a → 017-b → 017-c
 
 - [x] 016 — 插件机制 Plugin Registry（Plugin trait + PluginTool 异步惰性实例化 + PluginRegistry 注册表，基于 011 DeferredToolSpec，失败不缓存可重试）
+- [ ] 017-a — 会话存储并发安全加固（012 r1 遗留：移除 inner() 受控访问 / LaneWriter 约束 Arc<SharedSessionStorage> / 每 lane 多步写测试 / 边界说明订正）
+- [ ] 017-b — 多 lane 恢复语义 + 工作目录隔离（015 r2 遗留：恢复 API 显式收 head / 移除 set_current_dir 改工具 work_dir）
+- [ ] 017-c — 锁纪律收尾（016 r1 插件锁 + 006 锁表驱逐 + 014 测试拆分）
 
 ## 备注
 
@@ -67,3 +70,4 @@
 - 015 已于 r2 审查通过（2026-09-04，docs/reviews/015-review-r2.md）：四门禁全绿、245 库测试 + CLI 7 通过；r1 Critical（`--session` 续聊仅 load_session 未恢复 transcript，且 LaneWriter head 为 None 致新消息成新根）已核销（resume_lane_from_factory 重载 session 树取最新叶 + 注入 transcript 到 snapshot/runtime + 设 LaneWriter head）。非阻塞建议两条：① 活动叶以最大 NodeId 推断在单 lane 边界成立，多 lane fork 时无法表达真正活动 lane，后续需持久化 lane head/活动分支元数据或让恢复 API 显式收目标 head；② `set_current_dir` 改进程级 cwd，多 session 场景应显式传工作目录给工具配置。三期（012/013/014/015）全部完成
 - 四期启动（2026-09-04，Architect）：016 插件机制为四期开篇，补齐 architecture §7.2「插件延后」与 011 修订记录「async 实例化属后续插件任务」的双重缺口。规格 v1.0（docs/tasks/016-plugin-registry.md）：`Plugin` trait（id + owned schema 集合 + async 可失败 instantiate）+ `PluginTool`（`tokio::sync::OnceCell::get_or_try_init` 异步惰性、失败不缓存可重试）+ `PluginRegistry`（std RwLock、确定性工具组装）。边界明确排除：动态库 dlopen、Agent 插件、插件生命周期钩子、跨进程/远程加载。后续 017 计划技术债收尾（打包 014/015/006/012 遗留非阻塞项，待 PM 定序）
 - 016 已于 r1 审查通过（2026-09-05，docs/reviews/016-review-r1.md）：四门禁全绿、254 单测 + 集成测试通过、无阻断问题；实现满足 Plugin trait、异步 OnceCell 惰性实例化、失败重试、确定性组装、注册表操作与 Tool 契约透传。r1 两条非阻塞建议：① `PluginRegistry::tools()` 在持 RwLock 读锁期间调用外部 `plugin.tools()`，建议锁内仅复制 `Arc<dyn Plugin>` 再释放锁后调用，避免外部回调置于注册表锁内；② `PluginTool::new` 无运行时一致性校验（spec.name 是否被 plugin 声明），建议记录为调用方责任或提供 `try_new`。四期（016）已完成
+- 017 拆分（2026-09-05，Architect，依据 PM 指令「按 017-a-b-c 拆分」）：技术债收尾拆为三个子任务，按文件归属/主题划分、彼此无文件重叠、可独立合入。**017-a** 会话存储并发安全（012 r1 四条：inner() footgun / LaneWriter 类型约束 / 每 lane 多步写测试 / 边界说明订正，纯加固）；**017-b** 多 lane 恢复语义 + 工作目录隔离（015 r2 两条：恢复 API 显式收 `head: Option<NodeId>` 不持久化 lane head 元数据 / 移除 `set_current_dir` 改工具 `work_dir` 显式传参）；**017-c** 锁纪律收尾（016 r1 两条 + 006 锁表驱逐 `prune()`+阈值 + 014 acp 测试文件拆分）。实施顺序 017-a → 017-b → 017-c（017-b/c 可在 017-a 合入后并行）。014 的「cancellation→cancelled 措辞」已由 Architect 于 v1.1 统一，不重复纳入
