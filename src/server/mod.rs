@@ -39,9 +39,11 @@ pub type SessionId = String;
 pub type RuntimeFactory = Arc<dyn Fn() -> (AgentConfig, AgentRuntime) + Send + Sync>;
 /// storage 工厂：transport 的 `CreateSession` 用它构造 session 存储。
 ///
-/// 返回 `Arc<SharedSessionStorage>`（017-a）：强制 session 存储走共享写入口，
-/// 使 `LaneWriter` 类型约束（仅接受 `Arc<SharedSessionStorage>`）在 server 层成立。
-pub type StorageFactory = Arc<dyn Fn(&str) -> Arc<SharedSessionStorage> + Send + Sync>;
+/// 返回裸 `Arc<dyn SessionStorage>`（公共 API 不暴露 `SharedSessionStorage`）；
+/// server 在 `create_session` / `load_session` 边界一次性包成
+/// `Arc<SharedSessionStorage>` 存入 `SessionState`，使 `LaneWriter` 类型约束
+/// （仅接受 `Arc<SharedSessionStorage>`）在 server 层成立。
+pub type StorageFactory = Arc<dyn Fn(&str) -> Arc<dyn SessionStorage> + Send + Sync>;
 
 /// server 错误类型。
 #[derive(Debug, thiserror::Error)]
@@ -91,7 +93,9 @@ struct SessionState {
     /// session 标识（与注册表 key 冗余，保留供日志 / 调试）。
     #[allow(dead_code)]
     session_id: SessionId,
-    /// 共享写入口（017-a）：`Arc<SharedSessionStorage>` 使 `LaneWriter` 类型约束成立。
+    /// 共享写入口（017-a）：`create_session` / `load_session` 边界把裸
+    /// `Arc<dyn SessionStorage>` 包成 `Arc<SharedSessionStorage>` 后存入，使
+    /// `LaneWriter` 类型约束（仅接受 `Arc<SharedSessionStorage>`）成立。
     storage: Arc<SharedSessionStorage>,
     lanes: HashMap<LaneId, LaneRuntime>,
 }
@@ -140,20 +144,26 @@ impl AgentServer {
 
     /// 设置 storage 工厂（transport 的 `CreateSession` 用它构造 session 存储）。
     ///
-    /// 仅首次生效（`OnceLock`）；重复调用忽略。
+    /// 工厂返回裸 `Arc<dyn SessionStorage>`；server 在 `create_session` /
+    /// `load_session` 边界统一包成 `Arc<SharedSessionStorage>`。仅首次生效
+    /// （`OnceLock`）；重复调用忽略。
     pub fn with_storage_factory(
         &self,
-        factory: impl Fn(&str) -> Arc<SharedSessionStorage> + Send + Sync + 'static,
+        factory: impl Fn(&str) -> Arc<dyn SessionStorage> + Send + Sync + 'static,
     ) {
         let _ = self.inner.storage_factory.set(Arc::new(factory));
     }
 
     /// 新建空 session；`session_id` 已存在于注册表 → `DuplicateSession`。
+    ///
+    /// `storage` 为裸 `Arc<dyn SessionStorage>`；本方法在边界一次性包成
+    /// `Arc<SharedSessionStorage>` 存入 `SessionState`（强制 lane 走共享写入口）。
     pub async fn create_session(
         &self,
         session_id: SessionId,
-        storage: Arc<SharedSessionStorage>,
+        storage: Arc<dyn SessionStorage>,
     ) -> Result<(), ServerError> {
+        let storage = Arc::new(SharedSessionStorage::new(storage));
         let mut sessions = self.inner.sessions.lock().await;
         if sessions.contains_key(&session_id) {
             return Err(ServerError::DuplicateSession(session_id));
@@ -171,13 +181,15 @@ impl AgentServer {
 
     /// 从持久化存储 load + reduce 重建 session 并注册（崩溃恢复入口）。
     ///
-    /// `load` 在锁外执行（恢复续写游标），再入表；`session_id` 已存在 →
-    /// `DuplicateSession`。
+    /// `storage` 为裸 `Arc<dyn SessionStorage>`；本方法在边界一次性包成
+    /// `Arc<SharedSessionStorage>` 存入 `SessionState`。`load` 在锁外执行
+    /// （恢复续写游标），再入表；`session_id` 已存在 → `DuplicateSession`。
     pub async fn load_session(
         &self,
         session_id: SessionId,
-        storage: Arc<SharedSessionStorage>,
+        storage: Arc<dyn SessionStorage>,
     ) -> Result<(), ServerError> {
+        let storage = Arc::new(SharedSessionStorage::new(storage));
         // load 在锁外执行（避免跨 await 持锁）；成功后恢复续写游标。
         storage.load().await?;
         let mut sessions = self.inner.sessions.lock().await;

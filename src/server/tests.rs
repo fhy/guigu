@@ -14,7 +14,7 @@ use crate::core::provider::{
     AssistantEvent, AssistantStream, Model, ModelProvider, ProviderError, ProviderRequest,
 };
 use crate::core::runtime::{AgentRuntime, LoopConfig};
-use crate::core::session::{JsonlSessionStorage, SessionStorage, SharedSessionStorage};
+use crate::core::session::{JsonlSessionStorage, SessionStorage};
 use async_trait::async_trait;
 use futures::stream;
 use std::sync::Arc;
@@ -77,12 +77,15 @@ fn user_msg(text: &str) -> Message {
     })
 }
 
-/// 建一个 `SharedSessionStorage`（包装 `JsonlSessionStorage`，落盘到 `dir/{id}.jsonl`）。
-async fn make_storage(dir: &std::path::Path, id: &str) -> Arc<SharedSessionStorage> {
+/// 建一个裸 `JsonlSessionStorage`（落盘到 `dir/{id}.jsonl`）。
+///
+/// 返回 `Arc<dyn SessionStorage>`（`create_session` / `load_session` 契约）；
+/// server 在边界包成 `SharedSessionStorage`。测试侧直接 `load()` 轮询同一文件。
+async fn make_storage(dir: &std::path::Path, id: &str) -> Arc<dyn SessionStorage> {
     let jsonl = JsonlSessionStorage::open(dir.join(format!("{id}.jsonl")), id)
         .await
         .expect("open storage");
-    Arc::new(SharedSessionStorage::new(Arc::new(jsonl)))
+    Arc::new(jsonl)
 }
 
 /// 轮询 snapshot 直到 messages 非空（带 deadline）。
@@ -102,7 +105,7 @@ async fn wait_snapshot_non_empty(server: &AgentServer, session_id: &str, lane_id
 }
 
 /// 轮询 storage.load() 直到树有至少 `min_nodes` 个节点（带 deadline）。
-async fn wait_tree_nodes(storage: &Arc<SharedSessionStorage>, min_nodes: usize) {
+async fn wait_tree_nodes(storage: &Arc<dyn SessionStorage>, min_nodes: usize) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let tree = storage.load().await.expect("load");
@@ -120,7 +123,7 @@ async fn wait_tree_nodes(storage: &Arc<SharedSessionStorage>, min_nodes: usize) 
 }
 
 /// 轮询 storage.load() 直到树有至少 `min_leaves` 个叶子（带 deadline）。
-async fn wait_tree_leaves(storage: &Arc<SharedSessionStorage>, min_leaves: usize) {
+async fn wait_tree_leaves(storage: &Arc<dyn SessionStorage>, min_leaves: usize) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let tree = storage.load().await.expect("load");

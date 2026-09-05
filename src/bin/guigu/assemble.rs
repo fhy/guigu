@@ -19,7 +19,7 @@ use guigu::core::message::{Message, ThinkingLevel};
 use guigu::core::provider::{Model, ModelProvider};
 use guigu::core::runtime::{AgentRuntime, LoopConfig};
 use guigu::core::session::{
-    JsonlSessionStorage, NodeId, SessionError, SessionStorage, SessionTree, SharedSessionStorage,
+    JsonlSessionStorage, NodeId, SessionError, SessionStorage, SessionTree,
 };
 use guigu::core::tool::Tool;
 use guigu::server::AgentServer;
@@ -78,24 +78,20 @@ pub async fn setup_session(assembled: &Assembled, cli: &Cli) -> Result<String, C
     let session_id = match &cli.session {
         Some(id) => {
             let storage = open_storage(&assembled.log_dir, id).await?;
+            // 传裸 storage；server 在 load_session 边界包成 SharedSessionStorage。
             assembled
                 .server
-                .load_session(
-                    id.clone(),
-                    Arc::new(SharedSessionStorage::new(Arc::new(storage))),
-                )
+                .load_session(id.clone(), Arc::new(storage))
                 .await?;
             id.clone()
         }
         None => {
             let id = generate_session_id();
             let storage = open_storage(&assembled.log_dir, &id).await?;
+            // 传裸 storage；server 在 create_session 边界包成 SharedSessionStorage。
             assembled
                 .server
-                .create_session(
-                    id.clone(),
-                    Arc::new(SharedSessionStorage::new(Arc::new(storage))),
-                )
+                .create_session(id.clone(), Arc::new(storage))
                 .await?;
             id
         }
@@ -188,21 +184,21 @@ async fn open_storage(log_dir: &Path, session_id: &str) -> Result<JsonlSessionSt
 
 /// 打开 session 存储（sync，storage 工厂用）：`block_in_place` + `block_on` 桥接 async。
 ///
-/// 返回 `Arc<SharedSessionStorage>`（017-a）：包一层共享写入口，满足 server 层
-/// `StorageFactory` / `LaneWriter` 的类型约束。
-fn open_storage_sync(log_dir: &Path, session_id: &str) -> Arc<SharedSessionStorage> {
+/// 返回裸 `Arc<dyn SessionStorage>`（`StorageFactory` 契约）；server 在
+/// `create_session` / `load_session` 边界统一包成 `Arc<SharedSessionStorage>`。
+fn open_storage_sync(log_dir: &Path, session_id: &str) -> Arc<dyn SessionStorage> {
     let path = log_dir.join(format!("{session_id}.jsonl"));
     let result = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current()
             .block_on(JsonlSessionStorage::open(path.clone(), session_id))
     });
     match result {
-        Ok(storage) => Arc::new(SharedSessionStorage::new(Arc::new(storage))),
+        Ok(storage) => Arc::new(storage),
         Err(e) => {
             tracing::error!("failed to open session storage for {session_id}: {e}");
-            Arc::new(SharedSessionStorage::new(Arc::new(FailingStorage {
+            Arc::new(FailingStorage {
                 reason: e.to_string(),
-            })))
+            })
         }
     }
 }

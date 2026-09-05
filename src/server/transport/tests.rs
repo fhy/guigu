@@ -23,7 +23,7 @@ use crate::core::provider::{
 };
 use crate::core::runtime::{AgentRuntime, LoopConfig};
 use crate::core::session::{
-    NodeId, SessionEntry, SessionError, SessionStorage, SessionTree, SharedSessionStorage, reduce,
+    NodeId, SessionEntry, SessionError, SessionStorage, SessionTree, reduce,
 };
 use crate::remote::codec::{LineReader, write_line};
 
@@ -116,12 +116,13 @@ fn make_config() -> AgentConfig {
 }
 
 /// 建一个带工厂的 server（storage 用内存存储，runtime 用 NoopProvider）。
+///
+/// 工厂返回裸 `Arc<dyn SessionStorage>`；server 在 `create_session` 边界包成
+/// `SharedSessionStorage`。
 fn make_server() -> AgentServer {
     let server = AgentServer::new();
     server.with_runtime_factory(|| (make_config(), make_runtime()));
-    server.with_storage_factory(|_id| {
-        Arc::new(SharedSessionStorage::new(Arc::new(InMemoryStorage::new())))
-    });
+    server.with_storage_factory(|_id| Arc::new(InMemoryStorage::new()));
     server
 }
 
@@ -220,17 +221,11 @@ async fn test_list_sessions() {
     let server = Arc::new(make_server());
     // 预创建两个 session。
     server
-        .create_session(
-            "s1".to_string(),
-            Arc::new(SharedSessionStorage::new(Arc::new(InMemoryStorage::new()))),
-        )
+        .create_session("s1".to_string(), Arc::new(InMemoryStorage::new()))
         .await
         .expect("create s1");
     server
-        .create_session(
-            "s2".to_string(),
-            Arc::new(SharedSessionStorage::new(Arc::new(InMemoryStorage::new()))),
-        )
+        .create_session("s2".to_string(), Arc::new(InMemoryStorage::new()))
         .await
         .expect("create s2");
 
@@ -258,10 +253,7 @@ async fn test_list_sessions() {
 async fn test_spawn_lane_and_prompt() {
     let server = Arc::new(make_server());
     server
-        .create_session(
-            "s1".to_string(),
-            Arc::new(SharedSessionStorage::new(Arc::new(InMemoryStorage::new()))),
-        )
+        .create_session("s1".to_string(), Arc::new(InMemoryStorage::new()))
         .await
         .expect("create");
 

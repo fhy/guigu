@@ -1,4 +1,5 @@
-//! 测试共享 helper：fake provider、测试工具、脚本与配置构造。
+//! 测试共享 helper：fake provider、测试工具、脚本与配置构造、session 消息 /
+//! JSONL 构造。
 //!
 //! 供多个集成测试 crate 通过 `mod common;` 引入（tests/ 下顶层 .rs 会被当作
 //! 独立 test crate，故共享代码放子模块）。不同 crate 使用不同子集，故允许
@@ -12,11 +13,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream;
 use guigu::core::message::{
-    AssistantContent, AssistantMessage, StopReason, ThinkingLevel, ToolCall,
+    AssistantContent, AssistantMessage, Message, StopReason, ThinkingLevel, ToolCall, UserContent,
+    UserMessage,
 };
 use guigu::core::provider::{
     AssistantEvent, AssistantStream, ModelProvider, ProviderError, ProviderRequest,
 };
+use guigu::core::session::SessionEntry;
 use guigu::core::tool::{ResourceScope, Tool, ToolError, ToolResult};
 use guigu::core::{AgentConfig, AgentRuntime, LoopConfig, Model, ToolExecutionMode};
 use tokio::sync::oneshot;
@@ -225,4 +228,24 @@ pub fn make_runtime(
             ..LoopConfig::default()
         },
     }
+}
+
+/// 构造 User 文本消息（测试用）。
+pub fn user_msg(text: &str) -> Message {
+    Message::User(UserMessage {
+        content: vec![UserContent::Text {
+            text: text.to_string(),
+        }],
+        timestamp: 0,
+    })
+}
+
+/// 序列化 entry 为 JSONL 一行（含行尾换行，测试用）。
+pub fn line(id: u64, parent: Option<u64>, text: &str) -> String {
+    let entry = SessionEntry {
+        id,
+        parent_id: parent,
+        message: user_msg(text),
+    };
+    format!("{}\n", serde_json::to_string(&entry).unwrap())
 }
