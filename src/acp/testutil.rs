@@ -33,7 +33,8 @@ pub struct InMemoryStorage {
 }
 
 impl InMemoryStorage {
-    fn new() -> Self {
+    /// 创建空内存存储（测试用；`tests` 模块预置节点时调用）。
+    pub fn new() -> Self {
         Self {
             entries: std::sync::Mutex::new(Vec::new()),
             next_id: AtomicU64::new(1),

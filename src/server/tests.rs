@@ -14,7 +14,7 @@ use crate::core::provider::{
     AssistantEvent, AssistantStream, Model, ModelProvider, ProviderError, ProviderRequest,
 };
 use crate::core::runtime::{AgentRuntime, LoopConfig};
-use crate::core::session::{JsonlSessionStorage, SessionStorage};
+use crate::core::session::{JsonlSessionStorage, NodeId, SessionStorage};
 use async_trait::async_trait;
 use futures::stream;
 use std::sync::Arc;
@@ -77,6 +77,21 @@ fn user_msg(text: &str) -> Message {
     })
 }
 
+/// 取消息的首段文本内容（transcript 断言用）。
+fn msg_text(m: &Message) -> Option<String> {
+    match m {
+        Message::User(u) => u.content.iter().find_map(|c| match c {
+            UserContent::Text { text } => Some(text.clone()),
+            _ => None,
+        }),
+        Message::Assistant(a) => a.content.iter().find_map(|c| match c {
+            AssistantContent::Text { text } => Some(text.clone()),
+            _ => None,
+        }),
+        Message::ToolResult(_) => None,
+    }
+}
+
 /// 建一个裸 `JsonlSessionStorage`（落盘到 `dir/{id}.jsonl`）。
 ///
 /// 返回 `Arc<dyn SessionStorage>`（`create_session` / `load_session` 契约）；
@@ -135,6 +150,24 @@ async fn wait_tree_leaves(storage: &Arc<dyn SessionStorage>, min_leaves: usize) 
                 "tree should have at least {min_leaves} leaves, got {:?}",
                 tree.leaves()
             );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// 轮询 storage.load() 直到树中出现指定文本的 user 消息节点（带 deadline）。
+async fn wait_user_node(storage: &Arc<dyn SessionStorage>, text: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let tree = storage.load().await.expect("load");
+        let found = tree.nodes.values().any(|n| {
+            matches!(&n.message, Message::User(u) if u.content.iter().any(|c| matches!(c, UserContent::Text { text: t } if t == text)))
+        });
+        if found {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("should find user node with text {text}");
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -244,7 +277,7 @@ async fn test_resume_lane_restores_transcript() {
         .await
         .expect("load");
     server2
-        .resume_lane_from_factory("s1", "l1")
+        .resume_lane_from_factory("s1", "l1", None)
         .await
         .expect("resume");
 
@@ -298,7 +331,7 @@ async fn test_resume_lane_empty_session() {
         .expect("create");
     // 空 session resume：不 panic，lane 正常 spawn。
     server
-        .resume_lane_from_factory("s1", "l1")
+        .resume_lane_from_factory("s1", "l1", None)
         .await
         .expect("resume");
     // snapshot 为空（无历史）。
@@ -317,6 +350,214 @@ async fn test_resume_lane_empty_session() {
     assert_eq!(tree.nodes.len(), 2, "tree should have 2 nodes");
     assert!(tree.root.is_some(), "tree should have a root");
     server.shutdown().await.expect("shutdown");
+}
+
+/// resume_lane_from_factory 显式 head（多 lane fork 场景，017-b）：fork 出两个
+/// 叶后，分别以两个 head 恢复，得到各自正确 transcript 与 head。
+///
+/// 树结构（阶段 1 后）：根(user hi) → 中(assistant ok) → { 分支叶(path 含
+/// "branch"), 主线叶(path 含 "again") }。两叶路径可区分；非 max 叶的恢复无法靠
+/// 「max 叶推断」得到，须显式指定。节点 id 动态发现（不硬编码，0-based 且依赖
+/// 持久化顺序）。
+#[tokio::test]
+async fn test_resume_lane_explicit_head_fork() {
+    let dir = tempdir().expect("tempdir");
+
+    // 阶段 1：建分叉树（两叶）。
+    let server1 = AgentServer::new();
+    let storage = make_storage(dir.path(), "s1").await;
+    server1
+        .create_session("s1".to_string(), storage.clone())
+        .await
+        .expect("create");
+    server1
+        .spawn_lane("s1", "l1", make_config(), make_runtime())
+        .await
+        .expect("spawn");
+    server1
+        .prompt("s1", "l1", vec![user_msg("hi")])
+        .await
+        .expect("prompt");
+    wait_tree_nodes(&storage, 2).await;
+    // fork l2 从 l1（分支点 = l1 head）。
+    server1
+        .fork_lane("s1", "l1", "l2", make_config(), make_runtime())
+        .await
+        .expect("fork");
+    // l2 写分支（path 含 "branch"）。
+    server1
+        .prompt("s1", "l2", vec![user_msg("branch")])
+        .await
+        .expect("prompt l2");
+    // l1 续写（path 含 "again"）。
+    server1
+        .prompt("s1", "l1", vec![user_msg("again")])
+        .await
+        .expect("prompt l1");
+    wait_tree_leaves(&storage, 2).await;
+    server1.shutdown().await.expect("shutdown");
+
+    // 动态发现两叶：按 path 内容区分分支叶 / 主线叶（不硬编码 id）。
+    let tree = storage.load().await.expect("load");
+    let leaves = tree.leaves();
+    assert_eq!(leaves.len(), 2, "should have 2 leaves");
+    let path_has = |leaf: NodeId, text: &str| {
+        tree.path_to(leaf)
+            .map(|p| p.iter().any(|m| msg_text(m).as_deref() == Some(text)))
+            .unwrap_or(false)
+    };
+    let branch_leaf = leaves
+        .iter()
+        .copied()
+        .find(|&l| path_has(l, "branch"))
+        .expect("should find branch leaf");
+    let main_leaf = leaves
+        .iter()
+        .copied()
+        .find(|&l| path_has(l, "again"))
+        .expect("should find main leaf");
+    assert_ne!(branch_leaf, main_leaf, "two leaves should be distinct");
+
+    // 阶段 2：显式 head = 分支叶恢复。
+    let server2 = AgentServer::new();
+    server2.with_runtime_factory(|| (make_config(), make_runtime()));
+    let storage2 = make_storage(dir.path(), "s1").await;
+    server2
+        .load_session("s1".to_string(), storage2.clone())
+        .await
+        .expect("load");
+    server2
+        .resume_lane_from_factory("s1", "l1", Some(branch_leaf))
+        .await
+        .expect("resume branch leaf");
+
+    // transcript = path_to(branch_leaf)：含 "branch"，不含 "again"。
+    let snap = server2.snapshot("s1", "l1").await.expect("snapshot");
+    let texts: Vec<Option<String>> = snap.messages.iter().map(|m| msg_text(m)).collect();
+    assert!(
+        texts.iter().any(|t| t.as_deref() == Some("branch")),
+        "branch leaf transcript should contain 'branch': {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.as_deref() == Some("again")),
+        "branch leaf transcript should not contain 'again': {texts:?}"
+    );
+
+    // 续写 "after"：新消息 parent 应为 branch_leaf（显式 head）。
+    server2
+        .prompt("s1", "l1", vec![user_msg("after")])
+        .await
+        .expect("prompt after");
+    wait_user_node(&storage2, "after").await;
+    let tree2 = storage2.load().await.expect("load");
+    let after = tree2
+        .nodes
+        .values()
+        .find(|n| {
+            matches!(&n.message, Message::User(u) if u.content.iter().any(|c| matches!(c, UserContent::Text { text } if text == "after")))
+        })
+        .expect("should find after node");
+    assert_eq!(
+        after.parent_id,
+        Some(branch_leaf),
+        "after should be a child of the explicit branch leaf"
+    );
+
+    // 阶段 3：显式 head = 主线叶恢复，transcript 含 "again"，不含 "branch"。
+    server2
+        .resume_lane_from_factory("s1", "l2", Some(main_leaf))
+        .await
+        .expect("resume main leaf");
+    let snap = server2.snapshot("s1", "l2").await.expect("snapshot");
+    let texts: Vec<Option<String>> = snap.messages.iter().map(|m| msg_text(m)).collect();
+    assert!(
+        texts.iter().any(|t| t.as_deref() == Some("again")),
+        "main leaf transcript should contain 'again': {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.as_deref() == Some("branch")),
+        "main leaf transcript should not contain 'branch': {texts:?}"
+    );
+
+    server2.shutdown().await.expect("shutdown");
+}
+
+/// resume_lane_from_factory 非法 head（017-b）：head 不在树中、或为内部节点
+/// → 显式返回 `ServerError::Protocol`（非静默回退），且 lane 不登记。
+///
+/// 内部节点 / 未知 id 动态发现（不硬编码，0-based 且依赖持久化顺序）。
+#[tokio::test]
+async fn test_resume_lane_invalid_head() {
+    let dir = tempdir().expect("tempdir");
+
+    // 建 2 节点树：根(user hi, 内部节点) → 叶(assistant ok)。
+    let server1 = AgentServer::new();
+    let storage = make_storage(dir.path(), "s1").await;
+    server1
+        .create_session("s1".to_string(), storage.clone())
+        .await
+        .expect("create");
+    server1
+        .spawn_lane("s1", "l1", make_config(), make_runtime())
+        .await
+        .expect("spawn");
+    server1
+        .prompt("s1", "l1", vec![user_msg("hi")])
+        .await
+        .expect("prompt");
+    wait_tree_nodes(&storage, 2).await;
+    server1.shutdown().await.expect("shutdown");
+
+    // 动态发现内部节点（有子节点）与未知 id（max + 1000）。
+    let tree = storage.load().await.expect("load");
+    let internal_id = tree
+        .nodes
+        .values()
+        .find(|n| !n.children.is_empty())
+        .expect("should have an internal node")
+        .id;
+    let unknown_id = tree
+        .nodes
+        .keys()
+        .max()
+        .expect("should have nodes")
+        .saturating_add(1000);
+
+    let server2 = AgentServer::new();
+    server2.with_runtime_factory(|| (make_config(), make_runtime()));
+    let storage2 = make_storage(dir.path(), "s1").await;
+    server2
+        .load_session("s1".to_string(), storage2.clone())
+        .await
+        .expect("load");
+
+    // head 不在树中 → Protocol。
+    let result = server2
+        .resume_lane_from_factory("s1", "l-bad1", Some(unknown_id))
+        .await;
+    assert!(
+        matches!(result, Err(ServerError::Protocol(_))),
+        "unknown head should be Protocol, got: {result:?}"
+    );
+    // head 为内部节点（有子节点）→ Protocol。
+    let result = server2
+        .resume_lane_from_factory("s1", "l-bad2", Some(internal_id))
+        .await;
+    assert!(
+        matches!(result, Err(ServerError::Protocol(_))),
+        "internal node head should be Protocol, got: {result:?}"
+    );
+    // 错误时 lane 不登记。
+    assert!(
+        server2.snapshot("s1", "l-bad1").await.is_none(),
+        "failed resume should not register lane"
+    );
+    assert!(
+        server2.snapshot("s1", "l-bad2").await.is_none(),
+        "failed resume should not register lane"
+    );
+
+    server2.shutdown().await.expect("shutdown");
 }
 
 /// spawn_lane 后 prompt 路由正确（snapshot 反映 lane 状态）。

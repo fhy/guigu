@@ -9,8 +9,12 @@
 //! future 后另两分支 `child.kill()` 即 use-after-move；改用 `child.wait()`
 //! （`&mut self`）+ 提前 take 管道 + spawn 排空。
 //!
+//! 017-b：构造注入 `default_cwd`，`BashArgs.cwd`（per-call 参数）为空时回退
+//! `default_cwd`（装配层填充，session 间隔离）；per-call `cwd` 优先。
+//!
 //! 单元测试见 `tests/bash.rs`（走完整 `Tool` trait 契约）。
 
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -35,20 +39,36 @@ pub struct BashArgs {
 }
 
 /// 命令执行工具：以 `sh -c <command>` 启动子进程，支持取消与超时。
+///
+/// 017-b：构造注入 `default_cwd`，`BashArgs.cwd`（per-call 参数）为空时回退
+/// `default_cwd`（装配层填充，session 间隔离）；per-call `cwd` 优先。
 #[derive(Debug, Clone)]
-pub struct BashTool;
+pub struct BashTool {
+    default_cwd: Option<PathBuf>,
+}
 
 impl BashTool {
+    /// 注入默认工作目录（`BashArgs.cwd` 为空时的回退；`None` = 进程 cwd）。
+    pub fn new(default_cwd: Option<PathBuf>) -> Self {
+        BashTool { default_cwd }
+    }
+
     /// 组装 `sh -c` 子进程命令：管道化 stdout/stderr、`kill_on_drop` 防泄漏。
-    fn build_command(args: &BashArgs) -> Command {
+    ///
+    /// cwd 取 per-call `args.cwd` 优先，为空（`None` / 空串）时回退
+    /// `default_cwd`（017-b）。
+    fn build_command(&self, args: &BashArgs) -> Command {
         let mut cmd = Command::new("sh");
         cmd.arg("-c");
         cmd.arg(&args.command);
         cmd.kill_on_drop(true);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
-        if let Some(cwd) = &args.cwd {
+        // per-call cwd 优先；为空时回退 default_cwd（017-b）。
+        if let Some(cwd) = args.cwd.as_deref().filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
+        } else if let Some(dir) = &self.default_cwd {
+            cmd.current_dir(dir);
         }
         cmd
     }
@@ -153,7 +173,8 @@ impl Tool for BashTool {
         let bash_args: BashArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::invalid_arguments(e.to_string()))?;
 
-        let mut child = Self::build_command(&bash_args)
+        let mut child = self
+            .build_command(&bash_args)
             .spawn()
             .map_err(|e| ToolError::new(format!("bash spawn: {e}")))?;
 

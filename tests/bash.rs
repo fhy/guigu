@@ -27,24 +27,27 @@ fn temp_dir_unique() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("guigu-bash-{}-{}", std::process::id(), n))
 }
 
+/// 构造无 default_cwd 的 BashTool（测试统一入口，保持旧行为）。
+fn tool() -> BashTool {
+    BashTool::new(None)
+}
+
 /// BashTool 名称应为 "bash"。
 #[test]
 fn test_bash_tool_name() {
-    assert_eq!(BashTool.name(), "bash");
+    assert_eq!(tool().name(), "bash");
 }
 
 /// BashTool 应为 Exclusive 范围。
 #[test]
 fn test_bash_tool_resource_scope() {
-    assert_eq!(BashTool.resource_scope(), ResourceScope::Exclusive);
+    assert_eq!(tool().resource_scope(), ResourceScope::Exclusive);
 }
 
 /// BashTool 应声明参数 schema（command 必填）。
 #[test]
 fn test_bash_tool_parameters() {
-    let params = BashTool
-        .parameters()
-        .expect("parameters should be declared");
+    let params = tool().parameters().expect("parameters should be declared");
     assert_eq!(params["type"], "object");
     let required = params["required"]
         .as_array()
@@ -55,7 +58,7 @@ fn test_bash_tool_parameters() {
 /// `sh -c "echo hello"` 返回 stdout，details 含 exit_code=0。
 #[tokio::test]
 async fn test_bash_echo() {
-    let result = BashTool
+    let result = tool()
         .execute(
             "c1",
             serde_json::json!({ "command": "echo hello" }),
@@ -73,7 +76,7 @@ async fn test_bash_echo() {
 /// 非零退出返回 is_error=true 且 details 含 exit_code（不 throw）。
 #[tokio::test]
 async fn test_bash_nonzero_exit() {
-    let result = BashTool
+    let result = tool()
         .execute(
             "c1",
             serde_json::json!({ "command": "echo oops 1>&2; exit 3" }),
@@ -92,7 +95,7 @@ async fn test_bash_nonzero_exit() {
 #[tokio::test]
 async fn test_bash_timeout() {
     let start = std::time::Instant::now();
-    let result = BashTool
+    let result = tool()
         .execute(
             "c1",
             serde_json::json!({ "command": "sleep 5", "timeout_ms": 100 }),
@@ -126,7 +129,7 @@ async fn test_bash_cancelled() {
         sig2.cancel();
     });
     let start = std::time::Instant::now();
-    let result = BashTool
+    let result = tool()
         .execute(
             "c1",
             serde_json::json!({ "command": "sleep 5" }),
@@ -154,7 +157,7 @@ async fn test_bash_cancelled() {
 async fn test_bash_pre_cancelled() {
     let signal = CancellationToken::new();
     signal.cancel();
-    let result = BashTool
+    let result = tool()
         .execute(
             "c1",
             serde_json::json!({ "command": "echo never" }),
@@ -175,7 +178,7 @@ async fn test_bash_pre_cancelled() {
 /// 缺少 command 字段应返回 invalid_arguments。
 #[tokio::test]
 async fn test_bash_missing_command() {
-    let result = BashTool
+    let result = tool()
         .execute("c1", serde_json::json!({}), CancellationToken::new(), None)
         .await;
     match result {
@@ -195,7 +198,7 @@ async fn test_bash_cwd() {
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let canonical = std::fs::canonicalize(&dir).expect("canonicalize dir");
 
-    let result = BashTool
+    let result = tool()
         .execute(
             "c1",
             serde_json::json!({ "command": "pwd", "cwd": dir.to_string_lossy() }),
@@ -208,4 +211,61 @@ async fn test_bash_cwd() {
     assert_eq!(text_of(&result).trim(), canonical.to_string_lossy());
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// default_cwd 生效：per-call `cwd` 缺省时回退构造注入的 `default_cwd`（017-b）。
+#[tokio::test]
+async fn test_bash_default_cwd_fallback() {
+    let dir = temp_dir_unique();
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let canonical = std::fs::canonicalize(&dir).expect("canonicalize dir");
+
+    let tool = BashTool::new(Some(dir.clone()));
+    let result = tool
+        .execute(
+            "c1",
+            serde_json::json!({ "command": "pwd" }),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("bash should succeed");
+    assert!(!result.is_error);
+    assert_eq!(
+        text_of(&result).trim(),
+        canonical.to_string_lossy(),
+        "pwd should fall back to default_cwd"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// per-call `cwd` 优先于 `default_cwd`（017-b）。
+#[tokio::test]
+async fn test_bash_per_call_cwd_overrides_default() {
+    let default_dir = temp_dir_unique();
+    let call_dir = temp_dir_unique();
+    std::fs::create_dir_all(&default_dir).expect("create default dir");
+    std::fs::create_dir_all(&call_dir).expect("create call dir");
+    let canonical = std::fs::canonicalize(&call_dir).expect("canonicalize dir");
+
+    let tool = BashTool::new(Some(default_dir.clone()));
+    let result = tool
+        .execute(
+            "c1",
+            serde_json::json!({ "command": "pwd", "cwd": call_dir.to_string_lossy() }),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("bash should succeed");
+    assert!(!result.is_error);
+    assert_eq!(
+        text_of(&result).trim(),
+        canonical.to_string_lossy(),
+        "per-call cwd should override default_cwd"
+    );
+
+    let _ = std::fs::remove_dir_all(&default_dir);
+    let _ = std::fs::remove_dir_all(&call_dir);
 }

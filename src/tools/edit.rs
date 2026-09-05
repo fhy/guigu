@@ -3,7 +3,11 @@
 //! `FileWriter` 范围：跨 agent 同文件写由注入的 `FileMutationQueue` 串行化
 //! （写 IO 在 guard 持有期间执行）。要求 old_string 在文件中唯一；0 处或 >1 处
 //! 匹配均为错误。
+//!
+//! 017-b：构造注入 `work_dir`，相对路径 join `work_dir`（`None` 按进程 cwd
+//! 解析，保持旧行为）；路径解析只做一次，解析结果同用于锁 key 与 IO。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -13,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::core::message::ToolResultContent;
 use crate::core::tool::{ResourceScope, Tool, ToolError, ToolResult};
 use crate::tools::file_mutation_queue::FileMutationQueue;
+use crate::tools::resolve_tool_path;
 
 /// EditTool 参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,15 +34,19 @@ pub struct EditArgs {
 ///
 /// 构造时注入 `Arc<FileMutationQueue>`，写 IO 前 acquire 同路径写锁、
 /// 写后 RAII 释放，实现跨 agent 同文件写串行化。
+///
+/// 017-b：构造注入 `work_dir`，相对路径 join `work_dir`（`None` 按进程 cwd
+/// 解析，保持旧行为）；绝对路径不变。
 #[derive(Debug, Clone)]
 pub struct EditTool {
     queue: Arc<FileMutationQueue>,
+    work_dir: Option<PathBuf>,
 }
 
 impl EditTool {
-    /// 注入跨 agent 写锁队列。
-    pub fn new(queue: Arc<FileMutationQueue>) -> Self {
-        EditTool { queue }
+    /// 注入跨 agent 写锁队列与工作目录（相对路径锚点；`None` = 按进程 cwd 解析）。
+    pub fn new(queue: Arc<FileMutationQueue>, work_dir: Option<PathBuf>) -> Self {
+        EditTool { queue, work_dir }
     }
 }
 
@@ -83,11 +92,13 @@ impl Tool for EditTool {
         let edit_args: EditArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::invalid_arguments(e.to_string()))?;
 
-        let path = &edit_args.path;
+        // 解析一次（017-b）：归一化绝对路径同用于锁 key 与 IO，保证锁 key 与
+        // 实际写文件路径一致。
+        let path = resolve_tool_path(&self.work_dir, &edit_args.path);
 
         // 可取消 acquire：read-modify-write 全程持锁，避免跨 agent 丢更新。
         let _guard = tokio::select! {
-            g = self.queue.acquire(std::path::Path::new(path)) => g,
+            g = self.queue.acquire(&path) => g,
             _ = signal.cancelled() => {
                 return Err(ToolError::new(
                     "cancelled: edit aborted while waiting for file lock".to_string(),
@@ -101,26 +112,33 @@ impl Tool for EditTool {
             ));
         }
 
-        let meta = tokio::fs::metadata(path)
+        let meta = tokio::fs::metadata(&path)
             .await
-            .map_err(|e| ToolError::new(format!("edit {path}: {e}")))?;
+            .map_err(|e| ToolError::new(format!("edit {}: {e}", path.display())))?;
         if !meta.is_file() {
-            return Err(ToolError::new(format!("edit {path}: not a regular file")));
+            return Err(ToolError::new(format!(
+                "edit {}: not a regular file",
+                path.display()
+            )));
         }
 
-        let bytes = tokio::fs::read(path)
+        let bytes = tokio::fs::read(&path)
             .await
-            .map_err(|e| ToolError::new(format!("edit {path}: {e}")))?;
+            .map_err(|e| ToolError::new(format!("edit {}: {e}", path.display())))?;
         let content = String::from_utf8(bytes)
-            .map_err(|e| ToolError::new(format!("edit {path}: invalid UTF-8: {e}")))?;
+            .map_err(|e| ToolError::new(format!("edit {}: invalid UTF-8: {e}", path.display())))?;
 
         let matches = content.matches(&edit_args.old_string).count();
         if matches == 0 {
-            return Err(ToolError::new(format!("edit {path}: old_string not found")));
+            return Err(ToolError::new(format!(
+                "edit {}: old_string not found",
+                path.display()
+            )));
         }
         if matches > 1 {
             return Err(ToolError::new(format!(
-                "edit {path}: old_string not unique ({matches} matches)"
+                "edit {}: old_string not unique ({matches} matches)",
+                path.display()
             )));
         }
 
@@ -133,17 +151,17 @@ impl Tool for EditTool {
             ));
         }
 
-        tokio::fs::write(path, new_content.as_bytes())
+        tokio::fs::write(&path, new_content.as_bytes())
             .await
-            .map_err(|e| ToolError::new(format!("edit {path}: {e}")))?;
+            .map_err(|e| ToolError::new(format!("edit {}: {e}", path.display())))?;
 
         Ok(ToolResult {
             content: vec![ToolResultContent::Text {
-                text: format!("edited {path}: replaced 1 occurrence"),
+                text: format!("edited {}: replaced 1 occurrence", path.display()),
             }],
             is_error: false,
             details: Some(serde_json::json!({
-                "path": path,
+                "path": path.to_string_lossy(),
                 "replaced": 1,
             })),
         })
@@ -154,9 +172,9 @@ impl Tool for EditTool {
 mod tests {
     use super::*;
 
-    /// 构造带独立写锁队列的 EditTool（测试统一入口）。
+    /// 构造带独立写锁队列、无 work_dir 的 EditTool（测试统一入口，保持旧行为）。
     fn tool() -> EditTool {
-        EditTool::new(Arc::new(FileMutationQueue::new()))
+        EditTool::new(Arc::new(FileMutationQueue::new()), None)
     }
 
     /// EditTool 名称应为 "edit"。
@@ -230,5 +248,29 @@ mod tests {
             ),
             Ok(_) => panic!("should fail when cancelled"),
         }
+    }
+
+    /// work_dir 生效：相对路径 join work_dir 后编辑（017-b）。
+    #[tokio::test]
+    async fn test_edit_tool_work_dir_relative() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("e.txt"), "foo bar").expect("write file");
+        let tool = EditTool::new(
+            Arc::new(FileMutationQueue::new()),
+            Some(dir.path().to_path_buf()),
+        );
+        let result = tool
+            .execute(
+                "call1",
+                serde_json::json!({ "path": "e.txt", "old_string": "bar", "new_string": "BAZ" }),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("edit should succeed");
+        assert!(!result.is_error);
+        let on_disk = std::fs::read_to_string(dir.path().join("e.txt"))
+            .expect("file should exist under work_dir");
+        assert_eq!(on_disk, "foo BAZ");
     }
 }

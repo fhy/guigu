@@ -20,15 +20,15 @@ fn temp_dir_unique() -> std::path::PathBuf {
 }
 
 fn read_tool() -> Arc<dyn Tool> {
-    Arc::new(ReadTool)
+    Arc::new(ReadTool::new(None))
 }
 
 fn write_tool() -> Arc<dyn Tool> {
-    Arc::new(WriteTool::new(Arc::new(FileMutationQueue::new())))
+    Arc::new(WriteTool::new(Arc::new(FileMutationQueue::new()), None))
 }
 
 fn edit_tool() -> Arc<dyn Tool> {
-    Arc::new(EditTool::new(Arc::new(FileMutationQueue::new())))
+    Arc::new(EditTool::new(Arc::new(FileMutationQueue::new()), None))
 }
 
 /// 用未取消的 signal 执行工具（测试统一入口）。
@@ -357,4 +357,113 @@ async fn test_edit_multiple_matches() {
         Ok(_) => panic!("should fail when old_string not unique"),
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------- work_dir 工作目录隔离测试（017-b） ----------
+
+/// read + work_dir：相对路径 join work_dir 后读取（经 `Arc<dyn Tool>` 契约）。
+#[tokio::test]
+async fn test_read_work_dir_relative() {
+    let dir = temp_dir_unique();
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    std::fs::write(dir.join("wd.txt"), "work dir content").expect("write temp file");
+
+    let tool: Arc<dyn Tool> = Arc::new(ReadTool::new(Some(dir.clone())));
+    let result = run(&tool, serde_json::json!({ "path": "wd.txt" }))
+        .await
+        .expect("read should succeed");
+    assert_eq!(text_of(&result), "work dir content");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// write + work_dir：相对路径 join work_dir 后写入（经 `Arc<dyn Tool>` 契约）。
+#[tokio::test]
+async fn test_write_work_dir_relative() {
+    let dir = temp_dir_unique();
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+
+    let tool: Arc<dyn Tool> = Arc::new(WriteTool::new(
+        Arc::new(FileMutationQueue::new()),
+        Some(dir.clone()),
+    ));
+    let result = run(
+        &tool,
+        serde_json::json!({ "path": "nested/wd.txt", "content": "hello" }),
+    )
+    .await
+    .expect("write should succeed");
+    assert!(!result.is_error);
+    let on_disk = std::fs::read_to_string(dir.join("nested/wd.txt"))
+        .expect("file should exist under work_dir");
+    assert_eq!(on_disk, "hello");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// edit + work_dir：相对路径 join work_dir 后编辑（经 `Arc<dyn Tool>` 契约）。
+#[tokio::test]
+async fn test_edit_work_dir_relative() {
+    let dir = temp_dir_unique();
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    std::fs::write(dir.join("wd.txt"), "foo bar").expect("write temp file");
+
+    let tool: Arc<dyn Tool> = Arc::new(EditTool::new(
+        Arc::new(FileMutationQueue::new()),
+        Some(dir.clone()),
+    ));
+    let result = run(
+        &tool,
+        serde_json::json!({ "path": "wd.txt", "old_string": "bar", "new_string": "BAZ" }),
+    )
+    .await
+    .expect("edit should succeed");
+    assert!(!result.is_error);
+    let on_disk =
+        std::fs::read_to_string(dir.join("wd.txt")).expect("file should exist under work_dir");
+    assert_eq!(on_disk, "foo BAZ");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// work_dir 隔离：两个工具不同 work_dir，同名相对路径落到不同文件（session 间隔离）。
+#[tokio::test]
+async fn test_work_dir_isolation() {
+    let dir_a = temp_dir_unique();
+    let dir_b = temp_dir_unique();
+    std::fs::create_dir_all(&dir_a).expect("create dir a");
+    std::fs::create_dir_all(&dir_b).expect("create dir b");
+
+    let tool_a: Arc<dyn Tool> = Arc::new(WriteTool::new(
+        Arc::new(FileMutationQueue::new()),
+        Some(dir_a.clone()),
+    ));
+    let tool_b: Arc<dyn Tool> = Arc::new(WriteTool::new(
+        Arc::new(FileMutationQueue::new()),
+        Some(dir_b.clone()),
+    ));
+    run(
+        &tool_a,
+        serde_json::json!({ "path": "same.txt", "content": "A" }),
+    )
+    .await
+    .expect("write a");
+    run(
+        &tool_b,
+        serde_json::json!({ "path": "same.txt", "content": "B" }),
+    )
+    .await
+    .expect("write b");
+
+    assert_eq!(
+        std::fs::read_to_string(dir_a.join("same.txt")).expect("a exists"),
+        "A"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir_b.join("same.txt")).expect("b exists"),
+        "B"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
 }

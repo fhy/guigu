@@ -14,6 +14,7 @@
 //! ACP 属 014。
 
 mod lane;
+mod lane_ops;
 mod protocol;
 mod transport;
 

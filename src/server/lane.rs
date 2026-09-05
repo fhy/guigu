@@ -1,15 +1,17 @@
-//! lane 调度（Task 013）：`AgentServer` 的 lane 生命周期与路由方法。
+//! lane 创建与持久化（Task 013，017-b 拆分）：`AgentServer` 的 lane 创建方法
+//! 与持久化桥接。
 //!
-//! 从 `mod.rs` 拆出（单文件 ≤ 400 行约束）：`spawn_lane` / `fork_lane` /
-//! `prompt` / `continue_` / `abort` / `reset` / `snapshot` / `subscribe` /
-//! `shutdown` + 持久化桥接 task `spawn_bridge`。session 注册表与类型定义留在
-//! `mod.rs`。
+//! 从 `mod.rs` 拆出（单文件 ≤ 400 行约束）：`spawn_lane` / `spawn_lane_resumed` /
+//! `fork_lane` / `resume_lane_from_factory` + 持久化桥接 task `spawn_bridge`。
+//! lane 路由与生命周期（`prompt` / `continue_` / `abort` / `reset` / `snapshot` /
+//! `subscribe` / `shutdown`）在 `lane_ops.rs`（017-b 二次拆分）。session 注册表
+//! 与类型定义留在 `mod.rs`。
 
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, broadcast};
 
-use crate::core::agent::{Agent, AgentConfig, AgentHandle, AgentSnapshot};
+use crate::core::agent::{AgentConfig, AgentHandle};
 use crate::core::event::AgentEvent;
 use crate::core::message::Message;
 use crate::core::runtime::AgentRuntime;
@@ -124,18 +126,26 @@ impl AgentServer {
     }
 
     /// 恢复 session 并 spawn 一个续写 lane（崩溃恢复 / `--session` 续聊入口）：
-    /// load 树 → 取活动叶（max NodeId 叶）→ 以叶路径为初始 transcript spawn
-    /// runtime → `LaneWriter` head = 活动叶（空树 → `None`，首次 append 成为根）。
+    /// load 树 → 定目标 head → 以根→叶消息序列初始化 runtime transcript →
+    /// `LaneWriter` head = 目标 head。
+    ///
+    /// `head` 语义（017-b）：
+    /// - `Some(h)`：显式目标 head（须为叶节点）。transcript = `path_to(h)`，
+    ///   `LaneWriter` head = `h`。`h` 不在树中或为内部节点（`path_to` 返回
+    ///   `None`）→ **显式返回 `ServerError::Protocol`**，不静默回退到 max NodeId
+    ///   叶，避免掩盖调用方传入非法/过期 head 的 bug。从内部节点开新分支属
+    ///   `fork_lane` 职责，非本恢复入口。
+    /// - `None`：取 max NodeId 叶作为活动叶（兼容单 lane 续聊；空树 → `None`，
+    ///   首次 append 成为根）。NodeId 单调递增，最新 append 的节点必为叶（若其
+    ///   有子节点则子节点 id 更大，矛盾），故 max 叶即最近续写点。
     ///
     /// `session_id` 须已注册（`load_session` / `create_session`）；runtime 工厂未
     /// 配置 → `Protocol` 错误；`lane_id` 已存在 → `LaneAlreadyExists`。
-    ///
-    /// 活动叶取 max NodeId 叶：NodeId 单调递增，最新 append 的节点必为叶（若其
-    /// 有子节点则子节点 id 更大，矛盾），故 max 叶即最近续写点。
     pub async fn resume_lane_from_factory(
         &self,
         session_id: &str,
         lane_id: &str,
+        head: Option<NodeId>,
     ) -> Result<(), ServerError> {
         let factory = self
             .inner
@@ -156,20 +166,27 @@ impl AgentServer {
         };
         // load 树（锁外）。
         let tree = storage.load().await?;
-        // 取活动叶（max NodeId 叶）+ 叶路径 transcript。
-        let (head, transcript) = match tree.leaves().into_iter().max() {
-            Some(leaf) => {
-                let path = tree
-                    .path_to(leaf)
-                    .ok_or_else(|| ServerError::Protocol("active leaf path unavailable".into()))?;
-                (
-                    Some(leaf),
-                    path.iter()
-                        .map(|m| Arc::new((**m).clone()))
-                        .collect::<Vec<_>>(),
-                )
+        // 定目标 head + 叶路径 transcript。
+        let (head, transcript) = match head {
+            Some(h) => {
+                // 显式 head：须为叶节点（009 契约 `path_to(leaf)`）；不在树中或
+                // 内部节点 → 显式 Protocol 错误，不静默回退。
+                let path = tree.path_to(h).ok_or_else(|| {
+                    ServerError::Protocol(format!(
+                        "resume head {h} is not a leaf node (unknown or internal)"
+                    ))
+                })?;
+                (Some(h), transcript_from_path(&path))
             }
-            None => (None, Vec::new()),
+            None => match tree.leaves().into_iter().max() {
+                Some(leaf) => {
+                    let path = tree.path_to(leaf).ok_or_else(|| {
+                        ServerError::Protocol("active leaf path unavailable".into())
+                    })?;
+                    (Some(leaf), transcript_from_path(&path))
+                }
+                None => (None, Vec::new()),
+            },
         };
         self.spawn_lane_resumed(session_id, lane_id, config, runtime, transcript, head)
             .await
@@ -253,125 +270,6 @@ impl AgentServer {
         Ok(())
     }
 
-    /// 向 lane 发送提示消息（路由到 lane 的 `AgentHandle`）。
-    pub async fn prompt(
-        &self,
-        session_id: &str,
-        lane_id: &str,
-        messages: Vec<Message>,
-    ) -> Result<(), ServerError> {
-        let handle = self.get_lane(session_id, lane_id).await?;
-        handle
-            .prompt(messages)
-            .await
-            .map_err(|e| ServerError::Agent(e.to_string()))
-    }
-
-    /// 继续处理（路由到 lane 的 `AgentHandle`）。
-    pub async fn continue_(&self, session_id: &str, lane_id: &str) -> Result<(), ServerError> {
-        let handle = self.get_lane(session_id, lane_id).await?;
-        handle
-            .continue_()
-            .await
-            .map_err(|e| ServerError::Agent(e.to_string()))
-    }
-
-    /// 中止当前操作（路由到 lane 的 `AgentHandle`，非阻塞）。
-    pub async fn abort(&self, session_id: &str, lane_id: &str) -> Result<(), ServerError> {
-        let handle = self.get_lane(session_id, lane_id).await?;
-        handle.abort();
-        Ok(())
-    }
-
-    /// 重置 lane（路由到 lane 的 `AgentHandle`）。
-    pub async fn reset(&self, session_id: &str, lane_id: &str) -> Result<(), ServerError> {
-        let handle = self.get_lane(session_id, lane_id).await?;
-        handle
-            .reset()
-            .await
-            .map_err(|e| ServerError::Agent(e.to_string()))
-    }
-
-    /// 获取 lane 当前快照；session / lane 不存在返回 `None`（不 panic）。
-    pub async fn snapshot(&self, session_id: &str, lane_id: &str) -> Option<AgentSnapshot> {
-        let sessions = self.inner.sessions.lock().await;
-        Some(
-            sessions
-                .get(session_id)?
-                .lanes
-                .get(lane_id)?
-                .handle
-                .snapshot(),
-        )
-    }
-
-    /// 订阅 lane 事件；session / lane 不存在返回 `None`（不 panic）。
-    pub async fn subscribe(
-        &self,
-        session_id: &str,
-        lane_id: &str,
-    ) -> Option<broadcast::Receiver<AgentEvent>> {
-        let sessions = self.inner.sessions.lock().await;
-        Some(
-            sessions
-                .get(session_id)?
-                .lanes
-                .get(lane_id)?
-                .handle
-                .subscribe(),
-        )
-    }
-
-    /// 关闭 server：shutdown 所有 lane 并清空注册表，**等桥接 task 落盘完成**。
-    ///
-    /// 顺序：克隆 handle + 桥接 `JoinHandle` → 清空注册表 → 逐个 shutdown runtime
-    /// task（消费 handle，broadcast sender 归零）→ 等桥接 task 退出。桥接 task 在
-    /// sender 归零后处理完缓冲的 `MessageEnd` 才退出，故此处返回即保证持久化落盘
-    /// （否则 `#[tokio::main]` drop runtime 时取消桥接 task，末条持久化丢失）。
-    pub async fn shutdown(&self) -> Result<(), ServerError> {
-        // 取走全部 session（drain 注册表），移出 handle + 桥接 JoinHandle
-        // （`JoinHandle` 不可 Clone，故直接移动而非克隆）。
-        let sessions: Vec<_> = {
-            let mut guard = self.inner.sessions.lock().await;
-            guard.drain().map(|(_, s)| s).collect()
-        };
-        let mut handles = Vec::new();
-        let mut bridges = Vec::new();
-        for session in sessions {
-            for lane in session.lanes.into_values() {
-                handles.push(lane.handle);
-                bridges.push(lane.bridge);
-            }
-        }
-        for handle in handles {
-            handle
-                .shutdown()
-                .await
-                .map_err(|e| ServerError::Agent(e.to_string()))?;
-        }
-        // handles 已消费（broadcast sender 归零）→ 桥接 task 处理完缓冲事件后退出。
-        // 等其完成，保证 `MessageEnd` 全部落盘。
-        for bridge in bridges {
-            if let Err(e) = bridge.await {
-                tracing::warn!("server: bridge task panicked: {e}");
-            }
-        }
-        Ok(())
-    }
-
-    /// 取 lane 的 `AgentHandle`（克隆）；session / lane 不存在返回错误。
-    async fn get_lane(&self, session_id: &str, lane_id: &str) -> Result<AgentHandle, ServerError> {
-        let sessions = self.inner.sessions.lock().await;
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| ServerError::SessionNotFound(session_id.to_string()))?;
-        let lane = session
-            .lanes
-            .get(lane_id)
-            .ok_or_else(|| ServerError::LaneNotFound(lane_id.to_string()))?;
-        Ok(lane.handle.clone())
-    }
-
     /// 清理已 spawn 但未登记的 handle：显式 shutdown（等 runtime task 退出），
     /// 桥接 task 随事件流关闭退出。shutdown 失败仅告警（调用方已拿到主错误）。
     async fn cleanup_handle(handle: AgentHandle) {
@@ -379,6 +277,11 @@ impl AgentServer {
             tracing::warn!("server: failed to clean up unregistered lane handle: {e}");
         }
     }
+}
+
+/// 把根→叶消息序列转为 runtime transcript（克隆为 `Arc`）。
+fn transcript_from_path(path: &[&Message]) -> Vec<Arc<Message>> {
+    path.iter().map(|m| Arc::new((**m).clone())).collect()
 }
 
 /// 启动 lane 持久化桥接 task：订阅 lane 事件流，对 `MessageEnd` 经 `LaneWriter`

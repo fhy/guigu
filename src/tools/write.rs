@@ -2,7 +2,11 @@
 //!
 //! `FileWriter` 范围：跨 agent 同文件写由注入的 `FileMutationQueue` 串行化
 //! （写 IO 在 guard 持有期间执行）。覆盖写；原子写属后续任务。
+//!
+//! 017-b：构造注入 `work_dir`，相对路径 join `work_dir`（`None` 按进程 cwd
+//! 解析，保持旧行为）；路径解析只做一次，解析结果同用于锁 key 与 IO。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -12,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use crate::core::message::ToolResultContent;
 use crate::core::tool::{ResourceScope, Tool, ToolError, ToolResult};
 use crate::tools::file_mutation_queue::FileMutationQueue;
+use crate::tools::resolve_tool_path;
 
 /// WriteTool 参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,15 +31,19 @@ pub struct WriteArgs {
 ///
 /// 构造时注入 `Arc<FileMutationQueue>`，写 IO 前 acquire 同路径写锁、
 /// 写后 RAII 释放，实现跨 agent 同文件写串行化。
+///
+/// 017-b：构造注入 `work_dir`，相对路径 join `work_dir`（`None` 按进程 cwd
+/// 解析，保持旧行为）；绝对路径不变。
 #[derive(Debug, Clone)]
 pub struct WriteTool {
     queue: Arc<FileMutationQueue>,
+    work_dir: Option<PathBuf>,
 }
 
 impl WriteTool {
-    /// 注入跨 agent 写锁队列。
-    pub fn new(queue: Arc<FileMutationQueue>) -> Self {
-        WriteTool { queue }
+    /// 注入跨 agent 写锁队列与工作目录（相对路径锚点；`None` = 按进程 cwd 解析）。
+    pub fn new(queue: Arc<FileMutationQueue>, work_dir: Option<PathBuf>) -> Self {
+        WriteTool { queue, work_dir }
     }
 }
 
@@ -79,11 +88,13 @@ impl Tool for WriteTool {
         let write_args: WriteArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::invalid_arguments(e.to_string()))?;
 
-        let path = &write_args.path;
+        // 解析一次（017-b）：归一化绝对路径同用于锁 key 与 IO，保证锁 key 与
+        // 实际写文件路径一致。
+        let path = resolve_tool_path(&self.work_dir, &write_args.path);
 
         // 可取消 acquire：等待同路径写锁期间可被 signal 打断。
         let _guard = tokio::select! {
-            g = self.queue.acquire(std::path::Path::new(path)) => g,
+            g = self.queue.acquire(&path) => g,
             _ = signal.cancelled() => {
                 return Err(ToolError::new(
                     "cancelled: write aborted while waiting for file lock".to_string(),
@@ -97,26 +108,26 @@ impl Tool for WriteTool {
             ));
         }
 
-        if let Some(parent) = std::path::Path::new(path).parent()
+        if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| ToolError::new(format!("write {path}: create parent dir: {e}")))?;
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                ToolError::new(format!("write {}: create parent dir: {e}", path.display()))
+            })?;
         }
 
-        tokio::fs::write(path, write_args.content.as_bytes())
+        tokio::fs::write(&path, write_args.content.as_bytes())
             .await
-            .map_err(|e| ToolError::new(format!("write {path}: {e}")))?;
+            .map_err(|e| ToolError::new(format!("write {}: {e}", path.display())))?;
 
         let bytes = write_args.content.len();
         Ok(ToolResult {
             content: vec![ToolResultContent::Text {
-                text: format!("wrote {bytes} bytes to {path}"),
+                text: format!("wrote {bytes} bytes to {}", path.display()),
             }],
             is_error: false,
             details: Some(serde_json::json!({
-                "path": path,
+                "path": path.to_string_lossy(),
                 "bytes": bytes,
             })),
         })
@@ -127,9 +138,9 @@ impl Tool for WriteTool {
 mod tests {
     use super::*;
 
-    /// 构造带独立写锁队列的 WriteTool（测试统一入口）。
+    /// 构造带独立写锁队列、无 work_dir 的 WriteTool（测试统一入口，保持旧行为）。
     fn tool() -> WriteTool {
-        WriteTool::new(Arc::new(FileMutationQueue::new()))
+        WriteTool::new(Arc::new(FileMutationQueue::new()), None)
     }
 
     /// WriteTool 名称应为 "write"。
@@ -198,5 +209,28 @@ mod tests {
             ),
             Ok(_) => panic!("should fail when cancelled"),
         }
+    }
+
+    /// work_dir 生效：相对路径 join work_dir 后写入（含自动建父目录，017-b）。
+    #[tokio::test]
+    async fn test_write_tool_work_dir_relative() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tool = WriteTool::new(
+            Arc::new(FileMutationQueue::new()),
+            Some(dir.path().to_path_buf()),
+        );
+        let result = tool
+            .execute(
+                "call1",
+                serde_json::json!({ "path": "sub/b.txt", "content": "hello" }),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("write should succeed");
+        assert!(!result.is_error);
+        let on_disk = std::fs::read_to_string(dir.path().join("sub/b.txt"))
+            .expect("file should exist under work_dir");
+        assert_eq!(on_disk, "hello");
     }
 }

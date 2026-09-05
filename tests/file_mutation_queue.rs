@@ -26,8 +26,8 @@ async fn test_write_same_path_serialized_via_shared_queue() {
     let dir = temp_dir_unique();
     let path = dir.join("shared.txt");
 
-    let tool1 = Arc::new(WriteTool::new(Arc::clone(&queue)));
-    let tool2 = Arc::new(WriteTool::new(Arc::clone(&queue)));
+    let tool1 = Arc::new(WriteTool::new(Arc::clone(&queue), None));
+    let tool2 = Arc::new(WriteTool::new(Arc::clone(&queue), None));
     let p1 = path.to_string_lossy().to_string();
     let p2 = path.to_string_lossy().to_string();
 

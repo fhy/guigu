@@ -1,8 +1,9 @@
-//! agent 装配（Task 015）：provider / 工具 / `AgentServer` / session 存储。
+//! agent 装配（Task 015，017-b 工作目录显式化）：provider / 工具 /
+//! `AgentServer` / session 存储。
 //!
 //! 复用 007 adapters（OpenAI/Anthropic）+ 005/006 内置工具 + 013 `AgentServer` +
-//! 009 `JsonlSessionStorage`。写入工具经 `std::env::set_current_dir` 锚定 `--cwd`
-//! （相对路径解析到工作目录）。
+//! 009 `JsonlSessionStorage`。工作目录经工具构造参数显式传递（文件工具
+//! `work_dir` / bash `default_cwd`），不再修改进程级 cwd（session 间隔离，017-b）。
 //!
 //! storage 工厂（ACP 模式经 `session/new` 建 session 用）是同步 `Fn`，而
 //! `JsonlSessionStorage::open` 是 async：用 `block_in_place` + `block_on` 在
@@ -46,22 +47,19 @@ pub struct Assembled {
 
 /// 装配 server（cwd / provider / 工具 / 工厂）。REPL 与 ACP 共用。
 pub fn assemble(cli: &Cli) -> Result<Assembled, CliError> {
-    // 1. 锚定工作目录：相对路径（read/write/edit/bash）解析到 --cwd。
-    if let Some(cwd) = &cli.cwd {
-        std::env::set_current_dir(cwd)?;
-    }
-
-    // 2. 选 provider（读 --api-key / env）。
+    // 1. 选 provider（读 --api-key / env）。
     let provider = build_provider(cli)?;
     let model = cli
         .model
         .clone()
         .unwrap_or_else(|| cli.provider.default_model().to_string());
 
-    // 3. 工具集：005 read/write/edit + 006 bash（注入共享 FileMutationQueue）。
-    let tools = build_tools();
+    // 2. 工具集：005 read/write/edit + 006 bash（注入共享 FileMutationQueue）。
+    //    工作目录经构造参数显式传递（017-b）：`--cwd` → 文件工具 `work_dir` +
+    //    bash `default_cwd`；未指定 → `None`（相对路径按进程 cwd 解析，旧行为）。
+    let tools = build_tools(cli.cwd.clone());
 
-    // 4. server + 工厂。
+    // 3. server + 工厂。
     let log_dir = resolve_log_dir(&cli.log)?;
     let server = build_server(provider, model, tools, log_dir.clone());
 
@@ -71,7 +69,8 @@ pub fn assemble(cli: &Cli) -> Result<Assembled, CliError> {
 /// REPL 建 session：`--session` 存在则 `load_session` 续聊，否则新建；spawn 默认 lane。
 ///
 /// 续聊（`--session`）：`resume_lane_from_factory` 恢复 transcript（agent 可见历史
-/// 上下文）+ 活动叶 head（新消息接在历史末尾，非新根）。新建：空 transcript +
+/// 上下文）+ 活动叶 head（新消息接在历史末尾，非新根）。head 传 `None`（017-b：
+/// 默认回退 max NodeId 叶，CLI 续聊无分支意图）。新建：空 transcript +
 /// head `None`（首次 append 成为根）。
 pub async fn setup_session(assembled: &Assembled, cli: &Cli) -> Result<String, CliError> {
     let resume = cli.session.is_some();
@@ -97,9 +96,10 @@ pub async fn setup_session(assembled: &Assembled, cli: &Cli) -> Result<String, C
         }
     };
     if resume {
+        // head = None：回退 max NodeId 叶（CLI 续聊无分支意图，017-b）。
         assembled
             .server
-            .resume_lane_from_factory(&session_id, DEFAULT_LANE)
+            .resume_lane_from_factory(&session_id, DEFAULT_LANE, None)
             .await?;
     } else {
         assembled
@@ -134,13 +134,16 @@ fn build_provider(cli: &Cli) -> Result<Arc<dyn ModelProvider>, CliError> {
 }
 
 /// 工具集：read/write/edit + bash（共享 `FileMutationQueue` 串行化同文件写）。
-fn build_tools() -> Vec<Arc<dyn Tool>> {
+///
+/// `work_dir`（017-b）：文件工具相对路径锚点 + bash 默认 cwd（`--cwd`）；
+/// `None` = 相对路径按进程 cwd 解析（旧行为）。
+fn build_tools(work_dir: Option<PathBuf>) -> Vec<Arc<dyn Tool>> {
     let queue = Arc::new(FileMutationQueue::new());
     vec![
-        Arc::new(ReadTool),
-        Arc::new(WriteTool::new(queue.clone())),
-        Arc::new(EditTool::new(queue)),
-        Arc::new(BashTool),
+        Arc::new(ReadTool::new(work_dir.clone())),
+        Arc::new(WriteTool::new(queue.clone(), work_dir.clone())),
+        Arc::new(EditTool::new(queue, work_dir.clone())),
+        Arc::new(BashTool::new(work_dir)),
     ]
 }
 

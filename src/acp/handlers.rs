@@ -14,6 +14,7 @@ use crate::acp::types::{
 use crate::acp::{AcpAgent, AcpClient, AcpError, PermissionMode};
 use crate::core::event::AgentEvent;
 use crate::core::message::{Message, StopReason};
+use crate::core::session::NodeId;
 use crate::server::ServerError;
 
 /// 默认 lane id（ACP 一期单 lane：`session/prompt` / `session/cancel` 均路由到它）。
@@ -58,18 +59,22 @@ impl AcpAgent {
     /// `session/load`（c→a）：从持久化恢复 session → 续写默认 lane → 返回 `{ sessionId }`。
     ///
     /// 续写 lane 经 `resume_lane_from_factory`：恢复 transcript（agent 可见历史
-    /// 上下文）+ 活动叶 head（新消息接在历史末尾，非新根）。
+    /// 上下文）+ 目标 head（新消息接在 head 之后，非新根）。可选 `head` 字段
+    /// （017-b）：显式指定目标叶节点；未提供 → `None`（回退 max NodeId 叶，
+    /// 兼容单 lane 续聊）。
     pub(crate) async fn handle_load_session(&self, params: Value) -> Result<Value, AcpError> {
         let session_id = params
             .get("sessionId")
             .and_then(Value::as_str)
             .ok_or_else(|| AcpError::JsonRpc("missing sessionId".into()))?
             .to_string();
+        // 可选 head（017-b）：显式目标叶节点；缺省 → None（max NodeId 叶）。
+        let head: Option<NodeId> = params.get("head").and_then(Value::as_u64);
         self.server
             .load_session_from_factory(session_id.clone())
             .await?;
         self.server
-            .resume_lane_from_factory(&session_id, DEFAULT_LANE)
+            .resume_lane_from_factory(&session_id, DEFAULT_LANE, head)
             .await?;
         Ok(json!({ "sessionId": session_id }))
     }
