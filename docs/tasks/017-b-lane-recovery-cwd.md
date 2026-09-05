@@ -24,7 +24,7 @@
 
 - `resume_lane_from_factory`（或等价恢复入口）新增参数 `head: Option<NodeId>`：
   - `Some(h)`：以 `path_to(h)` 的根→叶消息序列初始化 runtime transcript + snapshot，`LaneWriter` head 设为 `h`。
-  - `Some(h)` 且 `path_to(h)` 返回 `None`（`h` 不在树中）：**显式返回 `ServerError::Protocol`**，不静默回退到最大 `NodeId` 叶，避免掩盖调用方传入非法/过期 head 的 bug。`h` 允许为任意树节点（含内部节点），续写即从 `h` 分叉。
+  - `Some(h)` 且 `path_to(h)` 返回 `None`（`h` 不在树中，或 `h` 为内部节点）：**显式返回 `ServerError::Protocol`**，不静默回退到最大 `NodeId` 叶，避免掩盖调用方传入非法/过期 head 的 bug。`h` 仅限叶节点——009 契约为 `path_to(leaf)`，内部节点返回 `None`（见 `core::session` 既有测试 `reduce_path_to_internal_node_returns_none`），不扩展 `path_to` 语义；从内部节点开新分支属 `fork_lane`（013），非本恢复入口职责。
   - `None`：保持 015 现状——取最大 `NodeId` 的叶作为活动叶（兼容单 lane 续聊）。
 - **调用方更新**：
   - CLI `--session` 续聊：传 `None`（默认回退行为，用户无分支意图）。
@@ -59,7 +59,7 @@
 - [ ] cargo test --all-targets passes
 - [ ] cargo fmt --check passes
 - [ ] `resume_lane_from_factory` 支持 `head: Some(h)`：transcript = `path_to(h)`、`LaneWriter` head = `h`；`head: None` 回退最大 NodeId 叶（行为与 015 一致）
-- [ ] `head: Some(h)` 且 `h` 不在树中：显式返回 `ServerError::Protocol`（非静默回退）
+- [ ] `head: Some(h)` 且 `h` 不在树中或为内部节点：显式返回 `ServerError::Protocol`（非静默回退）
 - [ ] 多 lane fork 场景测试：fork 出两个叶后，分别以两个 `head` 恢复，得到各自正确 transcript 与 head
 - [ ] 全仓无 `set_current_dir` 残留；文件工具经 `work_dir` 显式解析相对路径；bash 默认 cwd 由装配层填充
 - [ ] 既有 CLI `--session` 续聊回归测试全绿（`None` 路径行为不变）
@@ -68,4 +68,4 @@
 ## 修订记录
 
 - v1.0（2026-09-05，Architect）：初稿。打包 015 r2 两条非阻塞建议：恢复 API 显式收 `head: Option<NodeId>`（消除唯一依赖最大 NodeId 推断，`None` 保持兼容，不持久化 lane head 元数据）；工作目录由进程级 `set_current_dir` 改为工具构造/调用显式参数（文件工具注入 `work_dir`，bash 沿用 `cwd`），session 间隔离。
-- v1.1（2026-09-05，Architect，依据 Developer 预审反馈）：补三处边界——① `path_to(h)` 失败（`h` 不在树中）显式返回 `ServerError::Protocol`，不静默回退；② bash 默认 cwd 由「装配时填入」改为 `BashTool::new` 构造注入 `default_cwd`（`BashArgs.cwd` 为 per-call 参数）；③ 文件工具路径解析只做一次，解析结果同用于 FileMutationQueue 锁 key 与 IO。
+- v1.1（2026-09-05，Architect，依据 Developer 预审反馈）：补三处边界——① `path_to(h)` 失败（`h` 不在树中，或为内部节点）显式返回 `ServerError::Protocol`，不静默回退；`h` 仅限叶节点，不扩展 `path_to(leaf)` 009 契约（内部节点开新分支属 `fork_lane`）；② bash 默认 cwd 由「装配时填入」改为 `BashTool::new` 构造注入 `default_cwd`（`BashArgs.cwd` 为 per-call 参数）；③ 文件工具路径解析只做一次，解析结果同用于 FileMutationQueue 锁 key 与 IO。
