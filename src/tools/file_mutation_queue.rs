@@ -6,9 +6,12 @@
 //!
 //! 已知局限（规格接受，后续任务再补）：
 //! - 一期不解析 symlink/hardlink：同一物理文件经不同路径可能漏串行化。
-//! - 一期锁表只增不减：安全驱逐需两阶段 dying 态或代际计数（否则 A drop 后查
-//!   `strong_count==1` 准备移除时，B 并发克隆旧 Arc 持旧锁、C 建新锁，互斥被破坏）。
-//!   条目小（约 100–200B）、agent 触碰路径通常有界，故接受无界增长。
+//!
+//! 锁表回收（017-c）：**惰性驱逐**——`strong_count == 1`（仅锁表持有一份强引用，
+//! 无 in-flight acquire / 持有中 guard）的条目，在 `acquire` 达 [`PRUNE_THRESHOLD`]
+//! 阈值时或显式 [`FileMutationQueue::prune`] 时回收。正确性依据：`acquire` 的
+//! 「克隆 Arc」与 `prune` 的「check `strong_count` + remove」都在同一把锁表锁内
+//! 串行，二者原子，故单段「锁内 check-and-remove」即安全，无需两阶段 dying 态。
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -17,10 +20,15 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
+/// 锁表自动驱逐阈值：`acquire` 持表锁后、插入前，若条目数 `>=` 该值则先驱逐
+/// 一次 `strong_count == 1` 的条目（见模块文档的回收策略）。
+pub const PRUNE_THRESHOLD: usize = 1024;
+
 /// per-path 异步写锁表。
 ///
 /// 惰性为每个 path 建锁；锁表的并发访问用 `std::sync::Mutex`（操作极短、不跨
-/// await）。一期锁表只增不减（见模块文档的已知局限）。
+/// await）。锁表惰性驱逐：`strong_count == 1` 的条目在阈值触发或显式
+/// [`FileMutationQueue::prune`] 时回收（见模块文档）。
 #[derive(Debug, Default)]
 pub struct FileMutationQueue {
     locks: std::sync::Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
@@ -38,11 +46,17 @@ impl FileMutationQueue {
     ///
     /// 等待期间可被外层 `tokio::select!` + `signal.cancelled()` 打断（本方法自身
     /// 不绑定取消）。返回的 guard 持有锁，Drop 自动释放。
+    ///
+    /// 持表锁后、插入前若条目数达 [`PRUNE_THRESHOLD`]，先执行一次锁内驱逐
+    /// （复用 [`FileMutationQueue::prune_locked`]，避免递归获取表锁）。
     pub async fn acquire(&self, path: &Path) -> FileMutationGuard<'_> {
         let key = normalize(path);
         // 锁表操作极短：取/建 Arc 后立即释放 std Mutex，不跨 await。
         let lock = {
             let mut table = self.locks.lock().unwrap_or_else(|e| e.into_inner());
+            if table.len() >= PRUNE_THRESHOLD {
+                self.prune_locked(&mut table);
+            }
             table
                 .entry(key)
                 .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -53,6 +67,31 @@ impl FileMutationQueue {
             _inner: inner,
             _phantom: PhantomData,
         }
+    }
+
+    /// 显式驱逐锁表中 `strong_count == 1`（仅锁表持有一份强引用）的条目。
+    ///
+    /// 有 in-flight acquire 或持有中 guard 的 path 不会被驱逐（`strong_count >= 2`）；
+    /// 被驱逐的 path 后续 `acquire` 会新建锁，互斥语义不变（见模块文档）。
+    pub fn prune(&self) {
+        let mut table = self.locks.lock().unwrap_or_else(|e| e.into_inner());
+        self.prune_locked(&mut table);
+    }
+
+    /// 锁内驱逐实现：调用方必须已持有表锁（`prune` 与 `acquire` 的阈值路径复用，
+    /// 避免在已持 `std::sync::Mutex` 时递归获取导致死锁）。
+    fn prune_locked(&self, table: &mut HashMap<PathBuf, Arc<Mutex<()>>>) {
+        table.retain(|_, lock| Arc::strong_count(lock) > 1);
+    }
+
+    /// 锁表当前条目数（诊断 / 测试用）。
+    pub fn len(&self) -> usize {
+        self.locks.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// 锁表是否为空（诊断 / 测试用）。
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -209,5 +248,97 @@ mod tests {
         };
         assert!(!won, "acquire should be cancelled by outer select");
         holder.await.expect("holder should complete");
+    }
+
+    /// prune：全部 guard drop 后 `prune()` 清空锁表（`len == 0`）。
+    #[tokio::test]
+    async fn test_prune_clears_released_paths() {
+        let queue = Arc::new(FileMutationQueue::new());
+        let path = PathBuf::from("/tmp/guigu-queue/prune-empty.txt");
+        {
+            let _g = queue.acquire(&path).await;
+        }
+        assert_eq!(queue.len(), 1, "entry should exist before prune");
+        queue.prune();
+        assert_eq!(
+            queue.len(),
+            0,
+            "prune should clear entries with no in-flight refs"
+        );
+    }
+
+    /// prune：有 in-flight guard 的 path 不被驱逐（`strong_count >= 2`）。
+    #[tokio::test]
+    async fn test_prune_keeps_inflight_path() {
+        let queue = Arc::new(FileMutationQueue::new());
+        let path_a = PathBuf::from("/tmp/guigu-queue/prune-a.txt");
+        let path_b = PathBuf::from("/tmp/guigu-queue/prune-b.txt");
+        let _g_a = queue.acquire(&path_a).await;
+        let _g_b = queue.acquire(&path_b).await;
+        queue.prune();
+        assert_eq!(queue.len(), 2, "in-flight paths must not be evicted");
+        drop(_g_b);
+        queue.prune();
+        assert_eq!(queue.len(), 1, "released path evicted, in-flight kept");
+        drop(_g_a);
+        queue.prune();
+        assert_eq!(queue.len(), 0);
+    }
+
+    /// 自动驱逐：`acquire` 达阈值时先驱逐 `strong_count == 1` 条目再插入。
+    #[tokio::test]
+    async fn test_acquire_auto_prunes_at_threshold() {
+        let queue = Arc::new(FileMutationQueue::new());
+        // 填满至阈值：每 path acquire 一次并 drop guard（strong_count 归 1）。
+        for i in 0..PRUNE_THRESHOLD {
+            let path = PathBuf::from(format!("/tmp/guigu-queue/auto-{i}.txt"));
+            let _g = queue.acquire(&path).await;
+        }
+        assert_eq!(queue.len(), PRUNE_THRESHOLD);
+        // 新 path 的 acquire 触发阈值驱逐：旧条目全被回收，仅留新条目。
+        let new_path = PathBuf::from("/tmp/guigu-queue/auto-new.txt");
+        let _g = queue.acquire(&new_path).await;
+        assert_eq!(
+            queue.len(),
+            1,
+            "auto-prune should evict all stale entries before insert"
+        );
+    }
+
+    /// 回归：驱逐后同 path 再 acquire 仍互斥（新建锁不破坏串行化）。
+    #[tokio::test]
+    async fn test_mutex_preserved_after_eviction() {
+        let queue = Arc::new(FileMutationQueue::new());
+        let path = PathBuf::from("/tmp/guigu-queue/evict-mutex.txt");
+        {
+            let _g = queue.acquire(&path).await;
+        }
+        queue.prune();
+        assert_eq!(queue.len(), 0, "path evicted");
+        // 驱逐后并发 acquire 同 path：任意时刻临界区内 ≤1。
+        let current = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let q = Arc::clone(&queue);
+            let p = path.clone();
+            let current = Arc::clone(&current);
+            let max_seen = Arc::clone(&max_seen);
+            handles.push(tokio::spawn(async move {
+                let _guard = q.acquire(&p).await;
+                let now = current.fetch_add(1, Ordering::SeqCst) + 1;
+                max_seen.fetch_max(now, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                current.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for h in handles {
+            h.await.expect("task should complete");
+        }
+        assert_eq!(
+            max_seen.load(Ordering::SeqCst),
+            1,
+            "same path must stay serialized after eviction"
+        );
     }
 }

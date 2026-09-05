@@ -28,6 +28,10 @@ pub struct PluginTool {
 
 impl PluginTool {
     /// `spec.name` 与 `name` 一致；`plugin` 与 `spec` 由 [`PluginRegistry::tools`] 装配时注入。
+    ///
+    /// **不做一致性校验**（不检查 `spec.name` 是否被 `plugin` 声明）：仅供
+    /// [`PluginRegistry::tools`] 遍历插件声明集合时内部使用（遍历声明集合天然一致）。
+    /// 外部构造应优先 [`PluginTool::try_new`]。
     pub fn new(plugin: Arc<dyn Plugin>, spec: DeferredToolSpec) -> Self {
         let name = spec.name.clone();
         Self {
@@ -36,6 +40,19 @@ impl PluginTool {
             name,
             inner: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// 带一致性校验的构造：`spec.name` 必须命中 `plugin.tools()` 中某个 spec 的 `name`。
+    ///
+    /// - 命中 → `Ok(PluginTool)`（语义与 [`PluginTool::new`] 相同）；
+    /// - 未命中 → [`PluginError::ToolNotDeclared`]，在构造期快速失败，
+    ///   而非把 schema 与 plugin 不一致的错误延迟到 `execute`。
+    pub fn try_new(plugin: Arc<dyn Plugin>, spec: DeferredToolSpec) -> Result<Self, PluginError> {
+        let declared = plugin.tools().iter().any(|s| s.name == spec.name);
+        if !declared {
+            return Err(PluginError::ToolNotDeclared(spec.name.clone()));
+        }
+        Ok(Self::new(plugin, spec))
     }
 }
 
@@ -285,5 +302,49 @@ mod tests {
         assert_eq!(tool.description(), "the desc");
         assert_eq!(tool.parameters(), params);
         assert_eq!(tool.resource_scope(), ResourceScope::Exclusive);
+    }
+
+    /// try_new：`spec.name` 未被 plugin 声明 → `ToolNotDeclared`（构造期快速失败）。
+    #[test]
+    fn test_try_new_undeclared_name_errors() {
+        let plugin = Arc::new(CountingPlugin {
+            id: "p".into(),
+            specs: vec![spec("echo", ResourceScope::ReadOnly)],
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let result = PluginTool::try_new(plugin, spec("ghost", ResourceScope::ReadOnly));
+        assert!(
+            matches!(&result, Err(PluginError::ToolNotDeclared(name)) if name == "ghost"),
+            "expected ToolNotDeclared(ghost)"
+        );
+    }
+
+    /// try_new：`spec.name` 已声明 → 成功，且工具可正常 execute（实例化一次）。
+    #[tokio::test]
+    async fn test_try_new_declared_name_ok() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let plugin = Arc::new(CountingPlugin {
+            id: "p".into(),
+            specs: vec![spec("echo", ResourceScope::ReadOnly)],
+            calls: calls.clone(),
+        });
+        let tool = PluginTool::try_new(plugin, spec("echo", ResourceScope::ReadOnly))
+            .expect("declared name should pass");
+        assert_eq!(tool.name(), "echo");
+        let r = tool
+            .execute(
+                "c1",
+                serde_json::json!({ "message": "hi" }),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("execute should succeed");
+        assert!(!r.is_error);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "instantiate once on first execute"
+        );
     }
 }

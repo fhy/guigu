@@ -30,7 +30,13 @@ mod tests;
 #[cfg(test)]
 mod tests_fs;
 #[cfg(test)]
+mod tests_mapping;
+#[cfg(test)]
+mod tests_session_load;
+#[cfg(test)]
 mod tests_transport;
+#[cfg(test)]
+mod tests_transport_errors;
 #[cfg(test)]
 mod testutil;
 

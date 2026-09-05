@@ -123,13 +123,24 @@ impl PluginRegistry {
     ///
     /// 顺序**确定**：插件按 `id` 字典序，插件内按 `tools()` 声明顺序。
     /// 组装只读 schema，**绝不触发实例化**。
+    ///
+    /// 锁纪律：读锁内**仅**复制并按 `id` 排序 `(id, Arc<dyn Plugin>)`，随即释放读锁；
+    /// 外部 `plugin.tools()` 回调在**锁外**调用，回调内可安全重入注册表
+    /// （`register` / `unregister` / `get`）而不会阻塞或死锁。
     pub fn tools(&self) -> Vec<Arc<dyn Tool>> {
-        let guard = self.plugins.read().unwrap_or_else(|e| e.into_inner());
-        let mut ids: Vec<&String> = guard.keys().collect();
-        ids.sort();
+        // 锁内：仅复制 + 排序，不调用任何外部回调。
+        let entries: Vec<(String, Arc<dyn Plugin>)> = {
+            let guard = self.plugins.read().unwrap_or_else(|e| e.into_inner());
+            let mut entries: Vec<(String, Arc<dyn Plugin>)> = guard
+                .iter()
+                .map(|(id, plugin)| (id.clone(), Arc::clone(plugin)))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            entries
+        };
+        // 锁外：遍历副本调用外部 `plugin.tools()` 并组装。
         let mut out: Vec<Arc<dyn Tool>> = Vec::new();
-        for id in ids {
-            let plugin = &guard[id];
+        for (_id, plugin) in &entries {
             for spec in plugin.tools() {
                 out.push(Arc::new(PluginTool::new(Arc::clone(plugin), spec)));
             }
@@ -270,6 +281,49 @@ mod tests {
             0,
             "assembly must not instantiate"
         );
+    }
+
+    /// 锁纪律探针插件：`tools()` 回调内尝试获取注册表**写锁**（`try_write`）。
+    /// 若回调仍发生在读锁内，`try_write` 必然 `WouldBlock` → panic（测试失败）。
+    struct LockProbePlugin {
+        id: String,
+        specs: Vec<DeferredToolSpec>,
+        registry: Arc<PluginRegistry>,
+    }
+
+    #[async_trait]
+    impl Plugin for LockProbePlugin {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn tools(&self) -> Vec<DeferredToolSpec> {
+            match self.registry.plugins.try_write() {
+                Ok(guard) => {
+                    drop(guard);
+                    self.specs.clone()
+                }
+                Err(_) => panic!("registry read lock still held during plugin.tools() callback"),
+            }
+        }
+        async fn instantiate(&self, _name: &str) -> Result<Arc<dyn Tool>, PluginError> {
+            Ok(Arc::new(EchoTool))
+        }
+    }
+
+    /// 锁纪律回归：`tools()` 组装期间，插件回调内可成功 `try_write` 注册表，
+    /// 证明外部 `plugin.tools()` 发生在读锁释放**之后**（017-c 规格第 28-33 条）。
+    #[test]
+    fn test_tools_callback_runs_outside_read_lock() {
+        let registry = Arc::new(PluginRegistry::new());
+        let probe: Arc<dyn Plugin> = Arc::new(LockProbePlugin {
+            id: "probe".to_string(),
+            specs: vec![spec("t1", ResourceScope::ReadOnly)],
+            registry: Arc::clone(&registry),
+        });
+        registry.register(probe).expect("register probe");
+        let tools = registry.tools();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name(), "t1");
     }
 
     /// unregister 语义：组装出的 PluginTool 在 unregister 后仍可 execute 成功。
