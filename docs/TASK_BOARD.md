@@ -35,7 +35,7 @@
 实施顺序：016 → 017-a → 017-b → 017-c
 
 - [x] 016 — 插件机制 Plugin Registry（Plugin trait + PluginTool 异步惰性实例化 + PluginRegistry 注册表，基于 011 DeferredToolSpec，失败不缓存可重试）
-- [ ] 017-a — 会话存储并发安全加固（012 r1 遗留：移除 inner() 受控访问 / LaneWriter 约束 Arc<SharedSessionStorage> / 每 lane 多步写测试 / 边界说明订正）
+- [x] 017-a — 会话存储并发安全加固（012 r1 遗留：移除 inner() 受控访问 / LaneWriter 约束 Arc<SharedSessionStorage> / 每 lane 多步写测试 / 边界说明订正）
 - [ ] 017-b — 多 lane 恢复语义 + 工作目录隔离（015 r2 遗留：恢复 API 显式收 head / 移除 set_current_dir 改工具 work_dir）
 - [ ] 017-c — 锁纪律收尾（016 r1 插件锁 + 006 锁表驱逐 + 014 测试拆分）
 
@@ -72,3 +72,4 @@
 - 016 已于 r1 审查通过（2026-09-05，docs/reviews/016-review-r1.md）：四门禁全绿、254 单测 + 集成测试通过、无阻断问题；实现满足 Plugin trait、异步 OnceCell 惰性实例化、失败重试、确定性组装、注册表操作与 Tool 契约透传。r1 两条非阻塞建议：① `PluginRegistry::tools()` 在持 RwLock 读锁期间调用外部 `plugin.tools()`，建议锁内仅复制 `Arc<dyn Plugin>` 再释放锁后调用，避免外部回调置于注册表锁内；② `PluginTool::new` 无运行时一致性校验（spec.name 是否被 plugin 声明），建议记录为调用方责任或提供 `try_new`。四期（016）已完成
 - 017 拆分（2026-09-05，Architect，依据 PM 指令「按 017-a-b-c 拆分」）：技术债收尾拆为三个子任务，按文件归属/主题划分、彼此无文件重叠、可独立合入。**017-a** 会话存储并发安全（012 r1 四条：inner() footgun / LaneWriter 类型约束 / 每 lane 多步写测试 / 边界说明订正，纯加固）；**017-b** 多 lane 恢复语义 + 工作目录隔离（015 r2 两条：恢复 API 显式收 `head: Option<NodeId>` 不持久化 lane head 元数据 / 移除 `set_current_dir` 改工具 `work_dir` 显式传参）；**017-c** 锁纪律收尾（016 r1 两条 + 006 锁表驱逐 `prune()`+阈值 + 014 acp 测试文件拆分）。实施顺序 017-a → 017-b → 017-c（017-b/c 可在 017-a 合入后并行）。014 的「cancellation→cancelled 措辞」已由 Architect 于 v1.1 统一，不重复纳入
 - 017-a 规格 v1.1（2026-09-05，Architect，依据 Developer 架构审查 + Reviewer r1 打回）：桥接机制定为方案C——`SessionState.storage` 改 `Arc<SharedSessionStorage>`（内部），server 公共入口 `StorageFactory`/`with_storage_factory`/`create_session`/`load_session` 签名保持 `Arc<dyn SessionStorage>` 不变，在 `create_session`/`load_session` 边界 `Arc::new(SharedSessionStorage::new(...))` 包裹；否决方案A（改公共签名，无必要 breaking change 违背 Embeddable）与方案B（运行时 downcast）；订正 §3 节点数 6→7，测试拆至 `tests/session_concurrency.rs`
+- 017-a 已于 r2 审查通过（2026-09-05，docs/reviews/017-a-review-r2.md）：四门禁全绿、254 单测 + 全部集成测试通过；r1 两条 P1（公开 storage API 被不必要破坏、tests/session.rs 超 400 行）已核销（server 公共入口恢复 `Arc<dyn SessionStorage>` 并在边界包裹、并发测试拆 `tests/session_concurrency.rs`）。下一动作：启动 017-b 开发（规格 v1.0 已就绪）
