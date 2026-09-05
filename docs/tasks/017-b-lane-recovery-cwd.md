@@ -24,6 +24,7 @@
 
 - `resume_lane_from_factory`（或等价恢复入口）新增参数 `head: Option<NodeId>`：
   - `Some(h)`：以 `path_to(h)` 的根→叶消息序列初始化 runtime transcript + snapshot，`LaneWriter` head 设为 `h`。
+  - `Some(h)` 且 `path_to(h)` 返回 `None`（`h` 不在树中）：**显式返回 `ServerError::Protocol`**，不静默回退到最大 `NodeId` 叶，避免掩盖调用方传入非法/过期 head 的 bug。`h` 允许为任意树节点（含内部节点），续写即从 `h` 分叉。
   - `None`：保持 015 现状——取最大 `NodeId` 的叶作为活动叶（兼容单 lane 续聊）。
 - **调用方更新**：
   - CLI `--session` 续聊：传 `None`（默认回退行为，用户无分支意图）。
@@ -33,8 +34,8 @@
 ### 2. 工作目录显式化
 
 - **移除进程级 `set_current_dir`**：删除 `src/bin/guigu/assemble.rs` 中的 `set_current_dir` 调用；全仓 grep 其它 `set_current_dir` 调用点（含 ACP 装配路径），一并移除。
-- **文件工具注入工作目录**：`ReadTool` / `WriteTool` / `EditTool` 构造函数新增 `work_dir: Option<PathBuf>`（`None` = 相对路径按进程 cwd 解析，保持旧行为；`Some(d)` = 相对路径 join `d`，绝对路径不变）。路径解析在 `execute` 内完成，工具不再隐式依赖进程 cwd。
-- **bash 工具**：`BashArgs.cwd` 已存在（006）；CLI 装配时，若 `args.cwd` 为空则默认填入 session 的 `work_dir`。
+- **文件工具注入工作目录**：`ReadTool` / `WriteTool` / `EditTool` 构造函数新增 `work_dir: Option<PathBuf>`（`None` = 相对路径按进程 cwd 解析，保持旧行为；`Some(d)` = 相对路径 join `d`，绝对路径不变）。路径解析在 `execute` 内完成，工具不再隐式依赖进程 cwd。**解析只做一次**，解析结果（归一化绝对路径）同时用于 `FileMutationQueue` 锁 key 与 IO，保证锁 key 与实际写文件路径一致。
+- **bash 工具**：`BashArgs.cwd` 已存在（006），为 per-call 参数，装配期拿不到，无法「装配时填入」。改为 `BashTool::new` 构造注入 `default_cwd: Option<PathBuf>`，`execute` 内 `args.cwd` 为空时回退 `default_cwd`。
 - **装配**：CLI 装配处将 session 的工作目录传入文件工具构造与 bash 默认 cwd，替代原 `set_current_dir`。
 
 ### 边界声明（明确不做）
@@ -47,7 +48,7 @@
 - src/server/lane.rs（`resume_lane_from_factory` 增 `head: Option<NodeId>` 参数 + 分支逻辑）
 - src/bin/guigu/assemble.rs（移除 `set_current_dir`；传 work_dir 给工具构造与 bash 默认 cwd）
 - src/tools/read.rs / write.rs / edit.rs（构造增 `work_dir: Option<PathBuf>`；相对路径 join）
-- src/tools/bash.rs（如需统一装配默认 cwd 则调整，签名尽量不变）
+- src/tools/bash.rs（`BashTool::new` 增 `default_cwd: Option<PathBuf>` 构造参数）
 - src/acp/handlers.rs（`session/load` 透传可选 `head`；核对并移除 `set_current_dir`）
 - 相关测试（server/lane 恢复分支、文件工具 cwd 解析、CLI 续聊回归）
 
@@ -58,6 +59,7 @@
 - [ ] cargo test --all-targets passes
 - [ ] cargo fmt --check passes
 - [ ] `resume_lane_from_factory` 支持 `head: Some(h)`：transcript = `path_to(h)`、`LaneWriter` head = `h`；`head: None` 回退最大 NodeId 叶（行为与 015 一致）
+- [ ] `head: Some(h)` 且 `h` 不在树中：显式返回 `ServerError::Protocol`（非静默回退）
 - [ ] 多 lane fork 场景测试：fork 出两个叶后，分别以两个 `head` 恢复，得到各自正确 transcript 与 head
 - [ ] 全仓无 `set_current_dir` 残留；文件工具经 `work_dir` 显式解析相对路径；bash 默认 cwd 由装配层填充
 - [ ] 既有 CLI `--session` 续聊回归测试全绿（`None` 路径行为不变）
@@ -66,3 +68,4 @@
 ## 修订记录
 
 - v1.0（2026-09-05，Architect）：初稿。打包 015 r2 两条非阻塞建议：恢复 API 显式收 `head: Option<NodeId>`（消除唯一依赖最大 NodeId 推断，`None` 保持兼容，不持久化 lane head 元数据）；工作目录由进程级 `set_current_dir` 改为工具构造/调用显式参数（文件工具注入 `work_dir`，bash 沿用 `cwd`），session 间隔离。
+- v1.1（2026-09-05，Architect，依据 Developer 预审反馈）：补三处边界——① `path_to(h)` 失败（`h` 不在树中）显式返回 `ServerError::Protocol`，不静默回退；② bash 默认 cwd 由「装配时填入」改为 `BashTool::new` 构造注入 `default_cwd`（`BashArgs.cwd` 为 per-call 参数）；③ 文件工具路径解析只做一次，解析结果同用于 FileMutationQueue 锁 key 与 IO。
