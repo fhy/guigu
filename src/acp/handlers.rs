@@ -68,13 +68,21 @@ impl AcpAgent {
             .and_then(Value::as_str)
             .ok_or_else(|| AcpError::JsonRpc("missing sessionId".into()))?
             .to_string();
-        // 可选 head（017-b）：显式目标叶节点；缺省 → None（max NodeId 叶）。
-        let head: Option<NodeId> = params.get("head").and_then(Value::as_u64);
+        // 可选 head（017-b）：显式目标叶节点；缺省 / null → None（max NodeId 叶）。
+        // 字段存在但非 unsigned integer → JsonRpc 错误（不静默当作未指定，避免
+        // 调用方拼写/类型错误被悄悄解释为「未指定 head」）。
+        let head: Option<NodeId> = match params.get("head") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(
+                v.as_u64()
+                    .ok_or_else(|| AcpError::JsonRpc("head must be an unsigned integer".into()))?,
+            ),
+        };
+        // 事务式 load + 校验 head + 注册 + spawn lane（017-b 修复）：head 非法时
+        // 不注册 session，避免注册表残留无 lane 的 session（后续同 id 重试
+        // DuplicateSession）。
         self.server
-            .load_session_from_factory(session_id.clone())
-            .await?;
-        self.server
-            .resume_lane_from_factory(&session_id, DEFAULT_LANE, head)
+            .load_and_resume_session_from_factory(session_id.clone(), DEFAULT_LANE, head)
             .await?;
         Ok(json!({ "sessionId": session_id }))
     }

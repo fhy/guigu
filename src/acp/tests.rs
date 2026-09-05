@@ -162,6 +162,155 @@ async fn test_session_load_explicit_head() {
     );
 }
 
+/// 回归（017-b 修复）：同一 `sessionId` 先以非法 head `session/load`（失败），
+/// 再以合法 head 重试 → 成功。
+///
+/// 修复前 `session/load` 先注册 session 再校验 head：非法 head 使
+/// `resume_lane_from_factory` 返回错误，但 session 已残留在注册表，后续同 id
+/// 重试得到 `DuplicateSession`（状态污染）。修复后事务式 load 在**注册前**校验
+/// head，非法 head 不注册 session，重试可成功。
+#[tokio::test]
+async fn test_session_load_invalid_head_then_retry_valid() {
+    // 预置存储：1(user hi, 根) → 2(assistant ok, 叶)。
+    let pre = Arc::new(InMemoryStorage::new());
+    pre.append(
+        None,
+        Message::User(UserMessage {
+            content: vec![UserContent::Text {
+                text: "hi".to_string(),
+            }],
+            timestamp: 0,
+        }),
+    )
+    .await
+    .expect("append 1");
+    pre.append(
+        Some(1),
+        Message::Assistant(AssistantMessage {
+            content: vec![AssistantContent::Text {
+                text: "ok".to_string(),
+            }],
+            model: None,
+            usage: None,
+            stop_reason: Some(StopReason::Completed),
+            error_message: None,
+            timestamp: 0,
+        }),
+    )
+    .await
+    .expect("append 2");
+
+    let server = AgentServer::new();
+    server.with_runtime_factory(|| {
+        (
+            AgentConfig {
+                system_prompt: "test".to_string(),
+                model: Some("test-model".to_string()),
+                thinking_level: ThinkingLevel::Off,
+            },
+            AgentRuntime {
+                provider: Arc::new(NoopProvider),
+                tools: Vec::new(),
+                loop_config: LoopConfig {
+                    model: Model {
+                        id: "test-model".to_string(),
+                        context_window: 8192,
+                    },
+                    ..LoopConfig::default()
+                },
+            },
+        )
+    });
+    // "s1" 返回预置存储（有叶 2）；其余返回空存储。
+    server.with_storage_factory(move |id| {
+        if id == "s1" {
+            pre.clone()
+        } else {
+            Arc::new(InMemoryStorage::new())
+        }
+    });
+    let agent = AcpAgent::new(server);
+    let client = FakeClient::new();
+
+    // 同一 sessionId "s1"：先以非法 head（999 不在树中）load → server 错误。
+    let result = agent
+        .handle(
+            &client,
+            "session/load",
+            json!({ "sessionId": "s1", "head": 999 }),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(AcpError::Server(_))),
+        "invalid head should be a server error, got: {result:?}"
+    );
+
+    // 无状态污染：非法 head 失败后 session 不应残留在注册表。
+    let sessions = agent.server().list_sessions().await;
+    assert!(
+        !sessions.contains(&"s1".to_string()),
+        "failed load must not leave a registered session, got: {sessions:?}"
+    );
+
+    // 关键回归：同一 sessionId 以合法 head（叶 2）重试 → 成功（修复前会
+    // DuplicateSession）。
+    let result = agent
+        .handle(
+            &client,
+            "session/load",
+            json!({ "sessionId": "s1", "head": 2 }),
+        )
+        .await
+        .expect("retry with valid head should succeed");
+    assert_eq!(result["sessionId"], "s1");
+}
+
+/// `session/load` 的 `head` 字段存在但非 unsigned integer → JsonRpc 错误
+/// （017-b 建议 1：不静默当作未指定，避免拼写/类型错误被悄悄解释为「未指定
+/// head」）。`null` 视为未指定（走 max NodeId 叶回退），不报错。
+#[tokio::test]
+async fn test_session_load_head_wrong_type_errors() {
+    let agent = make_agent(Arc::new(NoopProvider));
+    let client = FakeClient::new();
+
+    // head 为字符串 → JsonRpc 错误（非静默 None）。
+    let result = agent
+        .handle(
+            &client,
+            "session/load",
+            json!({ "sessionId": "s1", "head": "2" }),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(AcpError::JsonRpc(_))),
+        "string head should be a JsonRpc error, got: {result:?}"
+    );
+
+    // head 为负数 → JsonRpc 错误（非 unsigned integer）。
+    let result = agent
+        .handle(
+            &client,
+            "session/load",
+            json!({ "sessionId": "s1", "head": -1 }),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(AcpError::JsonRpc(_))),
+        "negative head should be a JsonRpc error, got: {result:?}"
+    );
+
+    // head 为 null → 视为未指定（None），不报错（空树回退 head None）。
+    let result = agent
+        .handle(
+            &client,
+            "session/load",
+            json!({ "sessionId": "s1", "head": null }),
+        )
+        .await
+        .expect("null head should be treated as unspecified");
+    assert_eq!(result["sessionId"], "s1");
+}
+
 /// `session/prompt` 收到 `session/update` 序列并返回 `PromptResponse.stopReason`。
 #[tokio::test]
 async fn test_session_prompt_returns_stop_reason() {

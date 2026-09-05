@@ -94,7 +94,7 @@ impl Tool for EditTool {
 
         // 解析一次（017-b）：归一化绝对路径同用于锁 key 与 IO，保证锁 key 与
         // 实际写文件路径一致。
-        let path = resolve_tool_path(&self.work_dir, &edit_args.path);
+        let path = resolve_tool_path(self.work_dir.as_deref(), &edit_args.path);
 
         // 可取消 acquire：read-modify-write 全程持锁，避免跨 agent 丢更新。
         let _guard = tokio::select! {

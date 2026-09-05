@@ -90,7 +90,7 @@ impl Tool for WriteTool {
 
         // 解析一次（017-b）：归一化绝对路径同用于锁 key 与 IO，保证锁 key 与
         // 实际写文件路径一致。
-        let path = resolve_tool_path(&self.work_dir, &write_args.path);
+        let path = resolve_tool_path(self.work_dir.as_deref(), &write_args.path);
 
         // 可取消 acquire：等待同路径写锁期间可被 signal 打断。
         let _guard = tokio::select! {

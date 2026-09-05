@@ -86,7 +86,7 @@ impl Tool for ReadTool {
             .map_err(|e| ToolError::invalid_arguments(e.to_string()))?;
 
         // 解析一次：归一化绝对路径用于 IO（017-b，不隐式依赖进程 cwd）。
-        let path = resolve_tool_path(&self.work_dir, &read_args.path);
+        let path = resolve_tool_path(self.work_dir.as_deref(), &read_args.path);
         let meta = tokio::fs::metadata(&path)
             .await
             .map_err(|e| ToolError::new(format!("read {}: {e}", path.display())))?;
