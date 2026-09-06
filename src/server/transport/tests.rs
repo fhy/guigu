@@ -26,6 +26,7 @@ use crate::core::session::{
     NodeId, SessionEntry, SessionError, SessionStorage, SessionTree, reduce,
 };
 use crate::remote::codec::{LineReader, write_line};
+use crate::server::SessionStorageBundle;
 
 /// 最小 provider：单文本 turn。
 struct NoopProvider;
@@ -117,12 +118,18 @@ fn make_config() -> AgentConfig {
 
 /// 建一个带工厂的 server（storage 用内存存储，runtime 用 NoopProvider）。
 ///
-/// 工厂返回裸 `Arc<dyn SessionStorage>`；server 在 `create_session` 边界包成
-/// `SharedSessionStorage`。
+/// 工厂返回 `SessionStorageBundle`；`InMemoryStorage` 不实现 `LaneHeadStore`，
+/// 故 `head_store = None`（行为等价 012）。
 fn make_server() -> AgentServer {
     let server = AgentServer::new();
     server.with_runtime_factory(|| (make_config(), make_runtime()));
-    server.with_storage_factory(|_id| Arc::new(InMemoryStorage::new()));
+    server.with_storage_factory(|_id| {
+        let storage = Arc::new(InMemoryStorage::new());
+        SessionStorageBundle {
+            storage,
+            head_store: None,
+        }
+    });
     server
 }
 

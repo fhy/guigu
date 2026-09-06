@@ -25,7 +25,7 @@ use guigu::core::session::{
     NodeId, SessionEntry, SessionError, SessionStorage, SessionTree, SharedSessionStorage, reduce,
 };
 use guigu::remote::codec::{LineReader, write_line};
-use guigu::server::AgentServer;
+use guigu::server::{AgentServer, SessionStorageBundle};
 
 /// 最小 provider：单文本 turn（`TextDelta` + `Done`，`stop_reason: Completed`）。
 struct NoopProvider;
@@ -117,7 +117,11 @@ fn make_agent() -> AcpAgent {
         )
     });
     server.with_storage_factory(|_id| {
-        Arc::new(SharedSessionStorage::new(Arc::new(InMemoryStorage::new())))
+        let storage = Arc::new(SharedSessionStorage::new(Arc::new(InMemoryStorage::new())));
+        SessionStorageBundle {
+            storage,
+            head_store: None,
+        }
     });
     AcpAgent::new(server)
 }

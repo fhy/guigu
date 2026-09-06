@@ -3,6 +3,7 @@
 //! 从 `session.rs` 拆出以控制主文件行数（conventions 体量限制）。
 //! 全部纯内存（fake storage），无 IO、无网络。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -322,4 +323,135 @@ async fn lane_writer_two_lanes_same_head_two_leaves() {
     assert!(leaves.contains(&id_a));
     assert!(leaves.contains(&id_b));
     assert_eq!(tree.nodes[&root].children.len(), 2);
+}
+
+// ===== Task 024：LaneHeadRecord / SessionRecord / LaneHeadStore / LaneWriter head 持久化 =====
+
+/// 内存版 `LaneHeadStore`：记录 lane_id → head（测试用，无 IO）。
+#[derive(Default)]
+struct MemHeadStore {
+    heads: Mutex<HashMap<LaneId, Option<NodeId>>>,
+}
+
+#[async_trait]
+impl LaneHeadStore for MemHeadStore {
+    async fn append_lane_head(
+        &self,
+        lane_id: LaneId,
+        head: Option<NodeId>,
+    ) -> Result<(), SessionError> {
+        self.heads.lock().await.insert(lane_id, head);
+        Ok(())
+    }
+
+    async fn load_lane_heads(&self) -> Result<HashMap<LaneId, Option<NodeId>>, SessionError> {
+        Ok(self.heads.lock().await.clone())
+    }
+}
+
+#[test]
+fn session_record_lane_head_roundtrip() {
+    let record = SessionRecord::LaneHead(LaneHeadRecord {
+        lane_id: "lane-1".to_string(),
+        head: Some(5),
+    });
+    let json = serde_json::to_string(&record).unwrap();
+    // LaneHead 输出 {lane_id, head}（无 tag、无 id/parent_id/message）。
+    assert!(json.contains("\"lane_id\""));
+    assert!(json.contains("\"head\""));
+    assert!(!json.contains("\"parent_id\""));
+    assert!(!json.contains("\"message\""));
+    let parsed: SessionRecord = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, record);
+}
+
+#[test]
+fn session_record_message_roundtrip() {
+    let record = SessionRecord::Message(entry(0, None, "a"));
+    let json = serde_json::to_string(&record).unwrap();
+    // Message 输出 009 裸形状（无 tag、与旧文件一致）。
+    assert!(json.contains("\"id\""));
+    assert!(json.contains("\"parent_id\""));
+    assert!(!json.contains("\"lane_id\""));
+    let parsed: SessionRecord = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, record);
+}
+
+#[test]
+fn session_record_field_mutual_exclusion() {
+    // Message 行不误判为 LaneHead（缺 lane_id → 只能落 Message 变体）。
+    let msg_json = serde_json::to_string(&SessionRecord::Message(entry(0, None, "a"))).unwrap();
+    let parsed: SessionRecord = serde_json::from_str(&msg_json).unwrap();
+    assert!(matches!(parsed, SessionRecord::Message(_)));
+    // LaneHead 行不误判为 Message（缺 id/message → 只能落 LaneHead 变体）。
+    let head_json = serde_json::to_string(&SessionRecord::LaneHead(LaneHeadRecord {
+        lane_id: "l".to_string(),
+        head: None,
+    }))
+    .unwrap();
+    let parsed: SessionRecord = serde_json::from_str(&head_json).unwrap();
+    assert!(matches!(parsed, SessionRecord::LaneHead(_)));
+}
+
+#[tokio::test]
+async fn lane_writer_with_head_store_append_auto_persists() {
+    let storage = Arc::new(SharedSessionStorage::new(Arc::new(MemStorage::default())));
+    let head_store = Arc::new(MemHeadStore::default());
+    let mut lane = LaneWriter::with_head_store(storage.clone(), "lane-1", None, head_store.clone());
+    let id0 = lane.append(user_msg("a")).await.unwrap();
+    let id1 = lane.append(user_msg("b")).await.unwrap();
+    assert_eq!((id0, id1), (0, 1));
+    // append 后自动落盘 head（后写覆盖先写，最终值 = 最新 head）。
+    let heads = head_store.load_lane_heads().await.unwrap();
+    assert_eq!(heads.get("lane-1"), Some(&Some(1)));
+}
+
+#[tokio::test]
+async fn lane_writer_persist_head_explicit_after_fork() {
+    let storage = Arc::new(SharedSessionStorage::new(Arc::new(MemStorage::default())));
+    let head_store = Arc::new(MemHeadStore::default());
+    let mut lane = LaneWriter::with_head_store(storage.clone(), "lane-1", None, head_store.clone());
+    lane.append(user_msg("a")).await.unwrap(); // 0（自动落盘 head=Some(0)）
+    lane.fork_at(Some(0)); // 纯内存，不落盘
+    lane.persist_head().await.unwrap(); // 显式落盘 head = Some(0)
+    let heads = head_store.load_lane_heads().await.unwrap();
+    assert_eq!(heads.get("lane-1"), Some(&Some(0)));
+}
+
+#[tokio::test]
+async fn lane_writer_new_no_store_persist_head_is_noop() {
+    let storage = Arc::new(SharedSessionStorage::new(Arc::new(MemStorage::default())));
+    let mut lane = LaneWriter::new(storage.clone(), "lane-1", None);
+    let id = lane.append(user_msg("a")).await.unwrap(); // 正常 append
+    assert_eq!(id, 0);
+    // 无 store：persist_head 空操作、不报错（行为等价 012）。
+    lane.persist_head().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_storage_lane_head_store_delegates_when_bound() {
+    let inner = Arc::new(MemStorage::default());
+    let head_store = Arc::new(MemHeadStore::default());
+    let shared = Arc::new(SharedSessionStorage::with_head_store(
+        inner,
+        head_store.clone(),
+    ));
+    shared
+        .append_lane_head("lane-1".to_string(), Some(7))
+        .await
+        .unwrap();
+    let heads = shared.load_lane_heads().await.unwrap();
+    assert_eq!(heads.get("lane-1"), Some(&Some(7)));
+}
+
+#[tokio::test]
+async fn shared_storage_lane_head_store_noop_when_unbound() {
+    let shared = Arc::new(SharedSessionStorage::new(Arc::new(MemStorage::default())));
+    // 未绑定：append_lane_head 空操作、load_lane_heads 空表（行为等价 012）。
+    shared
+        .append_lane_head("lane-1".to_string(), Some(7))
+        .await
+        .unwrap();
+    let heads = shared.load_lane_heads().await.unwrap();
+    assert!(heads.is_empty());
 }

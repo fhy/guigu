@@ -14,7 +14,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::core::message::Message;
-use crate::core::session::{NodeId, SessionStorage, SessionTree, SharedSessionStorage};
+use crate::core::session::{
+    LaneHeadStore, NodeId, SessionStorage, SessionTree, SharedSessionStorage,
+};
 
 use super::{AgentServer, ServerError, SessionId, SessionState};
 
@@ -60,8 +62,10 @@ impl AgentServer {
         };
         // load 树（锁外）。
         let tree = storage.load().await?;
+        // 查持久化 head（024）：head: None 时优先用；无记录回退最大 NodeId 叶。
+        let persisted = storage.load_lane_heads().await?.get(lane_id).copied();
         // 定目标 head + 叶路径 transcript（共享逻辑，非法 head → Protocol）。
-        let (head, transcript) = resolve_resume_head(&tree, head)?;
+        let (head, transcript) = resolve_resume_head(&tree, head, persisted)?;
         self.spawn_lane_resumed(session_id, lane_id, config, runtime, transcript, head)
             .await
     }
@@ -95,13 +99,22 @@ impl AgentServer {
             .get()
             .cloned()
             .ok_or_else(|| ServerError::Protocol("no storage factory".into()))?;
-        let storage = Arc::new(SharedSessionStorage::new(storage_factory(&session_id)));
+        let bundle = storage_factory(&session_id);
+        let storage = match bundle.head_store {
+            Some(head_store) => Arc::new(SharedSessionStorage::with_head_store(
+                bundle.storage,
+                head_store,
+            )),
+            None => Arc::new(SharedSessionStorage::new(bundle.storage)),
+        };
         // 2. load 树（锁外）。
         let tree = storage.load().await?;
-        // 3. 定目标 head + transcript（**注册前**校验显式 head：非法 → Protocol，
+        // 3. 查持久化 head（024）：head: None 时优先用；无记录回退最大 NodeId 叶。
+        let persisted = storage.load_lane_heads().await?.get(lane_id).copied();
+        // 4. 定目标 head + transcript（**注册前**校验显式 head：非法 → Protocol，
         //    不注册 session）。
-        let (head, transcript) = resolve_resume_head(&tree, head)?;
-        // 4. runtime 工厂（未配置 → Protocol）。
+        let (head, transcript) = resolve_resume_head(&tree, head, persisted)?;
+        // 5. runtime 工厂（未配置 → Protocol）。
         let runtime_factory = self
             .inner
             .runtime_factory
@@ -109,7 +122,7 @@ impl AgentServer {
             .cloned()
             .ok_or_else(|| ServerError::Protocol("no runtime factory".into()))?;
         let (config, runtime) = runtime_factory();
-        // 5. 注册 session（原子：已存在 → DuplicateSession）。
+        // 6. 注册 session（原子：已存在 → DuplicateSession）。
         {
             let mut sessions = self.inner.sessions.lock().await;
             if sessions.contains_key(&session_id) {
@@ -124,7 +137,7 @@ impl AgentServer {
                 },
             );
         }
-        // 6. spawn 续写 lane（session 已注册）。失败时回滚本次注册的 session，
+        // 7. spawn 续写 lane（session 已注册）。失败时回滚本次注册的 session，
         //    保证事务性。
         if let Err(e) = self
             .spawn_lane_resumed(&session_id, lane_id, config, runtime, transcript, head)
@@ -155,22 +168,35 @@ fn transcript_from_path(path: &[&Message]) -> Vec<Arc<Message>> {
     path.iter().map(|m| Arc::new((**m).clone())).collect()
 }
 
-/// 从树定目标 head + 叶路径 transcript（017-b 共享逻辑）。
+/// 从树定目标 head + 叶路径 transcript（017-b 共享逻辑，024 扩展持久化 head）。
 ///
 /// `resume_lane_from_factory`（已注册 session）与
 /// `load_and_resume_session_from_factory`（事务式 load + 注册）共用，保证两处
 /// head 语义一致：
-/// - `Some(h)`：显式目标叶节点（009 契约 `path_to(leaf)`）；`path_to(h)` 失败
-///   （不在树中或为内部节点）→ **显式 `Protocol` 错误**，不静默回退到 max NodeId
-///   叶，避免掩盖调用方传入非法/过期 head 的 bug。
-/// - `None`：取 max NodeId 叶作为活动叶（空树 → `None`，空 transcript）。NodeId
-///   单调递增，最新 append 的节点必为叶（若其有子节点则子节点 id 更大，矛盾），
-///   故 max 叶即最近续写点。
+/// - `head = Some(h)`：显式目标叶节点（009 契约 `path_to(leaf)`）；`path_to(h)`
+///   失败（不在树中或为内部节点）→ **显式 `Protocol` 错误**，不静默回退到 max
+///   NodeId 叶，避免掩盖调用方传入非法/过期 head 的 bug。
+/// - `head = None`：先查持久化 head（024）——
+///   - `persisted = Some(Some(h))`：命中持久化 head，走 `Some(h)` 路径。
+///   - `persisted = Some(None)`：命中空 lane，transcript 为空、head = `None`。
+///   - `persisted = None`：未命中（无记录），回退 max NodeId 叶（保持 015 行为）。
+///     NodeId 单调递增，最新 append 的节点必为叶（若其有子节点则子节点 id 更大，
+///     矛盾），故 max 叶即最近续写点。
 fn resolve_resume_head(
     tree: &SessionTree,
     head: Option<NodeId>,
+    persisted: Option<Option<NodeId>>,
 ) -> Result<(Option<NodeId>, Vec<Arc<Message>>), ServerError> {
-    match head {
+    // 定有效 head：显式 head 优先；head: None 时查持久化 head。
+    let effective_head = match (head, persisted) {
+        (Some(h), _) => Some(h),
+        (None, Some(Some(h))) => Some(h),
+        // 命中空 lane：transcript 为空、head = None（不回退 max NodeId 叶）。
+        (None, Some(None)) => return Ok((None, Vec::new())),
+        // 未命中（无记录）：回退 max NodeId 叶（保持 015 行为）。
+        (None, None) => None,
+    };
+    match effective_head {
         Some(h) => {
             let path = tree.path_to(h).ok_or_else(|| {
                 ServerError::Protocol(format!(

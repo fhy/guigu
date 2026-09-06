@@ -24,7 +24,7 @@ use crate::core::runtime::{AgentRuntime, LoopConfig};
 use crate::core::session::{
     NodeId, SessionEntry, SessionError, SessionStorage, SessionTree, reduce,
 };
-use crate::server::AgentServer;
+use crate::server::{AgentServer, SessionStorageBundle};
 
 /// 内存 `SessionStorage`（测试用，避免 `JsonlSessionStorage::open` 的 async 约束）。
 pub struct InMemoryStorage {
@@ -222,8 +222,14 @@ pub fn make_agent(provider: Arc<dyn ModelProvider>) -> AcpAgent {
             },
         )
     });
-    // 工厂返回裸 `Arc<dyn SessionStorage>`；server 在 `create_session` 边界包成
-    // `SharedSessionStorage`。
-    server.with_storage_factory(|_id| Arc::new(InMemoryStorage::new()));
+    // 工厂返回 `SessionStorageBundle`；`InMemoryStorage` 不实现 `LaneHeadStore`，
+    // 故 `head_store = None`（行为等价 012）。
+    server.with_storage_factory(|_id| {
+        let storage = Arc::new(InMemoryStorage::new());
+        SessionStorageBundle {
+            storage,
+            head_store: None,
+        }
+    });
     AcpAgent::new(server)
 }

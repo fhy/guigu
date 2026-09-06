@@ -22,7 +22,7 @@ use guigu::core::session::{
 };
 use guigu::core::{AgentRuntime, LoopConfig, ToolExecutionMode};
 use guigu::remote::codec::{LineReader, write_line};
-use guigu::server::{AgentServer, ServerError, ServerMessage, ServerRequest};
+use guigu::server::{AgentServer, ServerError, ServerMessage, ServerRequest, SessionStorageBundle};
 use tokio::io::duplex;
 
 /// 内存存储（测试用，同步构造；满足 `storage_factory` 同步闭包约束）。
@@ -92,7 +92,11 @@ fn make_server(provider: Arc<dyn ModelProvider>) -> AgentServer {
         )
     });
     server.with_storage_factory(|_id| {
-        Arc::new(SharedSessionStorage::new(Arc::new(InMemoryStorage::new())))
+        let storage = Arc::new(SharedSessionStorage::new(Arc::new(InMemoryStorage::new())));
+        SessionStorageBundle {
+            storage,
+            head_store: None,
+        }
     });
     server
 }

@@ -12,8 +12,8 @@ use std::sync::Arc;
 use common::{line, user_msg};
 use guigu::core::event::AgentEvent;
 use guigu::core::session::{
-    JsonlSessionStorage, LaneWriter, SessionEntry, SessionError, SessionRecorder, SessionStorage,
-    SharedSessionStorage,
+    JsonlSessionStorage, LaneHeadRecord, LaneHeadStore, LaneWriter, SessionEntry, SessionError,
+    SessionRecorder, SessionStorage, SharedSessionStorage,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
@@ -350,4 +350,135 @@ async fn shared_storage_crash_recovery_after_concurrent() {
     assert_eq!(tree.nodes.len(), n + 1);
     assert_eq!(tree.root, Some(root));
     assert_eq!(tree.nodes[&root].children.len(), n);
+}
+
+// ===== Task 024：LaneHeadStore（JsonlSessionStorage）+ 向后兼容 + 多 lane 端到端 =====
+
+#[tokio::test]
+async fn lane_head_store_append_then_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let storage = JsonlSessionStorage::open(&path, "s1").await.unwrap();
+    storage.append(None, user_msg("a")).await.unwrap(); // id 0
+    storage
+        .append_lane_head("lane-1".to_string(), Some(0))
+        .await
+        .unwrap();
+    let heads = storage.load_lane_heads().await.unwrap();
+    assert_eq!(heads.get("lane-1"), Some(&Some(0)));
+}
+
+#[tokio::test]
+async fn lane_head_store_multiple_writes_final_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let storage = JsonlSessionStorage::open(&path, "s1").await.unwrap();
+    storage.append(None, user_msg("a")).await.unwrap(); // 0
+    storage.append(Some(0), user_msg("b")).await.unwrap(); // 1
+    // 同 lane 多次写 head：后写覆盖先写，重放取最终值。
+    storage
+        .append_lane_head("lane-1".to_string(), Some(0))
+        .await
+        .unwrap();
+    storage
+        .append_lane_head("lane-1".to_string(), Some(1))
+        .await
+        .unwrap();
+    let heads = storage.load_lane_heads().await.unwrap();
+    assert_eq!(heads.get("lane-1"), Some(&Some(1)));
+}
+
+#[tokio::test]
+async fn lane_head_store_crash_half_line_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    // 手工构造：1 条完整 LaneHead 行 + 末尾半行（截断、无行尾换行）。
+    let full = serde_json::to_string(&LaneHeadRecord {
+        lane_id: "lane-1".to_string(),
+        head: Some(0),
+    })
+    .unwrap();
+    let half: String = serde_json::to_string(&LaneHeadRecord {
+        lane_id: "lane-2".to_string(),
+        head: Some(1),
+    })
+    .unwrap()
+    .chars()
+    .take(15)
+    .collect();
+    tokio::fs::write(&path, format!("{full}\n{half}"))
+        .await
+        .unwrap();
+    let storage = JsonlSessionStorage::open(&path, "s1").await.unwrap();
+    let heads = storage.load_lane_heads().await.unwrap();
+    // 半行被丢弃，只有 lane-1。
+    assert_eq!(heads.len(), 1);
+    assert_eq!(heads.get("lane-1"), Some(&Some(0)));
+}
+
+#[tokio::test]
+async fn backward_compat_message_only_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    // 手工构造仅 Message 行的旧格式文件（009 形状）。
+    tokio::fs::write(
+        &path,
+        format!(
+            "{}{}{}",
+            line(0, None, "a"),
+            line(1, Some(0), "b"),
+            line(2, Some(1), "c")
+        ),
+    )
+    .await
+    .unwrap();
+    let storage = JsonlSessionStorage::open(&path, "s1").await.unwrap();
+    // load 重建树不变（与 009 完全一致）。
+    let tree = storage.load().await.unwrap();
+    assert_eq!(tree.nodes.len(), 3);
+    assert_eq!(tree.root, Some(0));
+    assert_eq!(tree.leaves(), vec![2]);
+    assert_eq!(tree.path_to(2).unwrap().len(), 3);
+    // load_lane_heads 返回空表。
+    let heads = storage.load_lane_heads().await.unwrap();
+    assert!(heads.is_empty());
+}
+
+#[tokio::test]
+async fn multi_lane_fork_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let inner = Arc::new(JsonlSessionStorage::open(&path, "s1").await.unwrap());
+    // 同一实例既作消息存储又作 lane head 持久化。
+    let shared = Arc::new(SharedSessionStorage::with_head_store(
+        inner.clone(),
+        inner.clone(),
+    ));
+
+    // 建根节点，两 lane 各 fork 出分支。
+    let root = shared.append(None, user_msg("root")).await.unwrap(); // 0
+    let mut lane_a =
+        LaneWriter::with_head_store(shared.clone(), "lane-a", Some(root), shared.clone());
+    let mut lane_b =
+        LaneWriter::with_head_store(shared.clone(), "lane-b", Some(root), shared.clone());
+    let id_a = lane_a.append(user_msg("a")).await.unwrap(); // 1
+    let id_b = lane_b.append(user_msg("b")).await.unwrap(); // 2
+    assert_ne!(id_a, id_b);
+
+    // 崩溃恢复：新建 storage 实例（重新 open 读全量）。
+    let reopened = JsonlSessionStorage::open(&path, "s1").await.unwrap();
+    let heads = reopened.load_lane_heads().await.unwrap();
+    // 两 lane 各自 head（append 自动落盘）。
+    assert_eq!(heads.get("lane-a"), Some(&Some(id_a)));
+    assert_eq!(heads.get("lane-b"), Some(&Some(id_b)));
+
+    // 分别恢复各自 transcript 与 head。
+    let tree = reopened.load().await.unwrap();
+    assert_eq!(tree.nodes.len(), 3);
+    let path_a = tree.path_to(id_a).unwrap();
+    let path_b = tree.path_to(id_b).unwrap();
+    assert_eq!(path_a.len(), 2); // root + a
+    assert_eq!(path_b.len(), 2); // root + b
+    assert_eq!(path_a[0], path_b[0]); // 共享根
+    assert_ne!(path_a[1], path_b[1]); // 末条不同
 }

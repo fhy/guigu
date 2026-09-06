@@ -21,7 +21,8 @@ pub use provider::{
 };
 pub use runtime::{AgentRuntime, LoopConfig, ToolExecutionMode};
 pub use session::{
-    JsonlSessionStorage, LaneId, LaneWriter, NodeId, SessionEntry, SessionError, SessionNode,
-    SessionRecorder, SessionStorage, SessionTree, SharedSessionStorage, reduce,
+    JsonlSessionStorage, LaneHeadRecord, LaneHeadStore, LaneId, LaneWriter, NodeId, SessionEntry,
+    SessionError, SessionNode, SessionRecord, SessionRecorder, SessionStorage, SessionTree,
+    SharedSessionStorage, reduce,
 };
 pub use tool::{ResourceScope, Tool, ToolError, ToolResult};

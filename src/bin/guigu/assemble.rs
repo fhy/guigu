@@ -23,7 +23,7 @@ use guigu::core::session::{
     JsonlSessionStorage, NodeId, SessionError, SessionStorage, SessionTree,
 };
 use guigu::core::tool::Tool;
-use guigu::server::AgentServer;
+use guigu::server::{AgentServer, SessionStorageBundle};
 use guigu::tools::{BashTool, EditTool, FileMutationQueue, ReadTool, WriteTool};
 
 use super::cli::{Cli, Provider};
@@ -214,21 +214,31 @@ async fn open_storage(log_dir: &Path, session_id: &str) -> Result<JsonlSessionSt
 
 /// 打开 session 存储（sync，storage 工厂用）：`block_in_place` + `block_on` 桥接 async。
 ///
-/// 返回裸 `Arc<dyn SessionStorage>`（`StorageFactory` 契约）；server 在
-/// `create_session` / `load_session` 边界统一包成 `Arc<SharedSessionStorage>`。
-fn open_storage_sync(log_dir: &Path, session_id: &str) -> Arc<dyn SessionStorage> {
+/// 返回 `SessionStorageBundle`（`StorageFactory` 契约）：`JsonlSessionStorage` 同时
+/// 实现 `SessionStorage` 与 `LaneHeadStore`，同一实例既作消息存储又作 lane head
+/// 持久化（024）。open 失败返回 `FailingStorage`（`head_store = None`，不 panic）。
+fn open_storage_sync(log_dir: &Path, session_id: &str) -> SessionStorageBundle {
     let path = log_dir.join(format!("{session_id}.jsonl"));
     let result = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current()
             .block_on(JsonlSessionStorage::open(path.clone(), session_id))
     });
     match result {
-        Ok(storage) => Arc::new(storage),
+        Ok(storage) => {
+            let storage = Arc::new(storage);
+            SessionStorageBundle {
+                storage: storage.clone(),
+                head_store: Some(storage),
+            }
+        }
         Err(e) => {
             tracing::error!("failed to open session storage for {session_id}: {e}");
-            Arc::new(FailingStorage {
-                reason: e.to_string(),
-            })
+            SessionStorageBundle {
+                storage: Arc::new(FailingStorage {
+                    reason: e.to_string(),
+                }),
+                head_store: None,
+            }
         }
     }
 }

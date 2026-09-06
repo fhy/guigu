@@ -141,9 +141,9 @@ async fn dispatch(
                     .to_string(),
             };
             let factory = get_storage_factory(server)?;
-            let storage = factory(&sid);
+            let bundle = factory(&sid);
             let result = server
-                .create_session(sid.clone(), storage)
+                .create_session_with_head_store(sid.clone(), bundle.storage, bundle.head_store)
                 .await
                 .map(|_| serde_json::Value::String(sid))
                 .map_err(|e| e.to_string());
@@ -152,9 +152,9 @@ async fn dispatch(
         }
         ServerRequest::LoadSession { session_id, .. } => {
             let factory = get_storage_factory(server)?;
-            let storage = factory(&session_id);
+            let bundle = factory(&session_id);
             let result = server
-                .load_session(session_id, storage)
+                .load_session_with_head_store(session_id, bundle.storage, bundle.head_store)
                 .await
                 .map(|_| serde_json::Value::Null)
                 .map_err(|e| e.to_string());

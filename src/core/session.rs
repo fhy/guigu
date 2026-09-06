@@ -11,8 +11,13 @@
 //! 串行化 append + `LaneWriter` 每 lane 游标）。
 
 mod jsonl;
+mod lane_head;
+mod lane_writer;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -21,6 +26,8 @@ use tokio::sync::broadcast;
 use crate::core::{event::AgentEvent, message::Message};
 
 pub use jsonl::JsonlSessionStorage;
+pub use lane_head::{LaneHeadRecord, LaneHeadStore, SessionRecord};
+pub use lane_writer::LaneWriter;
 
 /// 节点 id（单调递增，由存储分配）。
 pub type NodeId = u64;
@@ -286,14 +293,59 @@ impl SessionRecorder {
 pub struct SharedSessionStorage {
     inner: Arc<dyn SessionStorage>,
     write_lock: tokio::sync::Mutex<()>,
+    /// 可选 lane head 持久化后端（024）：`None` 时 `LaneHeadStore` 为 no-op/空表，
+    /// 行为等价 012。与 `inner` 通常指向同一后端实例（如 `JsonlSessionStorage`）。
+    head_store: Option<Arc<dyn LaneHeadStore>>,
 }
 
 impl SharedSessionStorage {
     /// 包装一个内层 storage（通常为 `JsonlSessionStorage`）。
+    ///
+    /// 不绑定 lane head 持久化（`head_store = None`），行为与 012 完全一致。
     pub fn new(inner: Arc<dyn SessionStorage>) -> Self {
         Self {
             inner,
             write_lock: tokio::sync::Mutex::new(()),
+            head_store: None,
+        }
+    }
+
+    /// 包装内层 storage 并绑定 lane head 持久化后端（024）。
+    ///
+    /// `head_store` 通常与 `inner` 指向同一后端实例（如 `JsonlSessionStorage` 同时
+    /// 实现 `SessionStorage` 与 `LaneHeadStore`）。绑定后本类型实现 `LaneHeadStore`
+    /// 委托到 `head_store`，供 `LaneWriter` 落盘 head 与恢复入口重放 head 表。
+    pub fn with_head_store(
+        inner: Arc<dyn SessionStorage>,
+        head_store: Arc<dyn LaneHeadStore>,
+    ) -> Self {
+        Self {
+            inner,
+            write_lock: tokio::sync::Mutex::new(()),
+            head_store: Some(head_store),
+        }
+    }
+}
+
+#[async_trait]
+impl LaneHeadStore for SharedSessionStorage {
+    async fn append_lane_head(
+        &self,
+        lane_id: LaneId,
+        head: Option<NodeId>,
+    ) -> Result<(), SessionError> {
+        match &self.head_store {
+            Some(store) => store.append_lane_head(lane_id, head).await,
+            // 未绑定 head 持久化：no-op（行为等价 012，不落盘）。
+            None => Ok(()),
+        }
+    }
+
+    async fn load_lane_heads(&self) -> Result<HashMap<LaneId, Option<NodeId>>, SessionError> {
+        match &self.head_store {
+            Some(store) => store.load_lane_heads().await,
+            // 未绑定 head 持久化：空表（恢复入口据此回退最大 NodeId 叶）。
+            None => Ok(HashMap::new()),
         }
     }
 }
@@ -321,60 +373,6 @@ impl SessionStorage for SharedSessionStorage {
 
 /// lane 标识（进程内唯一即可；调度 / 与 AgentHandle 绑定属 013）。
 pub type LaneId = String;
-
-/// 一个 lane 的写游标：`head` 指向树中本 lane 当前节点，`append` 挂到 `head`
-/// 之后并推进；`fork_at` 从任意历史节点分支。
-///
-/// 单 lane 内 `&mut self` 顺序写；多 lane 并发由各自 `LaneWriter` + 共享
-/// `SharedSessionStorage` 的 `write_lock` 保证 `append` 互斥。
-///
-/// `storage` 约束为 `Arc<SharedSessionStorage>`（017-a）：类型系统强制 lane 只经
-/// 共享写入口落盘，杜绝以裸 `Arc<dyn SessionStorage>` 绕过 `write_lock` 串行化。
-pub struct LaneWriter {
-    storage: Arc<SharedSessionStorage>,
-    lane_id: LaneId,
-    head: Option<NodeId>,
-}
-
-impl LaneWriter {
-    /// 创建 lane 写游标。`head = None` 表示尚无节点（首次 `append` 成为根）。
-    pub fn new(
-        storage: Arc<SharedSessionStorage>,
-        lane_id: impl Into<String>,
-        head: Option<NodeId>,
-    ) -> Self {
-        Self {
-            storage,
-            lane_id: lane_id.into(),
-            head,
-        }
-    }
-
-    /// lane 标识。
-    pub fn lane_id(&self) -> &LaneId {
-        &self.lane_id
-    }
-
-    /// 当前 head（`None` = 尚无节点）。
-    pub fn head(&self) -> Option<NodeId> {
-        self.head
-    }
-
-    /// 追加一条消息为 `head` 的子节点，推进 `head`，返回新节点 id。
-    pub async fn append(&mut self, message: Message) -> Result<NodeId, SessionError> {
-        let id = self.storage.append(self.head, message).await?;
-        self.head = Some(id);
-        Ok(id)
-    }
-
-    /// 从指定历史节点 fork：后续 `append` 挂到该节点之后（产生分支）。
-    ///
-    /// `parent = None` 表示重置到「无 head」，下次 `append` 成为新根——仅对空树
-    /// 合法；非空树会产生多根，`load` / `reduce` 以 `MultipleRoots` 拒绝。
-    pub fn fork_at(&mut self, parent: Option<NodeId>) {
-        self.head = parent;
-    }
-}
 
 #[cfg(test)]
 mod tests;

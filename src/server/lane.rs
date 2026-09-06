@@ -87,12 +87,18 @@ impl AgentServer {
         };
         // 2. spawn runtime（seeded transcript，同步，不入锁）。
         let handle = AgentHandle::spawn_with_transcript(config, runtime, transcript);
-        // 3. 建 writer（head = 活动叶 / None）。
-        let writer = Arc::new(Mutex::new(LaneWriter::new(
-            storage,
+        // 3. 建 writer（head = 活动叶 / None），绑定 head 持久化（024）：
+        //    `SharedSessionStorage` 实现 `LaneHeadStore`，与 `storage` 同一实例。
+        let writer = Arc::new(Mutex::new(LaneWriter::with_head_store(
+            storage.clone(),
             lane_id.to_string(),
             head,
+            storage,
         )));
+        // 3.5 落盘初始 head（024）：spawn 后记录初始 head（幂等）。
+        if let Err(e) = writer.lock().await.persist_head().await {
+            tracing::warn!("server: lane {lane_id} persist initial head failed: {e}");
+        }
         // 4. spawn 桥接 task（先于登记订阅，保证事件不丢持久化）。
         let bridge = spawn_bridge(handle.clone(), writer.clone(), lane_id);
         // 5. 二次校验并入表（原子）：session 被并发移除（如 shutdown）或 lane 被
@@ -163,12 +169,17 @@ impl AgentServer {
         let source_head = source_writer.lock().await.head();
         // 3. spawn 新 runtime（同步，不入锁）。
         let handle = AgentHandle::spawn(config, runtime);
-        // 4. 建新 writer，fork_at 源 head（分支点）。
-        let writer = Arc::new(Mutex::new(LaneWriter::new(
-            storage,
+        // 4. 建新 writer，fork_at 源 head（分支点），绑定 head 持久化（024）。
+        let writer = Arc::new(Mutex::new(LaneWriter::with_head_store(
+            storage.clone(),
             new_lane.to_string(),
             source_head,
+            storage,
         )));
+        // 4.5 落盘初始 head（024）：fork 后记录初始 head（幂等）。
+        if let Err(e) = writer.lock().await.persist_head().await {
+            tracing::warn!("server: lane {new_lane} persist initial head failed: {e}");
+        }
         // 5. spawn 桥接 task（先于登记订阅，保证事件不丢持久化）。
         let bridge = spawn_bridge(handle.clone(), writer.clone(), new_lane);
         // 6. 二次校验并入表（原子）：session 被并发移除、`new_lane` 被并发登记、

@@ -14,7 +14,7 @@ use crate::core::provider::{
     AssistantEvent, AssistantStream, Model, ModelProvider, ProviderError, ProviderRequest,
 };
 use crate::core::runtime::{AgentRuntime, LoopConfig};
-use crate::core::session::{JsonlSessionStorage, NodeId, SessionStorage};
+use crate::core::session::{JsonlSessionStorage, LaneHeadStore, NodeId, SessionStorage};
 use async_trait::async_trait;
 use futures::stream;
 use std::sync::Arc;
@@ -555,6 +555,109 @@ async fn test_resume_lane_invalid_head() {
     assert!(
         server2.snapshot("s1", "l-bad2").await.is_none(),
         "failed resume should not register lane"
+    );
+
+    server2.shutdown().await.expect("shutdown");
+}
+
+/// resume_lane_from_factory head: None 优先用持久化 head（024 核心行为）：
+/// 多 lane fork 后，非 max NodeId 叶的 lane 以 head: None 恢复时，须用该 lane
+/// 持久化的 head（而非 max NodeId 叶），否则恢复错 transcript。
+///
+/// 树结构（阶段 1 后）：根(user hi) → 中(assistant ok) → { 分支叶(l2, path 含
+/// "branch"), 主线叶(l1, path 含 "again", max NodeId) }。l2 持久化 head = 分支叶
+/// （非 max），l1 持久化 head = 主线叶（max）。
+#[tokio::test]
+async fn test_resume_lane_none_head_uses_persisted() {
+    let dir = tempdir().expect("tempdir");
+
+    // 阶段 1：建分叉树（两叶），session 绑定 head 持久化。
+    let server1 = AgentServer::new();
+    let jsonl = JsonlSessionStorage::open(dir.path().join("s1.jsonl"), "s1")
+        .await
+        .expect("open storage");
+    let jsonl_arc = Arc::new(jsonl);
+    let storage: Arc<dyn SessionStorage> = jsonl_arc.clone();
+    let head_store: Arc<dyn LaneHeadStore> = jsonl_arc.clone();
+    server1
+        .create_session_with_head_store("s1".to_string(), storage.clone(), Some(head_store))
+        .await
+        .expect("create");
+    server1
+        .spawn_lane("s1", "l1", make_config(), make_runtime())
+        .await
+        .expect("spawn");
+    server1
+        .prompt("s1", "l1", vec![user_msg("hi")])
+        .await
+        .expect("prompt");
+    wait_tree_nodes(&storage, 2).await;
+    // fork l2 从 l1（分支点 = l1 head）。
+    server1
+        .fork_lane("s1", "l1", "l2", make_config(), make_runtime())
+        .await
+        .expect("fork");
+    // l2 写分支（path 含 "branch"）。
+    server1
+        .prompt("s1", "l2", vec![user_msg("branch")])
+        .await
+        .expect("prompt l2");
+    // l1 续写（path 含 "again"）→ 成为 max NodeId 叶。
+    server1
+        .prompt("s1", "l1", vec![user_msg("again")])
+        .await
+        .expect("prompt l1");
+    wait_tree_leaves(&storage, 2).await;
+    server1.shutdown().await.expect("shutdown");
+
+    // 校验持久化 head：l2 = 分支叶（非 max），l1 = 主线叶（max）。
+    let heads = jsonl_arc.load_lane_heads().await.expect("load heads");
+    let tree = jsonl_arc.load().await.expect("load");
+    let max_leaf = *tree.leaves().iter().max().expect("should have leaves");
+    let l2_head = heads
+        .get("l2")
+        .copied()
+        .flatten()
+        .expect("l2 head persisted");
+    let l1_head = heads
+        .get("l1")
+        .copied()
+        .flatten()
+        .expect("l1 head persisted");
+    assert_eq!(l1_head, max_leaf, "l1 head should be the max NodeId leaf");
+    assert_ne!(
+        l2_head, max_leaf,
+        "l2 head should NOT be the max NodeId leaf"
+    );
+
+    // 阶段 2：head: None 恢复 l2 → 用持久化 head（分支叶），非 max NodeId 叶。
+    let server2 = AgentServer::new();
+    server2.with_runtime_factory(|| (make_config(), make_runtime()));
+    let jsonl2 = JsonlSessionStorage::open(dir.path().join("s1.jsonl"), "s1")
+        .await
+        .expect("open storage 2");
+    let jsonl2_arc = Arc::new(jsonl2);
+    let storage2: Arc<dyn SessionStorage> = jsonl2_arc.clone();
+    let head_store2: Arc<dyn LaneHeadStore> = jsonl2_arc.clone();
+    server2
+        .load_session_with_head_store("s1".to_string(), storage2, Some(head_store2))
+        .await
+        .expect("load");
+    server2
+        .resume_lane_from_factory("s1", "l2", None)
+        .await
+        .expect("resume l2 with head None");
+
+    // transcript = path_to(l2 持久化 head)：含 "branch"，不含 "again"。
+    let snap = server2.snapshot("s1", "l2").await.expect("snapshot");
+    let texts: Vec<Option<String>> = snap.messages.iter().map(|m| msg_text(m)).collect();
+    assert!(
+        texts.iter().any(|t| t.as_deref() == Some("branch")),
+        "l2 resumed transcript should contain 'branch': {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.as_deref() == Some("again")),
+        "l2 resumed transcript should NOT contain 'again' (would mean max NodeId fallback): {texts:?}"
     );
 
     server2.shutdown().await.expect("shutdown");

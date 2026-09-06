@@ -29,7 +29,7 @@ use tokio::sync::Mutex;
 use crate::core::agent::{AgentConfig, AgentHandle};
 use crate::core::runtime::AgentRuntime;
 use crate::core::session::{
-    LaneId, LaneWriter, SessionError, SessionStorage, SharedSessionStorage,
+    LaneHeadStore, LaneId, LaneWriter, SessionError, SessionStorage, SharedSessionStorage,
 };
 
 pub use protocol::{ServerMessage, ServerRequest};
@@ -39,13 +39,27 @@ pub type SessionId = String;
 
 /// runtime 工厂：transport 的 `SpawnLane` / `ForkLane` 用它构造 `(config, runtime)`。
 pub type RuntimeFactory = Arc<dyn Fn() -> (AgentConfig, AgentRuntime) + Send + Sync>;
+
+/// session 存储 + 可选 lane head 持久化（同一后端实例，024）。
+///
+/// `storage` 是消息节点持久化（`SessionStorage`）；`head_store` 是 lane head 元数据
+/// 持久化（`LaneHeadStore`），通常与 `storage` 指向同一后端实例（如
+/// `JsonlSessionStorage` 同时实现两者）。`head_store = None` 表示后端不支持 lane
+/// head 持久化（行为等价 012）。
+pub struct SessionStorageBundle {
+    /// 消息节点持久化。
+    pub storage: Arc<dyn SessionStorage>,
+    /// 可选 lane head 持久化（与 `storage` 通常同一实例）。
+    pub head_store: Option<Arc<dyn LaneHeadStore>>,
+}
+
 /// storage 工厂：transport 的 `CreateSession` 用它构造 session 存储。
 ///
-/// 返回裸 `Arc<dyn SessionStorage>`（公共 API 不暴露 `SharedSessionStorage`）；
+/// 返回 `SessionStorageBundle`（消息存储 + 可选 lane head 持久化，同一后端实例）；
 /// server 在 `create_session` / `load_session` 边界一次性包成
 /// `Arc<SharedSessionStorage>` 存入 `SessionState`，使 `LaneWriter` 类型约束
 /// （仅接受 `Arc<SharedSessionStorage>`）在 server 层成立。
-pub type StorageFactory = Arc<dyn Fn(&str) -> Arc<dyn SessionStorage> + Send + Sync>;
+pub type StorageFactory = Arc<dyn Fn(&str) -> SessionStorageBundle + Send + Sync>;
 
 /// server 错误类型。
 #[derive(Debug, thiserror::Error)]
@@ -146,12 +160,12 @@ impl AgentServer {
 
     /// 设置 storage 工厂（transport 的 `CreateSession` 用它构造 session 存储）。
     ///
-    /// 工厂返回裸 `Arc<dyn SessionStorage>`；server 在 `create_session` /
-    /// `load_session` 边界统一包成 `Arc<SharedSessionStorage>`。仅首次生效
-    /// （`OnceLock`）；重复调用忽略。
+    /// 工厂返回 `SessionStorageBundle`（消息存储 + 可选 lane head 持久化，同一后端
+    /// 实例）；server 在 `create_session` / `load_session` 边界统一包成
+    /// `Arc<SharedSessionStorage>`。仅首次生效（`OnceLock`）；重复调用忽略。
     pub fn with_storage_factory(
         &self,
-        factory: impl Fn(&str) -> Arc<dyn SessionStorage> + Send + Sync + 'static,
+        factory: impl Fn(&str) -> SessionStorageBundle + Send + Sync + 'static,
     ) {
         let _ = self.inner.storage_factory.set(Arc::new(factory));
     }
@@ -160,12 +174,30 @@ impl AgentServer {
     ///
     /// `storage` 为裸 `Arc<dyn SessionStorage>`；本方法在边界一次性包成
     /// `Arc<SharedSessionStorage>` 存入 `SessionState`（强制 lane 走共享写入口）。
+    /// 不绑定 lane head 持久化（行为等价 012）。
     pub async fn create_session(
         &self,
         session_id: SessionId,
         storage: Arc<dyn SessionStorage>,
     ) -> Result<(), ServerError> {
-        let storage = Arc::new(SharedSessionStorage::new(storage));
+        self.create_session_with_head_store(session_id, storage, None)
+            .await
+    }
+
+    /// 新建空 session 并绑定 lane head 持久化（024）；`session_id` 已存在 →
+    /// `DuplicateSession`。`head_store` 通常与 `storage` 指向同一后端实例。
+    pub async fn create_session_with_head_store(
+        &self,
+        session_id: SessionId,
+        storage: Arc<dyn SessionStorage>,
+        head_store: Option<Arc<dyn LaneHeadStore>>,
+    ) -> Result<(), ServerError> {
+        let storage = match head_store {
+            Some(head_store) => {
+                Arc::new(SharedSessionStorage::with_head_store(storage, head_store))
+            }
+            None => Arc::new(SharedSessionStorage::new(storage)),
+        };
         let mut sessions = self.inner.sessions.lock().await;
         if sessions.contains_key(&session_id) {
             return Err(ServerError::DuplicateSession(session_id));
@@ -186,12 +218,32 @@ impl AgentServer {
     /// `storage` 为裸 `Arc<dyn SessionStorage>`；本方法在边界一次性包成
     /// `Arc<SharedSessionStorage>` 存入 `SessionState`。`load` 在锁外执行
     /// （恢复续写游标），再入表；`session_id` 已存在 → `DuplicateSession`。
+    /// 不绑定 lane head 持久化（行为等价 012）。
     pub async fn load_session(
         &self,
         session_id: SessionId,
         storage: Arc<dyn SessionStorage>,
     ) -> Result<(), ServerError> {
-        let storage = Arc::new(SharedSessionStorage::new(storage));
+        self.load_session_with_head_store(session_id, storage, None)
+            .await
+    }
+
+    /// 从持久化存储 load + reduce 重建 session 并注册，绑定 lane head 持久化（024）。
+    ///
+    /// `head_store` 通常与 `storage` 指向同一后端实例。`load` 在锁外执行（恢复续写
+    /// 游标），再入表；`session_id` 已存在 → `DuplicateSession`。
+    pub async fn load_session_with_head_store(
+        &self,
+        session_id: SessionId,
+        storage: Arc<dyn SessionStorage>,
+        head_store: Option<Arc<dyn LaneHeadStore>>,
+    ) -> Result<(), ServerError> {
+        let storage = match head_store {
+            Some(head_store) => {
+                Arc::new(SharedSessionStorage::with_head_store(storage, head_store))
+            }
+            None => Arc::new(SharedSessionStorage::new(storage)),
+        };
         // load 在锁外执行（避免跨 await 持锁）；成功后恢复续写游标。
         storage.load().await?;
         let mut sessions = self.inner.sessions.lock().await;
@@ -226,6 +278,8 @@ impl AgentServer {
     }
 
     /// 用已配置的 storage 工厂新建 session（工厂未配置 → `Protocol` 错误）。
+    ///
+    /// 工厂返回 `SessionStorageBundle`；若含 `head_store` 则绑定 lane head 持久化。
     pub async fn create_session_from_factory(
         &self,
         session_id: SessionId,
@@ -236,11 +290,14 @@ impl AgentServer {
             .get()
             .cloned()
             .ok_or_else(|| ServerError::Protocol("no storage factory".into()))?;
-        let storage = factory(&session_id);
-        self.create_session(session_id, storage).await
+        let bundle = factory(&session_id);
+        self.create_session_with_head_store(session_id, bundle.storage, bundle.head_store)
+            .await
     }
 
     /// 用已配置的 storage 工厂 load + 重建 session（工厂未配置 → `Protocol` 错误）。
+    ///
+    /// 工厂返回 `SessionStorageBundle`；若含 `head_store` 则绑定 lane head 持久化。
     pub async fn load_session_from_factory(
         &self,
         session_id: SessionId,
@@ -251,8 +308,9 @@ impl AgentServer {
             .get()
             .cloned()
             .ok_or_else(|| ServerError::Protocol("no storage factory".into()))?;
-        let storage = factory(&session_id);
-        self.load_session(session_id, storage).await
+        let bundle = factory(&session_id);
+        self.load_session_with_head_store(session_id, bundle.storage, bundle.head_store)
+            .await
     }
 
     /// 用已配置的 runtime 工厂在 session 内 spawn 一个 lane（工厂未配置 → `Protocol` 错误）。
