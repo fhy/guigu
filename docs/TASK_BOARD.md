@@ -43,7 +43,7 @@
 
 实施顺序：018
 
-- [~] 018 — server/lane.rs 超限拆分（017-b r2 遗留：420 行超 400 上限，恢复事务逻辑 + 共享 helper 独立成模块，纯重组零行为变化）
+- [x] 018 — server/lane.rs 超限拆分（017-b r2 遗留：420 行超 400 上限，恢复事务逻辑 + 共享 helper 独立成模块，纯重组零行为变化）
 
 ## 备注
 
@@ -83,4 +83,4 @@
 - 017-b 已于 r2 审查通过（2026-09-06，docs/reviews/017-b-review-r2.md）：四门禁全绿、267 库测试 + 全部集成测试通过；r1 Critical（`session/load` 先注册后校验 head 致非法请求污染注册表）已核销（load 事务化 + spawn 失败回滚空 session），非阻塞建议（ACP head 类型错误返回 JsonRpc、`resolve_tool_path` 收 `Option<&Path>`）均已落地。新产生技术债：`src/server/lane.rs` 420 行超 400 上限，建议后续拆恢复事务逻辑/共享 helper 至独立模块（独立于 017-c，待定序）。四期 017-a/017-b 已完成，下一步 017-c（规格 v1.0 已就绪）
 - 017-c 已于 r2 审查通过（2026-09-06，docs/reviews/017-c-review-r2.md）：四门禁全绿、274 库测试 + 全部集成测试通过；r1 四项 Critical（`tools()` 回调未移出注册表锁 / 未实现 `try_new` / 未实现 `prune()`+阈值驱逐 / ACP 测试未拆分）全部核销（提交 76a2e71）。r2 无阻塞问题。非阻塞建议一条：`file_mutation_queue.rs` 的 `prune_locked` 接收 `&self` 但未用，可选改为关联函数（不影响正确性，暂不立项）。四期（016/017-a/017-b/017-c）全部完成
 - 五期启动（2026-09-06，Architect）：018 承接 017-b r2 技术债（`src/server/lane.rs` 420 行超 400 上限），纯重组拆分（恢复事务逻辑 + 共享 helper 独立成模块），零行为变化、不改公开契约。规格 v1.0（docs/tasks/018-lane-split.md）已就绪，建议命名仅为占位，Developer 依据实际代码结构定夺最终模块边界
-- 018 复核（2026-09-06，Architect）：实现已合并（eee2de9），lane.rs 拆为 lane.rs(249)/lane_recovery.rs(192)/lane_ops.rs(136)，均 ≤400 行，符合目标；018-review-r1 代码审查通过（零破坏、无 unwrap、边界干净），但四门禁因审查环境缺 cargo 未执行，故 018 暂标 [~]——待 Developer 在工具链环境补跑 cargo check/clippy/test/fmt 全绿后转 [x] 关闭。另：`docs/reviews/018-review-r1.md` 当前未提交（untracked），需 Reviewer 落库。五期 Backlog（018）至此实现+审查闭环，既定范围（002~018）全部完成，后续方向待 PM 定序
+- 018 复核（2026-09-06，Architect）：实现已合并（eee2de9），lane.rs 拆为 lane.rs(249)/lane_recovery.rs(192)/lane_ops.rs(136)，均 ≤400 行，符合目标；018-review-r1 代码审查通过（零破坏、无 unwrap、边界干净）。四门禁已由 Reviewer 在工具链环境补跑全绿（cargo check ✓ / clippy --all-targets ✓ / test --all-targets 398 passed / fmt ✓，见 ce76d37 实测复核），`docs/reviews/018-review-r1.md` 已落库。故 018 由 [~] 转 [x] 关闭。五期 Backlog（018）至此全部完成，既定范围（002~018）实现+审查+门禁全部闭环，后续方向待 PM 定序
