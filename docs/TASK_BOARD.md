@@ -56,6 +56,13 @@
 
 - [x] 021 — 中文用户文档 + Provider 配置说明（docs/user-guide.zh.md：Provider 两层接入能力 + 决策表）
 
+## 八期 Backlog（自定义模型 + TUI）
+
+实施顺序：022 → 023（023 依赖 022 的配置能力）
+
+- [ ] 022 — 自定义模型配置化接入（方案 B：--base-url + TOML profile + api_key 可选；ModelConfig + ProviderFactory + CLI --config/--base-url/--api-key-env + -m 配置名优先；toml optional → config feature default）
+- [ ] 023 — TUI 模式（guigu tui 子命令 + 非默认 tui feature；ratatui+crossterm 全屏 UI：状态栏/对话区/输入框，复用 022+013+assemble）
+
 ## 下一步候选（待 PM 定序，见 docs/roadmap.md）
 
 1. ACP SSE/HTTP 远程多 client（014 存根 acp-sse）
@@ -109,3 +116,5 @@
 - 019 复核（2026-09-06，Architect，响应 PM「复核完成情况」）：实测 `git cat-file -t v0.1.0`=tag（annotated）且 `v0.1.0^{commit}`=a7bcbcf=HEAD=origin/main，r2 Critical（tag 未指向最终发布 commit）已解决；Cargo.toml 已补 readme/keywords/categories + include 白名单（`/` 前导锚定包根，排除 docs/ 与 .opencode/node_modules 泄漏）；README/CHANGELOG/LICENSE 齐备；工作区干净、已 push。唯一形式缺口：a7bcbcf（include 锚定修复）在 r2 之后提交、未走 r3 复审，`cargo package --list` 在干净 checkout 的最终验证未被 reviewer 独立确认（r2 仅记 ⚠️ 受 .opencode/node_modules 干扰）。建议：PM 拍板关闭 019，或让 reviewer 对 a7bcbcf 补 r3 快照确认后转 [x]
 - 019 复核（2026-09-06，Architect，二次复核）：reviewer 已补 r3（docs/reviews/019-review-r3.md，结论 PASS）。r3 在干净 checkout 实测 `cargo package --list` ✓（含 README/LICENSE/Cargo.toml/src/tests，不含 docs/.git/target/.opencode）；四门禁全绿（clippy --all-targets / test --all-targets 398 passed / fmt）；确认 `v0.1.0` 为 annotated tag 且 `^{commit}`=a7bcbcf（发布修复 commit）一致；无阻塞问题。r2 Critical 已核销。故 019 由 [~] 转 [x] 关闭。至此 002~020 全部完成，v0.1.0 发布闭环（tag 已推、发布包白名单已验证）。非阻塞遗留：① chacha20 yanked 警告属依赖维护，发布前可单独更新锁文件；② 建议后续 CI 保留干净 checkout 的 `cargo package --list` 校验
 - 021 交付（2026-09-06，Architect，依据 PM「增加中文用户文档 + Provider 配置写入文档」）：新增 `docs/user-guide.zh.md`（中文用户文档，覆盖简介/安装/快速开始/核心抽象/Provider 配置/相关文档）。核心为 Provider **两层接入能力**：① 内置 adapter 层仅 OpenAI/Anthropic，但 `base_url` 可配置 → 任何 OpenAI/Anthropic 兼容端点（Ollama/vLLM/DeepSeek/自建网关…）开箱即用，「内置只有两种」指协议适配器而非只能连官方；② `ModelProvider` trait（core/provider.rs，003 定稿）为嵌入库开放扩展点，`impl ModelProvider` 接入任意后端不改库，且不受 `providers-http` feature 门控（`default-features=false` 下仍可自定义）。附 Provider 决策表（官方/兼容端点/自定义 trait）。示例统一标注「契约示意」指向 architecture §3.5 / 003 / 007 为权威（Architect 不读 src/）。纯文档零代码。可选后续：README 加中文文档链接需 PM 授权根文件归属
+- 八期启动（2026-09-06，Architect，依据 PM「全面支持自定义模型和 tui 模式」）：拆两个任务，实施顺序 022 → 023。**022** 自定义模型配置化接入——补齐 021 两层接入的 CLI 缺口：`ModelConfig`/`Protocol`/`GuiguConfig`（serde，src/config.rs 不 gate）+ `ProviderFactory`（复用 007 adapter，src/adapters/factory.rs gate providers-http）+ CLI `--config`/`--base-url`/`--api-key-env` + `-m` 语义扩展（配置名优先、内联回退），api_key 四段解析链（CLI > 明文 > env > 协议默认 env）。**023** TUI 模式——`guigu tui` 子命令（垂直三区：状态栏/对话区/输入框，单列内联工具卡片），`apply_event`/`handle_key` 纯逻辑 + TestBackend 无头渲染，复用 022 配置 + assemble.rs + 013 事件流。⚠ 三个新依赖（toml/ratatui/crossterm）需 PM 拍板
+- 八期 PM 签核（2026-09-06，Architect，响应 PM 三项决策，同步修订 022 v1.1 / 023 v1.1）：① 自定义模型边界采纳**方案 B**（`--base-url` + TOML profile + `api_key` 可选）＝ 022 现有 scope 确认；② 新依赖 `toml`/`ratatui`/`crossterm` 均 **feature-gated** 引入——`toml` 门控为 `config` feature（**default 开启**：toml 极轻 + CLI 开箱即用 + default test 覆盖），`ratatui`/`crossterm` 门控为 `tui` feature（**非默认 opt-in**：编译面大、default 精简、显式 `--features tui`）；③ TUI 形态 = `guigu tui` 子命令 + 非默认 `tui` feature。`default` 终态 = `["providers-http", "config"]`。roadmap 候选仍待 PM 定序，未立项
