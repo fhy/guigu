@@ -37,7 +37,13 @@
 - [x] 016 — 插件机制 Plugin Registry（Plugin trait + PluginTool 异步惰性实例化 + PluginRegistry 注册表，基于 011 DeferredToolSpec，失败不缓存可重试）
 - [x] 017-a — 会话存储并发安全加固（012 r1 遗留：移除 inner() 受控访问 / LaneWriter 约束 Arc<SharedSessionStorage> / 每 lane 多步写测试 / 边界说明订正）
 - [x] 017-b — 多 lane 恢复语义 + 工作目录隔离（015 r2 遗留：恢复 API 显式收 head / 移除 set_current_dir 改工具 work_dir）
-- [ ] 017-c — 锁纪律收尾（016 r1 插件锁 + 006 锁表驱逐 + 014 测试拆分）
+- [x] 017-c — 锁纪律收尾（016 r1 插件锁 + 006 锁表驱逐 + 014 测试拆分）
+
+## 五期 Backlog（技术债收尾）
+
+实施顺序：018
+
+- [ ] 018 — server/lane.rs 超限拆分（017-b r2 遗留：420 行超 400 上限，恢复事务逻辑 + 共享 helper 独立成模块，纯重组零行为变化）
 
 ## 备注
 
@@ -75,3 +81,5 @@
 - 017-a 已于 r2 审查通过（2026-09-05，docs/reviews/017-a-review-r2.md）：四门禁全绿、254 单测 + 全部集成测试通过；r1 两条 P1（公开 storage API 被不必要破坏、tests/session.rs 超 400 行）已核销（server 公共入口恢复 `Arc<dyn SessionStorage>` 并在边界包裹、并发测试拆 `tests/session_concurrency.rs`）。下一动作：启动 017-b 开发（规格 v1.0 已就绪）
 - 017-b 规格 v1.1（2026-09-05，Architect，依据 Developer 预审反馈）：补三处边界——① `path_to(h)` 失败（`h` 不在树中或为内部节点）显式返回 `ServerError::Protocol` 不静默回退，`h` 仅限叶节点（009 契约 `path_to(leaf)`）；② bash 默认 cwd 由「装配时填入」改为 `BashTool::new` 构造注入 `default_cwd`（`BashArgs.cwd` 为 per-call 参数）；③ 文件工具路径解析只做一次，解析结果同用于 FileMutationQueue 锁 key 与 IO
 - 017-b 已于 r2 审查通过（2026-09-06，docs/reviews/017-b-review-r2.md）：四门禁全绿、267 库测试 + 全部集成测试通过；r1 Critical（`session/load` 先注册后校验 head 致非法请求污染注册表）已核销（load 事务化 + spawn 失败回滚空 session），非阻塞建议（ACP head 类型错误返回 JsonRpc、`resolve_tool_path` 收 `Option<&Path>`）均已落地。新产生技术债：`src/server/lane.rs` 420 行超 400 上限，建议后续拆恢复事务逻辑/共享 helper 至独立模块（独立于 017-c，待定序）。四期 017-a/017-b 已完成，下一步 017-c（规格 v1.0 已就绪）
+- 017-c 已于 r2 审查通过（2026-09-06，docs/reviews/017-c-review-r2.md）：四门禁全绿、274 库测试 + 全部集成测试通过；r1 四项 Critical（`tools()` 回调未移出注册表锁 / 未实现 `try_new` / 未实现 `prune()`+阈值驱逐 / ACP 测试未拆分）全部核销（提交 76a2e71）。r2 无阻塞问题。非阻塞建议一条：`file_mutation_queue.rs` 的 `prune_locked` 接收 `&self` 但未用，可选改为关联函数（不影响正确性，暂不立项）。四期（016/017-a/017-b/017-c）全部完成
+- 五期启动（2026-09-06，Architect）：018 承接 017-b r2 技术债（`src/server/lane.rs` 420 行超 400 上限），纯重组拆分（恢复事务逻辑 + 共享 helper 独立成模块），零行为变化、不改公开契约。规格 v1.0（docs/tasks/018-lane-split.md）已就绪，建议命名仅为占位，Developer 依据实际代码结构定夺最终模块边界
