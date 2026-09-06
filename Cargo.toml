@@ -6,6 +6,9 @@ edition = "2024"
 description = "A lightweight Rust-native AI Agent runtime"
 license = "MIT"
 repository = "https://github.com/fhy/guigu"
+readme = "README.md"
+keywords = ["ai-agent", "agent", "llm", "async", "runtime"]
+categories = ["asynchronous", "command-line-utilities", "network-programming"]
 
 [features]
 default = ["providers-http"]
