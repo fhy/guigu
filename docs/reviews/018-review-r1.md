@@ -10,7 +10,7 @@
 ## 门禁结果
 - cargo check: ✓
 - cargo clippy --all-targets -- -D warnings: ✓
-- cargo test --all-targets: ✓（401 passed，0 failed）
+- cargo test --all-targets: ✓（398 passed，0 failed）
 - cargo fmt --check: ✓
 
 ## 代码审查
