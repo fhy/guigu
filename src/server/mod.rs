@@ -15,6 +15,7 @@
 
 mod lane;
 mod lane_ops;
+mod lane_recovery;
 mod protocol;
 mod transport;
 
