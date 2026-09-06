@@ -60,7 +60,7 @@
 
 实施顺序：026（独立，不依赖 022/024/025，PM 定序提前）
 
-- [ ] 026 — CLI 自定义 system prompt + 默认身份鬼谷子 + 内联 base_url 端点覆盖（`--system-prompt` + `--base-url` 全局参数 + `DEFAULT_SYSTEM_PROMPT` 改鬼谷子 + `resolve_system_prompt` 缺省回退 + assemble/build_server 透传 `AgentConfig.system_prompt` + build_provider 透传 adapter `base_url`；单测参数解析+缺省回退；不改 ACP、不做配置文件加载；base_url 仅内联透传，完整配置化属 022）
+- [x] 026 — CLI 自定义 system prompt + 默认身份鬼谷子 + 内联 base_url 端点覆盖（`--system-prompt` + `--base-url` 全局参数 + `DEFAULT_SYSTEM_PROMPT` 改鬼谷子 + `resolve_system_prompt` 缺省回退 + assemble/build_server 透传 `AgentConfig.system_prompt` + build_provider 透传 adapter `base_url`；单测参数解析+缺省回退；不改 ACP、不做配置文件加载；base_url 仅内联透传，完整配置化属 022）
 
 ## 八期 Backlog（持久化 lane head + ACP SSE/HTTP 远程多 client）
 
@@ -132,3 +132,4 @@
 - 九期重排（2026-09-06，Architect，响应 PM「批准 feature-gated + 024/025 插到 022/023 之前」）：**期序重排**——八期改回 024/025（持久化 lane head + ACP SSE/HTTP 远程多 client），九期为 022/023（自定义模型 + TUI）；实施顺序 **024 → 025 → 022 → 023**（任务号不变，仅期序/实施顺序调整）。**025 立项 + 规格 v1.0 已就绪**（docs/tasks/025-acp-sse-http.md）：`axum`+`tokio-stream` feature-gated 在既有 `acp-sse`（**非 default**，PM 签核「批准 feature-gated」），`reqwest` 仅 dev-dep；permission mode 由 014 单全局修正为 per-session（多 client 串扰修复）。024 规格 v1.0 已就绪（上一 commit c578a57）。「下一步候选」段移除已立项的 lane head / ACP SSE/HTTP，剩 schemars / Agent 插件 / 跨进程锁三条
 - 026 立项（2026-09-06，Architect，依据 PM「简单任务优先级提前」）：CLI 自定义 system prompt + 默认身份改鬼谷子，正式化 `~/guigu-ms` 未提交草稿（`--system-prompt` 全局参数 + assemble 透传 `AgentConfig.system_prompt`）；独立于 022/024/025，期序插到八期之前。⚠ 草稿在 `~/guigu-ms`（与规范仓库 `/home/fhy/guigu/` 两份拷贝），Developer 落地目标仓库以 PM 确认为准
 - 026 规格 v1.1（2026-09-06，Architect，依据 PM「迁回这 2 个 src 改动」授权）：核对 `~/guigu-ms` 草稿实际内容发现 `cli.rs` 同时含 `--base-url` 全局参数、`assemble.rs` 同时含 `build_provider` 的 `base_url` 透传——与 v1.0 边界「不涉及 base_url」冲突。故 026 范围扩展为「system prompt 自定义 + 内联 base_url 端点覆盖」，正式化草稿全量两文件改动。分工：026 只做内联 `--base-url` 简单透传（复用 007 既有 `base_url` 字段），022 做完整配置化（TOML/工厂/-m 扩展/api_key 四段链）并复用 026 已落地的 `--base-url`。022 规格同步 v1.2 修订「新增 --base-url」为「复用」。
+- 026 复核（2026-09-06，Architect，响应 PM「复核完成情况」）：实现已合并（89856de，feat(cli)）；reviewer r1 审查通过（docs/reviews/026-review-r1.md，结论 PASS，四门禁全绿：check ✓ / clippy --all-targets ✓ / test --all-targets 274 库测试+10 CLI binary+全部集成 ✓ / fmt ✓）。两条非阻塞建议（① 装配测试重复样板后续提炼 helper；② 022 补本地 mock endpoint 端到端确认最终请求 URL）留待 022。⚠ `docs/reviews/026-review-r1.md` 当前 git 未跟踪（reviewer 待落库提交）。故 026 由 [ ] 转 [x] 关闭。下一动作：启动 024（八期，规格 v1.0 已就绪）
