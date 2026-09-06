@@ -1,12 +1,12 @@
 # guigu 整体架构设计（定稿 v1.0）
 
-> 状态：已定稿（2025-XX，PM 确认）
+> 状态：已定稿（2026-09，PM 确认），v0.1.0 终态同步
 > 依据：对 `~/pi`（earendil-works/pi，TypeScript monorepo）的源码分析 + PM 定稿意见
 
 ## 0. 设计原则
 
 - 借鉴 Pi 架构思想，**非 1:1 移植**；Rust 原生，追求性能、安全、极简依赖
-- 一期只做核心运行时；Session 树 / JSONL 崩溃恢复 / 上下文摘要 / 插件与远程协议均二期，加在稳定接口之外
+- 一期只做核心运行时；Session 树 / JSONL 崩溃恢复 / 上下文摘要 / 插件与远程协议等在二~五期逐步落地（002–018 已全部交付，见 §6）
 - 单 crate + 内部模块化（可嵌入，不设 workspace）
 
 ## 1. Pi 架构要点（借鉴来源）
@@ -25,50 +25,73 @@ telemetry(遥测) → agent-core(运行时+session树) → coding-agent(CLI) →
 | 三层生命周期事件 | agent / turn / message / tool_execution | ✅ 采用 |
 | 钩子机制 | before/afterToolCall、shouldStopAfterTurn、prepareNextTurn、steer/followUp | ✅ 采用 |
 | 工具抽象 | schema + execute + 串/并行策略 | ✅ 采用 |
-| Session 树 + 崩溃恢复 | append-only Entry + lane 记录 + reducer | ⏸ 二期 |
+| Session 树 + 崩溃恢复 | append-only Entry + lane 记录 + reducer | ✅ 采用（009 已交付） |
 | 错误不 throw | 工具/FS/Shell 返回 Result，错误进 stop_reason | ✅ 天然契合 |
-| compaction / branch summary | 上下文压缩与分支汇总 | ⏸ 二期（接口预留） |
+| compaction / branch summary | 上下文压缩与分支汇总 | ✅ 采用（008 已交付） |
 | provider 归一化 | 各 provider adapter 做格式转换 | ✅ adapters/ |
 | file-mutation-queue | 同文件写串行化防竞态 | ✅ 采用 |
-| deferred tools | 按需加载工具 | ⏸ 二期 |
+| deferred tools | 按需加载工具 | ✅ 采用（011 已交付） |
 
-## 2. 目录结构（定稿）
+## 2. 目录结构（v0.1.0 终态）
 
 ```
 /home/fhy/guigu/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs                 # facade 聚合导出
-│   ├── core/
+│   ├── core/                  # 纯领域：消息/事件/trait/主循环，不依赖 HTTP
 │   │   ├── mod.rs
-│   │   ├── message.rs         # 消息、内容段、usage、stop reason
-│   │   ├── event.rs           # 生命周期与流式事件
-│   │   ├── agent.rs           # Agent trait、AgentHandle、单 writer actor 外壳
-│   │   ├── tool.rs            # Tool trait、参数校验、执行策略、资源声明
-│   │   ├── provider.rs        # ModelProvider、AssistantStream、请求/响应规范
-│   │   ├── runtime.rs         # 单 writer agent loop、命令队列、取消、重试
-│   │   ├── context.rs         # 上下文预算、裁剪；二期压缩接口
-│   │   └── session.rs         # 一期内存实现；二期 JSONL 树与持久化
+│   │   ├── message.rs         # 消息、内容段、usage、stop reason（002）
+│   │   ├── event.rs           # 生命周期与流式事件（002）
+│   │   ├── agent.rs           # Agent trait、AgentHandle、单 writer actor 外壳（001）
+│   │   ├── agent_runtime.rs   # 单 writer agent loop、命令队列、取消、重试（003）
+│   │   ├── tool.rs            # Tool trait、参数校验、执行策略、资源声明（003）
+│   │   ├── provider.rs        # ModelProvider、AssistantStream、请求/响应规范（003/007）
+│   │   ├── context.rs         # 上下文预算、裁剪（003）
+│   │   ├── compactor.rs       # 上下文摘要压缩（008）
+│   │   ├── runtime/           # 主循环子模块：mod/step/tools/turn（003）
+│   │   └── session.rs         # SessionStorage trait + InMemory + JSONL（009）
+│   │       └── session/jsonl.rs  # JsonlSessionStorage 文件后端 + 崩溃恢复（009）
 │   ├── tools/
 │   │   ├── mod.rs
-│   │   ├── read.rs  write.rs  edit.rs  bash.rs
-│   │   └── file_mutation_queue.rs
-│   ├── adapters/
+│   │   ├── read.rs  write.rs  edit.rs      # 文件工具（005）
+│   │   ├── bash.rs                          # bash 工具 + 独占声明（006）
+│   │   ├── echo.rs                          # 最小 Echo 工具（004）
+│   │   ├── deferred.rs                      # DeferredTool 惰性加载（011）
+│   │   └── file_mutation_queue.rs           # 同文件写串行化（006）
+│   ├── adapters/              # 依赖 reqwest（providers-http feature）
 │   │   ├── mod.rs             # 注册表/分发
-│   │   ├── openai.rs          # OpenAI 兼容 API 请求/响应转换
-│   │   └── anthropic.rs       # Anthropic API 请求/响应转换
-│   └── bin/
-│       └── main.rs            # 示例 CLI（echo / 交互式）
-└── tests/
-    ├── message.rs             # 序列化 roundtrip
-    ├── runtime_loop.rs        # 主循环行为（fake provider 驱动）
-    └── echo_agent.rs          # 最小端到端
+│   │   ├── openai/            # OpenAI 兼容 API 请求/响应转换（007）
+│   │   ├── anthropic/         # Anthropic API 请求/响应转换（007）
+│   │   ├── acc.rs  sse.rs  stream.rs   # 累积器/SSE/流式（007）
+│   ├── remote/                # 跨进程远程协议（010）
+│   │   ├── protocol.rs  codec.rs       # 命令面 + NDJSON 双向流 codec
+│   │   ├── server.rs  client.rs        # RemoteServer / RemoteClient
+│   ├── server/                # 多 session + 多 lane + 多连接 TCP（013）
+│   │   ├── protocol.rs  transport.rs   # 协议 + 传输
+│   │   ├── lane.rs  lane_ops.rs  lane_recovery.rs  # 调度 + 事务（013/018 拆分）
+│   ├── acp/                   # Agent Client Protocol v1（014）
+│   │   ├── jsonrpc.rs  types.rs  mapping.rs  handlers.rs
+│   │   ├── transport.rs  fs_tool.rs  stdio_client.rs
+│   ├── plugin/                # 插件机制（016）
+│   │   ├── mod.rs             # Plugin trait + PluginRegistry
+│   │   └── tool.rs            # PluginTool 异步惰性实例化
+│   └── bin/guigu/             # CLI（015）
+│       ├── main.rs  cli.rs  repl.rs  acp.rs
+│       └── assemble.rs  fake.rs  error.rs
+└── tests/                     # 集成测试（与模块一一对应）
+    ├── message.rs  echo_agent.rs  runtime_loop.rs  agent_lifecycle.rs
+    ├── tools.rs  bash.rs  file_mutation_queue.rs  deferred.rs
+    ├── adapters.rs  compactor.rs  session.rs  session_concurrency.rs
+    ├── remote.rs  server.rs  acp.rs  cli.rs  plugin.rs
+    └── common/mod.rs
 ```
 
 **职责边界**：
 - `convert.rs` 不保留。通用"上下文转换"归 `context.rs`；OpenAI/Anthropic 格式转换归 `adapters/`，不做模糊公共模块。
 - `core/` 纯领域：消息/事件/trait/主循环，不依赖 HTTP。
-- `adapters/` 依赖 `reqwest`（feature-gated）。
+- `adapters/` 依赖 `reqwest`（feature-gated，`default = ["providers-http"]`）。
+- 子模块化依据：单文件 ≤400 行上限（018 拆分 `server/lane.rs` → lane/lane_ops/lane_recovery；009 拆分 `jsonl.rs`）。
 
 ## 3. 核心抽象设计
 
@@ -168,7 +191,7 @@ AgentSnapshot / AgentEvent       （订阅方）
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
-    fn parameters(&self) -> Option<serde_json::Value>;   // 一期宽松，二期 schemars
+    fn parameters(&self) -> Option<serde_json::Value>;   // 一期宽松，schemars 强类型化见 roadmap
     /// 资源声明：一期用于判定并发安全性
     fn resource_scope(&self) -> ResourceScope;            // ReadOnly | FileWriter | Exclusive
     async fn execute(
@@ -232,20 +255,21 @@ loop {
 ### 3.7 上下文（core/context.rs）
 
 - 每轮请求前**计算 token 预算**（估算 + 模型 context_window）
-- 超限：**先拒绝或保守截断**；二期加入摘要压缩（`Compactor` trait 预留接口）
+- 超限：**先拒绝或保守截断**；摘要压缩由 008 `Compactor` 交付
 - 负责通用上下文转换（非 LLM 消息投影/过滤）
 
 ### 3.8 会话（core/session.rs）
 
-- **一期**：`InMemorySessionStorage`（append-only Entry 内存实现）
-- **二期**：Session 树 / 分支 fork / JSONL 文件后端 / 崩溃恢复（reducer）
-- 预留 `SessionStorage` trait 接口，二期在稳定接口之外扩展
+- `SessionStorage` trait 统一内存与文件后端
+- **Session 树**：parent_id 指针隐式表达分支，fork = 任意历史节点追加（009）
+- **JSONL 文件后端**：append-only Entry + 逐行解析跳半行 + 全量重放 + `sync_all` 进程崩溃级持久化（009）
+- **多 lane**：进程内多 lane 并发写同一 session 树（012，`SharedSessionStorage` 串行化 append + `LaneWriter` 每 lane 游标）
 
 ## 4. 一期行为契约（必须补齐）
 
 | 能力 | 一期行为 |
 |------|----------|
-| Context window | 每轮请求前计算预算；超限先拒绝或保守截断；二期加摘要压缩 |
+| Context window | 每轮请求前计算预算；超限先拒绝或保守截断；摘要压缩（008） |
 | 工具并发 | 默认**顺序**执行；仅显式 ReadOnly 工具可并行 |
 | 重试 | **仅重试 provider 请求，不重试工具**；指数退避、上限、可取消 |
 | 取消 | 一个 run 一个 `CancellationToken`，传给 Provider、Tool、退避等待和子进程 |
@@ -263,9 +287,10 @@ loop {
 | 取消 | `tokio-util` | CancellationToken |
 | 流 | `futures` | Stream/BoxStream；极致精简可用 futures-core + futures-util |
 | HTTP | `reqwest` | **仅 `providers-http` feature 下**，核心库不依赖 |
-| 异步 trait | `async-trait` | **取决于一期是否支持动态工具注册**：静态工具可用原生 async fn in trait（edition 2024）；动态扩展则显式 boxed future 或保留 |
+| 异步 trait | `async-trait` | 动态工具注册（`Vec<Arc<dyn Tool>>`）需对象安全，原生 async fn in trait（edition 2024）在 `dyn` 下不对象安全，故采用 async-trait |
+| CLI | `clap` | 015 CLI 独立运行（交互式 REPL + `--acp` 模式） |
 
-**刻意不引入**：`pin-project-lite`（仅手写 Stream/Future 状态机时再加）、schemars/jsonschema（二期）、clap（二期可选）、workspace 多 crate。
+**刻意不引入**：`pin-project-lite`（仅手写 Stream/Future 状态机时再加）、schemars/jsonschema（后续，见 roadmap）、workspace 多 crate。
 
 ## 6. 一期范围与里程碑
 
@@ -278,23 +303,32 @@ loop {
 | 003 | Runtime 执行引擎（单 writer loop + LoopConfig + fake provider） | core/runtime.rs, core/provider.rs |
 | 004 | 最小 Echo Agent（端到端） | core/tool.rs, src/bin/main.rs, tests/ |
 
-**二期（稳定接口之外）**：Session 树 / JSONL 崩溃恢复 / 上下文摘要 / 插件与远程协议 / deferred tools。
+**二期~五期交付**（005–018，已全部实现+审查通过+四门禁全绿；权威索引见 `TASK_BOARD.md`）：
 
-一期验收：`cargo check` / `cargo clippy -D warnings` / `cargo test` / `cargo fmt --check` 四门全绿。
+| 期 | 任务 | 内容摘要 |
+|----|------|----------|
+| 二期 | 005 / 006 | 内置文件工具 read/write/edit + bash + file_mutation_queue（同文件写串行化） |
+| 二期 | 007 / 008 | adapters（OpenAI/Anthropic，reqwest feature-gated）+ Compactor 摘要压缩 |
+| 二期 | 009 / 010 / 011 | Session 树 + JSONL 崩溃恢复；远程协议 NDJSON 双向流；DeferredTool 惰性加载 |
+| 三期 | 012 / 013 / 014 / 015 | 多 lane session；Agent Server；ACP v1（stdio）；CLI（clap） |
+| 四期 | 016 / 017-a/b/c | 插件机制 Plugin Registry；并发安全/恢复语义/锁纪律技术债收尾 |
+| 五期 | 018 | server/lane.rs 超限拆分（纯重组，零行为变化） |
 
-## 7. 三期：多 client / 多 lane / ACP / CLI（2026-09-01 规划）
+验收：每任务 `cargo check` / `cargo clippy -D warnings` / `cargo test` / `cargo fmt --check` 四门全绿。
 
-> 依据 PM 定稿意见：需要多 client、多 lane session、CLI 独立运行、ACP 支持；插件机制延后（011 deferred tools 已为其前置）。
+## 7. 三期：多 client / 多 lane / ACP / CLI（已交付）
+
+> 依据 PM 定稿意见：需要多 client、多 lane session、CLI 独立运行、ACP 支持；插件机制由四期 016 交付（011 deferred tools 为其前置）。
 
 ### 7.1 分层
 
 ```
 ┌─ CLI (015) ───────────────────┐   ┌─ 外部编辑器/客户端 ────────┐
-│ 交互式 REPL / --acp 模式       │   │ ACP client（stdio / SSE）   │
+│ 交互式 REPL / --acp 模式       │   │ ACP client（stdio）          │
 └────────────┬──────────────────┘   └────────────┬───────────────┘
              │                                   │
              ▼                                   ▼
-          ACP 适配 (014)  ← JSON-RPC 2.0：stdio（本地 1:1）、SSE+HTTP（远程多 client）
+          ACP 适配 (014)  ← JSON-RPC 2.0：stdio（本地 1:1）；SSE 为存根（见 roadmap）
              │
              ▼
           Agent Server (013)  ← 多 session 注册表 + 多 lane 调度（transport 无关核心）
@@ -305,8 +339,10 @@ loop {
 
 ### 7.2 关键决策
 
-- **ACP 为三期对外标准协议**（Agent Client Protocol v1，JSON-RPC 2.0）：本地 stdio（1 进程 = 1 client）、远程 SSE+HTTP（多 client）。多 client 由「013 多 session 核心 + 014 ACP 远程 transport」共同交付。
+- **ACP 为三期对外标准协议**（Agent Client Protocol v1，JSON-RPC 2.0）：本地 stdio（1 进程 = 1 client）。远程 SSE/HTTP 多 client 的 `serve_sse` 为存根（014），补齐见 roadmap 候选 1。
 - **010 远程协议保持单连接**：不扩展多 client（避免与 ACP 双协议漂移）；需要多 client 走 ACP；010 仍用于轻量单连接场景。
 - **多 lane = 每 lane 一个写游标**（`LaneWriter`）+ 共享 append 串行化的 `SharedSessionStorage`（012），**仅进程内多 lane**；跨进程多写者（文件锁）仍不在范围（009/006 已声明）。
-- **插件机制延后**：012–015 均不涉插件；011 deferred tools（schema 与执行体分离）为未来插件注册表前置。
+- **插件机制（四期 016）**：`Plugin` trait + `PluginRegistry`（std RwLock 确定性组装）+ `PluginTool`（`tokio::sync::OnceCell` 异步惰性实例化，失败不缓存可重试）。边界排除：动态库 dlopen、Agent 插件、生命周期钩子、跨进程加载（见 roadmap）。
 - **CLI 复用嵌入库**：015 走 clap + 013 AgentServer + 007 adapters + 005/006 tools 装配真实 agent，验证「Embeddable + 可独立运行」双目标。
+- **四期技术债收尾**：017-a 会话存储并发安全加固；017-b 多 lane 恢复语义 + 工作目录隔离；017-c 锁纪律（插件锁/锁表驱逐/测试拆分）。
+- **五期收尾**：018 将 `server/lane.rs`（420 行超 400 上限）纯重组拆分为 lane/lane_ops/lane_recovery，零行为变化。
