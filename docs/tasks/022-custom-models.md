@@ -80,12 +80,12 @@ pub fn build_provider(config: &ModelConfig, api_key: &str)
 
 ### 4. CLI 参数扩展（src/bin/guigu/cli.rs + assemble.rs）
 
-在 015 既有参数上追加：
+在 015 + 026 既有参数上追加：
 
 | 参数 | 说明 |
 |------|------|
 | `--config <FILE>` | 配置文件路径（缺省走 `resolve` 查找链） |
-| `--base-url <URL>` | 内联端点覆盖（配合 `-p` + 内联 `-m` 场景） |
+| `--base-url <URL>` | 内联端点覆盖（**已由 026 落地**，本任务复用，不重复新增） |
 | `--api-key-env <VAR>` | 内联指定 key 来源 env（配合内联 `-m` 场景，可选） |
 
 `-m/--model` 语义扩展（向后兼容）：
@@ -124,7 +124,7 @@ toml = { version = "0.8", optional = true }   # feature-gated（PM 签核）
 - src/config.rs（`ModelConfig`/`Protocol`/`GuiguConfig`/`ProviderConfigError` 不 gate + `load`/`resolve` `#[cfg(feature="config")]` + api_key 解析 + 单元测试）
 - src/adapters/factory.rs（`build_provider`，`#[cfg(feature="providers-http")]` + 单元测试）
 - src/lib.rs（re-export `config` 模块；factory 在 `#[cfg(feature="providers-http")]` 下 re-export）
-- src/bin/guigu/cli.rs（新增 `--config`/`--base-url`/`--api-key-env` 参数）
+- src/bin/guigu/cli.rs（新增 `--config`/`--api-key-env` 参数；`--base-url` 已由 026 落地，本任务复用）
 - src/bin/guigu/assemble.rs（选 provider 逻辑改为「配置优先、内联回退」）
 - Cargo.toml（新增 `toml`）
 - tests/config.rs（配置解析/工厂构建集成测试；工厂端到端可用 wiremock 验证 `base_url` 生效，复用 007 测试模式）
@@ -149,3 +149,4 @@ toml = { version = "0.8", optional = true }   # feature-gated（PM 签核）
 
 - v1.0（2026-09-06，Architect）：初稿。`ModelConfig`/`Protocol`/`GuiguConfig` serde 反序列化 + `ProviderFactory`（复用 007 adapter）+ CLI `--config`/`--base-url`/`--api-key-env` + `-m` 语义扩展（配置名优先）；`toml` 为普通依赖（配置解析与 HTTP 无关）；api_key 四段解析链；边界排除新协议 adapter / 全局 config 合并 / 多模型路由 / key 加密。
 - v1.1（2026-09-06，Architect，依据 PM 签核）：① 自定义模型边界确认**方案 B**（`--base-url` + TOML profile + `api_key` 可选），本规格 scope 即方案 B，无新增/缩减；② `toml` 由「普通依赖」改为 **optional + `config` feature（default 开启）**——feature 边界：数据结构（serde）不 gate、`Config::load`/`resolve`（TOML 解析）gate 在 `config`、`ProviderFactory` gate 在 `providers-http`；新增 `--no-default-features` 剥离验证。
+- v1.2（2026-09-06，Architect，协调 026）：026 草稿已含 `--base-url` 全局参数 + `build_provider` 内联透传，现纳入 026 范围（内联端点覆盖）。本规格「新增 `--base-url`」改为「复用 026 已落地」；本任务仍负责完整配置化（`--config`/`--api-key-env` + TOML 配置 + `ProviderFactory` + `-m` 语义扩展 + api_key 四段链），scope 不减。

@@ -60,7 +60,7 @@
 
 实施顺序：026（独立，不依赖 022/024/025，PM 定序提前）
 
-- [ ] 026 — CLI 自定义 system prompt + 默认身份鬼谷子（`--system-prompt` 全局参数 + `DEFAULT_SYSTEM_PROMPT` 改鬼谷子 + `resolve_system_prompt` 缺省回退 + assemble/build_server 透传 `AgentConfig.system_prompt`；单测参数解析+缺省回退；不改 ACP、不做配置文件加载）
+- [ ] 026 — CLI 自定义 system prompt + 默认身份鬼谷子 + 内联 base_url 端点覆盖（`--system-prompt` + `--base-url` 全局参数 + `DEFAULT_SYSTEM_PROMPT` 改鬼谷子 + `resolve_system_prompt` 缺省回退 + assemble/build_server 透传 `AgentConfig.system_prompt` + build_provider 透传 adapter `base_url`；单测参数解析+缺省回退；不改 ACP、不做配置文件加载；base_url 仅内联透传，完整配置化属 022）
 
 ## 八期 Backlog（持久化 lane head + ACP SSE/HTTP 远程多 client）
 
@@ -73,7 +73,7 @@
 
 实施顺序：022 → 023（023 依赖 022 的配置能力）
 
-- [ ] 022 — 自定义模型配置化接入（方案 B：--base-url + TOML profile + api_key 可选；ModelConfig + ProviderFactory + CLI --config/--base-url/--api-key-env + -m 配置名优先；toml optional → config feature default）
+- [ ] 022 — 自定义模型配置化接入（方案 B：--base-url + TOML profile + api_key 可选；ModelConfig + ProviderFactory + CLI --config/--api-key-env + -m 配置名优先；toml optional → config feature default；⚠ `--base-url` 已由 026 落地，022 复用不重复新增）
 - [ ] 023 — TUI 模式（guigu tui 子命令 + 非默认 tui feature；ratatui+crossterm 全屏 UI：状态栏/对话区/输入框，复用 022+013+assemble）
 
 ## 下一步候选（待 PM 定序，见 docs/roadmap.md）
@@ -131,3 +131,4 @@
 - 八期 PM 签核（2026-09-06，Architect，响应 PM 三项决策，同步修订 022 v1.1 / 023 v1.1）：① 自定义模型边界采纳**方案 B**（`--base-url` + TOML profile + `api_key` 可选）＝ 022 现有 scope 确认；② 新依赖 `toml`/`ratatui`/`crossterm` 均 **feature-gated** 引入——`toml` 门控为 `config` feature（**default 开启**：toml 极轻 + CLI 开箱即用 + default test 覆盖），`ratatui`/`crossterm` 门控为 `tui` feature（**非默认 opt-in**：编译面大、default 精简、显式 `--features tui`）；③ TUI 形态 = `guigu tui` 子命令 + 非默认 `tui` feature。`default` 终态 = `["providers-http", "config"]`。roadmap 候选仍待 PM 定序，未立项
 - 九期重排（2026-09-06，Architect，响应 PM「批准 feature-gated + 024/025 插到 022/023 之前」）：**期序重排**——八期改回 024/025（持久化 lane head + ACP SSE/HTTP 远程多 client），九期为 022/023（自定义模型 + TUI）；实施顺序 **024 → 025 → 022 → 023**（任务号不变，仅期序/实施顺序调整）。**025 立项 + 规格 v1.0 已就绪**（docs/tasks/025-acp-sse-http.md）：`axum`+`tokio-stream` feature-gated 在既有 `acp-sse`（**非 default**，PM 签核「批准 feature-gated」），`reqwest` 仅 dev-dep；permission mode 由 014 单全局修正为 per-session（多 client 串扰修复）。024 规格 v1.0 已就绪（上一 commit c578a57）。「下一步候选」段移除已立项的 lane head / ACP SSE/HTTP，剩 schemars / Agent 插件 / 跨进程锁三条
 - 026 立项（2026-09-06，Architect，依据 PM「简单任务优先级提前」）：CLI 自定义 system prompt + 默认身份改鬼谷子，正式化 `~/guigu-ms` 未提交草稿（`--system-prompt` 全局参数 + assemble 透传 `AgentConfig.system_prompt`）；独立于 022/024/025，期序插到八期之前。⚠ 草稿在 `~/guigu-ms`（与规范仓库 `/home/fhy/guigu/` 两份拷贝），Developer 落地目标仓库以 PM 确认为准
+- 026 规格 v1.1（2026-09-06，Architect，依据 PM「迁回这 2 个 src 改动」授权）：核对 `~/guigu-ms` 草稿实际内容发现 `cli.rs` 同时含 `--base-url` 全局参数、`assemble.rs` 同时含 `build_provider` 的 `base_url` 透传——与 v1.0 边界「不涉及 base_url」冲突。故 026 范围扩展为「system prompt 自定义 + 内联 base_url 端点覆盖」，正式化草稿全量两文件改动。分工：026 只做内联 `--base-url` 简单透传（复用 007 既有 `base_url` 字段），022 做完整配置化（TOML/工厂/-m 扩展/api_key 四段链）并复用 026 已落地的 `--base-url`。022 规格同步 v1.2 修订「新增 --base-url」为「复用」。
