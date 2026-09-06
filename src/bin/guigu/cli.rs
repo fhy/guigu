@@ -42,6 +42,14 @@ pub struct Cli {
     /// provider API key（缺省读 env：OPENAI_API_KEY / ANTHROPIC_API_KEY）。
     #[arg(short, long, global = true)]
     pub api_key: Option<String>,
+
+    /// 自定义 system prompt（缺省使用鬼谷子默认身份）。
+    #[arg(long, global = true, value_name = "TEXT")]
+    pub system_prompt: Option<String>,
+
+    /// 覆盖 provider 的 base URL（如 ModelScope/本地网关）。
+    #[arg(long, global = true, value_name = "URL")]
+    pub base_url: Option<String>,
 }
 
 /// 子命令。
@@ -91,5 +99,50 @@ impl Provider {
             Provider::Anthropic => "claude-3-5-sonnet-20241022",
             Provider::Fake => "fake-model",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_system_prompt_before_subcommand() {
+        let cli = Cli::try_parse_from(["guigu", "--system-prompt", "你是鬼谷子", "acp"]).unwrap();
+        assert_eq!(cli.system_prompt.as_deref(), Some("你是鬼谷子"));
+    }
+
+    #[test]
+    fn parse_system_prompt_after_subcommand() {
+        // global = true：subcommand 后同样生效。
+        let cli = Cli::try_parse_from(["guigu", "acp", "--system-prompt", "你是鬼谷子"]).unwrap();
+        assert_eq!(cli.system_prompt.as_deref(), Some("你是鬼谷子"));
+    }
+
+    #[test]
+    fn parse_system_prompt_absent_is_none() {
+        let cli = Cli::try_parse_from(["guigu", "acp"]).unwrap();
+        assert_eq!(cli.system_prompt, None);
+    }
+
+    #[test]
+    fn parse_base_url_before_subcommand() {
+        let cli = Cli::try_parse_from(["guigu", "--base-url", "http://localhost:11434/v1", "acp"])
+            .unwrap();
+        assert_eq!(cli.base_url.as_deref(), Some("http://localhost:11434/v1"));
+    }
+
+    #[test]
+    fn parse_base_url_after_subcommand() {
+        // global = true：subcommand 后同样生效。
+        let cli = Cli::try_parse_from(["guigu", "acp", "--base-url", "http://localhost:11434/v1"])
+            .unwrap();
+        assert_eq!(cli.base_url.as_deref(), Some("http://localhost:11434/v1"));
+    }
+
+    #[test]
+    fn parse_base_url_absent_is_none() {
+        let cli = Cli::try_parse_from(["guigu", "acp"]).unwrap();
+        assert_eq!(cli.base_url, None);
     }
 }

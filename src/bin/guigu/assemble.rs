@@ -30,12 +30,22 @@ use super::cli::{Cli, Provider};
 use super::error::CliError;
 use super::fake::FakeProvider;
 
-/// 默认 system prompt。
-const SYSTEM_PROMPT: &str = "You are guigu, a helpful coding assistant.";
+/// 缺省 system prompt：鬼谷子（Guiguzi）AI 编程助手身份。
+pub const DEFAULT_SYSTEM_PROMPT: &str = "你是鬼谷子（Guiguzi），鬼谷子 AI 编程助手。\
+你精通 Rust、分布式系统与高并发架构，以简洁、严谨、直接的方式协助用户分析问题、\
+设计架构、编写与审查代码。";
 /// 默认 lane id（REPL 单 lane）。
 pub const DEFAULT_LANE: &str = "default";
 /// 默认上下文窗口（token）。
 const DEFAULT_CONTEXT_WINDOW: u32 = 8192;
+
+/// 解析最终 system prompt：优先用自定义文案，缺省回退到 [`DEFAULT_SYSTEM_PROMPT`]。
+///
+/// 纯函数，无失败路径；在 CLI 入口一处调用一次，得到具体 `String` 后传给
+/// `assemble` / `build_server`（不重复做回退）。
+pub fn resolve_system_prompt(custom: Option<String>) -> String {
+    custom.unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string())
+}
 
 /// 装配产物：server + 存储目录（REPL 建 session 用）。
 pub struct Assembled {
@@ -46,8 +56,11 @@ pub struct Assembled {
 }
 
 /// 装配 server（cwd / provider / 工具 / 工厂）。REPL 与 ACP 共用。
-pub fn assemble(cli: &Cli) -> Result<Assembled, CliError> {
-    // 1. 选 provider（读 --api-key / env）。
+///
+/// `system_prompt` 为**已解析**的最终文案（入口经 [`resolve_system_prompt`] 回退
+/// 鬼谷子默认身份后传入），本函数不重复做回退。
+pub fn assemble(cli: &Cli, system_prompt: String) -> Result<Assembled, CliError> {
+    // 1. 选 provider（读 --api-key / env / --base-url）。
     let provider = build_provider(cli)?;
     let model = cli
         .model
@@ -61,7 +74,7 @@ pub fn assemble(cli: &Cli) -> Result<Assembled, CliError> {
 
     // 3. server + 工厂。
     let log_dir = resolve_log_dir(&cli.log)?;
-    let server = build_server(provider, model, tools, log_dir.clone());
+    let server = build_server(provider, model, tools, log_dir.clone(), system_prompt);
 
     Ok(Assembled { server, log_dir })
 }
@@ -125,9 +138,20 @@ fn build_provider(cli: &Cli) -> Result<Arc<dyn ModelProvider>, CliError> {
             provider: cli.provider.name().to_string(),
             env,
         })?;
+    // --base-url 内联端点覆盖：None → 协议默认端点（007 既有语义）；Some → 写入
+    // adapter config。仅复用 007 既有 base_url 字段，不新增 HTTP 逻辑。
+    let base_url = cli.base_url.clone();
     match cli.provider {
-        Provider::Openai => Ok(Arc::new(OpenAiProvider::new(OpenAiConfig::new(key))?)),
-        Provider::Anthropic => Ok(Arc::new(AnthropicProvider::new(AnthropicConfig::new(key))?)),
+        Provider::Openai => {
+            let mut config = OpenAiConfig::new(key);
+            config.base_url = base_url;
+            Ok(Arc::new(OpenAiProvider::new(config)?))
+        }
+        Provider::Anthropic => {
+            let mut config = AnthropicConfig::new(key);
+            config.base_url = base_url;
+            Ok(Arc::new(AnthropicProvider::new(config)?))
+        }
         // 防御分支：上方已对 Fake 早退，此处仅为穷尽 match（不 panic）。
         Provider::Fake => Ok(Arc::new(FakeProvider)),
     }
@@ -148,17 +172,20 @@ fn build_tools(work_dir: Option<PathBuf>) -> Vec<Arc<dyn Tool>> {
 }
 
 /// 建 server 并配置 runtime / storage 工厂。
+///
+/// `system_prompt` 为已解析的最终文案（见 [`assemble`]），注入 `AgentConfig`。
 fn build_server(
     provider: Arc<dyn ModelProvider>,
     model: String,
     tools: Vec<Arc<dyn Tool>>,
     log_dir: PathBuf,
+    system_prompt: String,
 ) -> AgentServer {
     let server = AgentServer::new();
     server.with_runtime_factory(move || {
         (
             AgentConfig {
-                system_prompt: SYSTEM_PROMPT.to_string(),
+                system_prompt: system_prompt.clone(),
                 model: Some(model.clone()),
                 thinking_level: ThinkingLevel::Off,
             },
@@ -259,4 +286,91 @@ impl SessionStorage for FailingStorage {
 
 fn io_other(reason: String) -> SessionError {
     SessionError::Io(std::io::Error::other(reason))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::Command;
+    use std::sync::Arc;
+
+    #[test]
+    fn resolve_system_prompt_none_falls_back_to_default() {
+        assert_eq!(resolve_system_prompt(None), DEFAULT_SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn resolve_system_prompt_some_uses_custom() {
+        assert_eq!(resolve_system_prompt(Some("自定义".to_string())), "自定义");
+    }
+
+    /// 离线装配验证：自定义 system_prompt 经 assemble → AgentConfig → snapshot 生效。
+    #[tokio::test]
+    async fn assemble_injects_custom_system_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = Cli {
+            command: Some(Command::Acp),
+            model: None,
+            provider: Provider::Fake,
+            session: None,
+            cwd: None,
+            log: Some(dir.path().to_path_buf()),
+            api_key: None,
+            base_url: None,
+            system_prompt: Some("自定义身份".to_string()),
+        };
+        let prompt = resolve_system_prompt(cli.system_prompt.clone());
+        let assembled = assemble(&cli, prompt).unwrap();
+        let storage = JsonlSessionStorage::open(dir.path().join("t.jsonl"), "t")
+            .await
+            .unwrap();
+        assembled
+            .server
+            .create_session("t".to_string(), Arc::new(storage))
+            .await
+            .unwrap();
+        assembled
+            .server
+            .spawn_lane_from_factory("t", DEFAULT_LANE)
+            .await
+            .unwrap();
+        let snap = assembled.server.snapshot("t", DEFAULT_LANE).await.unwrap();
+        assert_eq!(snap.system_prompt, "自定义身份");
+        assembled.server.shutdown().await.unwrap();
+    }
+
+    /// 离线装配验证：缺省（不传 --system-prompt）回退到鬼谷子默认身份。
+    #[tokio::test]
+    async fn assemble_injects_default_system_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = Cli {
+            command: Some(Command::Acp),
+            model: None,
+            provider: Provider::Fake,
+            session: None,
+            cwd: None,
+            log: Some(dir.path().to_path_buf()),
+            api_key: None,
+            base_url: None,
+            system_prompt: None,
+        };
+        let prompt = resolve_system_prompt(cli.system_prompt.clone());
+        let assembled = assemble(&cli, prompt).unwrap();
+        let storage = JsonlSessionStorage::open(dir.path().join("t.jsonl"), "t")
+            .await
+            .unwrap();
+        assembled
+            .server
+            .create_session("t".to_string(), Arc::new(storage))
+            .await
+            .unwrap();
+        assembled
+            .server
+            .spawn_lane_from_factory("t", DEFAULT_LANE)
+            .await
+            .unwrap();
+        let snap = assembled.server.snapshot("t", DEFAULT_LANE).await.unwrap();
+        assert_eq!(snap.system_prompt, DEFAULT_SYSTEM_PROMPT);
+        assembled.server.shutdown().await.unwrap();
+    }
 }

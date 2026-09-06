@@ -43,15 +43,17 @@ async fn main() -> ExitCode {
 /// CLI 主体：解析参数 → dispatch 到 REPL / ACP 模式。
 async fn run() -> Result<(), CliError> {
     let cli = Cli::parse();
+    // 入口一处解析 system prompt（缺省回退鬼谷子默认身份），再传给 assemble。
+    let system_prompt = assemble::resolve_system_prompt(cli.system_prompt.clone());
 
     match cli.command {
         Some(Command::Acp) => {
-            let assembled = assemble::assemble(&cli)?;
+            let assembled = assemble::assemble(&cli, system_prompt)?;
             acp::run_acp(assembled.server).await
         }
         // `run` 显式或省略（默认）都走交互式 REPL。
         Some(Command::Run) | None => {
-            let assembled = assemble::assemble(&cli)?;
+            let assembled = assemble::assemble(&cli, system_prompt)?;
             let session_id = assemble::setup_session(&assembled, &cli).await?;
             repl::run_repl(assembled.server, &session_id, assemble::DEFAULT_LANE).await
         }
