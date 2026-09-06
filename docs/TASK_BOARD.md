@@ -63,13 +63,17 @@
 - [ ] 022 — 自定义模型配置化接入（方案 B：--base-url + TOML profile + api_key 可选；ModelConfig + ProviderFactory + CLI --config/--base-url/--api-key-env + -m 配置名优先；toml optional → config feature default）
 - [ ] 023 — TUI 模式（guigu tui 子命令 + 非默认 tui feature；ratatui+crossterm 全屏 UI：状态栏/对话区/输入框，复用 022+013+assemble）
 
+## 九期 Backlog（候选立项，PM 定序：持久化 lane head 优先，ACP SSE/HTTP 次之）
+
+- [ ] 024 — 持久化 lane head / 活动分支元数据（候选 #2，015 r2 遗留，无新依赖；规格 v1.0 已就绪）
+- 025 — ACP SSE/HTTP 远程多 client（候选 #1，014 存根 acp-sse；待 PM 拍板新依赖 axum 后出规格）
+
 ## 下一步候选（待 PM 定序，见 docs/roadmap.md）
 
-1. ACP SSE/HTTP 远程多 client（014 存根 acp-sse）
-2. 持久化 lane head / 活动分支元数据（015 r2 遗留）
-3. schemars 强类型工具参数（架构 §3.4 预留）
-4. Agent 插件 / 生命周期钩子（016 排除项）
-5. 跨进程会话锁 / 多写者文件锁（006/012 声明边界）
+1. ACP SSE/HTTP 远程多 client（014 存根 acp-sse，需新依赖 axum 拍板）← PM 定序第二优先，拍板后立项 025
+2. schemars 强类型工具参数（架构 §3.4 预留）
+3. Agent 插件 / 生命周期钩子（016 排除项）
+4. 跨进程会话锁 / 多写者文件锁（006/012 声明边界）
 
 ## 备注
 

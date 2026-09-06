@@ -3,19 +3,19 @@
 > 状态：候选方向清单（待 PM 定序，未立项）
 > 依据：各任务审查遗留项 + 架构预留 + 已声明边界
 
-以下为下一阶段候选方向，每条含：**动机**（引用遗留来源）+ **大致范围** + **新依赖/风险**。排序不代表优先级，PM 定序后由 Architect 立项出规格。
+以下为下一阶段候选方向，每条含：**动机**（引用遗留来源）+ **大致范围** + **新依赖/风险**。优先级已由 PM 定序（2026-09-06）：② 持久化 lane head 优先，① ACP SSE/HTTP 次之，③④⑤ 保持原序；Architect 据此立项出规格。
 
-## 1. ACP SSE/HTTP 远程多 client
+## 1. 持久化 lane head / 活动分支元数据
+
+- **动机**：015 r2 遗留——当前以「最大 NodeId」推断活动叶，单 lane 边界成立，多 lane fork 场景无法表达真正活动 lane（真实功能缺口）。
+- **范围**：持久化 lane head（活动分支指针）或让恢复 API 显式接收目标 head，替代「最大 NodeId」推断。
+- **依赖/风险**：触及 009 session 存储 schema 与 012/013 lane 恢复语义，需向后兼容既有 JSONL 文件；无新依赖。
+
+## 2. ACP SSE/HTTP 远程多 client
 
 - **动机**：014 将 `acp-sse` 降级为存根（`serve_sse`），当前 ACP 仅支持本地 stdio（1 进程 = 1 client）。补齐后支撑编辑器远程多 client。
 - **范围**：实现 ACP 的 SSE + HTTP transport，复用 013 多 session 核心，远程多 client 并发接入。
 - **依赖/风险**：需引入 `axum`（HTTP server）+ 可能 `reqwest`/SSE 客户端，属**新依赖，需 PM 拍板**；涉及连接生命周期、认证、多 client 会话隔离。
-
-## 2. 持久化 lane head / 活动分支元数据
-
-- **动机**：015 r2 遗留——当前以「最大 NodeId」推断活动叶，单 lane 边界成立，多 lane fork 场景无法表达真正活动 lane（真实功能缺口）。
-- **范围**：持久化 lane head（活动分支指针）或让恢复 API 显式接收目标 head，替代「最大 NodeId」推断。
-- **依赖/风险**：触及 009 session 存储 schema 与 012/013 lane 恢复语义，需向后兼容既有 JSONL 文件。
 
 ## 3. schemars 强类型工具参数
 
