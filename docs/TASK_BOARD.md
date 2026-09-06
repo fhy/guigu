@@ -50,7 +50,7 @@
 实施顺序：020 → 019（文档先行，发布含文档）
 
 - [ ] 020 — 架构文档同步到 v0.1.0 终态（architecture.md 填日期/补目录/补里程碑/订正状态 + 新增 roadmap.md）
-- [ ] 019 — 发布 v0.1.0（README/CHANGELOG/LICENSE + Cargo.toml 元数据 + annotated tag + cargo package 验证，不实际 publish）
+- [~] 019 — 发布 v0.1.0（README/CHANGELOG/LICENSE + Cargo.toml 元数据 + annotated tag + cargo package 验证，不实际 publish）
 
 ## 下一步候选（待 PM 定序，见 docs/roadmap.md）
 
@@ -100,3 +100,4 @@
 - 五期启动（2026-09-06，Architect）：018 承接 017-b r2 技术债（`src/server/lane.rs` 420 行超 400 上限），纯重组拆分（恢复事务逻辑 + 共享 helper 独立成模块），零行为变化、不改公开契约。规格 v1.0（docs/tasks/018-lane-split.md）已就绪，建议命名仅为占位，Developer 依据实际代码结构定夺最终模块边界
 - 018 复核（2026-09-06，Architect）：实现已合并（eee2de9），lane.rs 拆为 lane.rs(249)/lane_recovery.rs(192)/lane_ops.rs(136)，均 ≤400 行，符合目标；018-review-r1 代码审查通过（零破坏、无 unwrap、边界干净）。四门禁已由 Reviewer 在工具链环境补跑全绿（cargo check ✓ / clippy --all-targets ✓ / test --all-targets 398 passed / fmt ✓，见 ce76d37 实测复核），`docs/reviews/018-review-r1.md` 已落库。故 018 由 [~] 转 [x] 关闭。五期 Backlog（018）至此全部完成，既定范围（002~018）实现+审查+门禁全部闭环，后续方向待 PM 定序
 - 六期启动（2026-09-06，Architect，依据 PM「发布首个版本 + 完善文档 + 下一步规划」）：**020** 架构文档同步（architecture.md 终态 + roadmap.md）→ **019** 发布 v0.1.0（README/CHANGELOG/LICENSE + Cargo.toml 元数据 + annotated tag + cargo package，不实际 publish）。规格 v1.0 已就绪（docs/tasks/019/020）。⚠ 019 触及根文件（README/CHANGELOG/LICENSE）与 Cargo.toml，均不在 conventions 三方目录内，需 PM 授权归属（默认：Architect 写根文档 + Developer 改 Cargo.toml + PM 打 tag/发布）。下一步候选 5 条见「下一步候选」段，待 PM 定序后立项
+- 019 用户文档交付（2026-09-06，Architect，依据 PM「授权你发布版本 + 创建用户文档」）：PM 已授权根文件归属。Architect 已交付三份根文档（override 提交）：**README.md**（简介/特性/安装/feature flags 表/库用法+CLI 快速开始/架构链接/MIT）、**CHANGELOG.md**（v0.1.0 按能力分组覆盖 002–018）、**LICENSE**（MIT 全文，与 Cargo.toml `license="MIT"` 一致）。README 中库用法示例为「生命周期示意」（未逐字绑定构造器签名，因 Architect 不读 src/），标注以 tests/ 与 architecture.md §3 为权威。**剩余（非 Architect 职责）**：① Developer 补 Cargo.toml 元数据（`readme`/`keywords`/`categories`）；② PM 打 annotated tag `v0.1.0`；③ `cargo package --list` 验证。⚠ LICENSE 版权行暂写「guigu contributors」，若需实名请 PM 指定后修订
