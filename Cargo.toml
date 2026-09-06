@@ -9,6 +9,14 @@ repository = "https://github.com/fhy/guigu"
 readme = "README.md"
 keywords = ["ai-agent", "agent", "llm", "async", "runtime"]
 categories = ["asynchronous", "command-line-utilities", "network-programming"]
+# 发布包只含运行/构建所需文件；排除 docs/（内部任务板、审查报告等开发文档）。
+include = [
+    "src/",
+    "tests/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+]
 
 [features]
 default = ["providers-http"]
