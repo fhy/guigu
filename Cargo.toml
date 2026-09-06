@@ -10,12 +10,14 @@ readme = "README.md"
 keywords = ["ai-agent", "agent", "llm", "async", "runtime"]
 categories = ["asynchronous", "command-line-utilities", "network-programming"]
 # 发布包只含运行/构建所需文件；排除 docs/（内部任务板、审查报告等开发文档）。
+# 模式加前导 / 锚定到包根目录：Cargo 的 include glob 默认在任意深度匹配，
+# 不加 / 会误收 .opencode/node_modules/*/src|tests|README|LICENSE|CHANGELOG。
 include = [
-    "src/",
-    "tests/",
-    "README.md",
-    "LICENSE",
-    "CHANGELOG.md",
+    "/src/",
+    "/tests/",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
 ]
 
 [features]
