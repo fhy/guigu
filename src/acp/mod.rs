@@ -25,6 +25,13 @@ mod stdio_client;
 mod transport;
 mod types;
 
+/// SSE 版 `AcpClient` 实现（Task 025，feature `acp-sse`）。
+#[cfg(feature = "acp-sse")]
+mod sse_client;
+/// SSE+HTTP 传输（Task 025，feature `acp-sse`，多 client）。
+#[cfg(feature = "acp-sse")]
+mod transport_sse;
+
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -33,6 +40,8 @@ mod tests_fs;
 mod tests_mapping;
 #[cfg(test)]
 mod tests_session_load;
+#[cfg(all(test, feature = "acp-sse"))]
+mod tests_sse;
 #[cfg(test)]
 mod tests_transport;
 #[cfg(test)]

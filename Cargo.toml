@@ -23,9 +23,9 @@ include = [
 [features]
 default = ["providers-http"]
 providers-http = ["dep:reqwest"]
-# Task 014：ACP SSE+HTTP 传输（多 client，可选加分项）。默认不含；stdio 为必做 DoD。
-# 本任务降级为后续（`serve_sse` 存根），启用后需补 axum/reqwest 依赖与实现。
-acp-sse = []
+# Task 025：ACP SSE+HTTP 传输（多 client）。默认不含（axum/tokio-stream 编译面大，
+# 保持 default 精简）；需要远程多 client 时显式 `--features acp-sse`。
+acp-sse = ["dep:axum", "dep:tokio-stream"]
 
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
@@ -42,12 +42,21 @@ clap = { version = "4", features = ["derive"] }
 # 嵌入方 `default-features = false` 可剥离 reqwest，得到纯核心库。
 # 本构建环境无 OpenSSL 头文件，故用 rustls（纯 Rust）替代默认 native-tls。
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
+# Task 025：ACP SSE+HTTP 传输（feature `acp-sse`，非 default）。axum 提供 HTTP
+# server + SSE 响应；tokio-stream 提供 mpsc → Stream 适配（axum `Sse` 需要）。
+axum = { version = "0.8", optional = true }
+tokio-stream = { version = "0.1", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
 wiremock = "0.6"
 # Task 009：session JSONL 集成测试的临时目录。
 tempfile = "3"
+# Task 025：SSE 集成测试的客户端（仅 dev，不进入运行时依赖；服务端无客户端 HTTP 需求）。
+# 同 [dependencies] 用 rustls（本环境无 OpenSSL 头文件）。
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# Task 025：SSE 流读取的字节类型（reqwest `bytes_stream` 的 item 类型；已在依赖树中）。
+bytes = "1"
 
 [[bin]]
 name = "guigu"

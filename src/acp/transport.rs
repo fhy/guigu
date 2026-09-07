@@ -20,7 +20,7 @@
 //! 模块拆分（单文件 ≤ 400 行约束）：JSON-RPC 类型 / 分类见 `jsonrpc`，
 //! `StdioClient` / `StdioConnection` 见 `stdio_client`。
 //!
-//! SSE+HTTP 为可选加分项（`acp-sse` feature），本任务降级为后续（`serve_sse` 存根）。
+//! SSE+HTTP 传输（`acp-sse` feature，多 client）见 `transport_sse`（Task 025）。
 
 use std::sync::Arc;
 
@@ -219,16 +219,4 @@ async fn teardown(
     handlers.abort_all();
     while handlers.join_next().await.is_some() {}
     let _ = writer_task.await;
-}
-
-#[cfg(feature = "acp-sse")]
-impl AcpAgent {
-    /// SSE+HTTP 传输（feature-gated，多 client）。
-    ///
-    /// 本任务降级为后续（stdio 为必做 DoD）；存根返回明确错误，不静默。
-    pub async fn serve_sse(self, _addr: std::net::SocketAddr) -> Result<(), AcpError> {
-        Err(AcpError::JsonRpc(
-            "acp-sse transport is not implemented in this phase".into(),
-        ))
-    }
 }
