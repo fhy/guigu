@@ -457,10 +457,8 @@ async fn multi_lane_fork_end_to_end() {
 
     // 建根节点，两 lane 各 fork 出分支。
     let root = shared.append(None, user_msg("root")).await.unwrap(); // 0
-    let mut lane_a =
-        LaneWriter::with_head_store(shared.clone(), "lane-a", Some(root), shared.clone());
-    let mut lane_b =
-        LaneWriter::with_head_store(shared.clone(), "lane-b", Some(root), shared.clone());
+    let mut lane_a = LaneWriter::new(shared.clone(), "lane-a", Some(root));
+    let mut lane_b = LaneWriter::new(shared.clone(), "lane-b", Some(root));
     let id_a = lane_a.append(user_msg("a")).await.unwrap(); // 1
     let id_b = lane_b.append(user_msg("b")).await.unwrap(); // 2
     assert_ne!(id_a, id_b);
@@ -481,4 +479,67 @@ async fn multi_lane_fork_end_to_end() {
     assert_eq!(path_b.len(), 2); // root + b
     assert_eq!(path_a[0], path_b[0]); // 共享根
     assert_ne!(path_a[1], path_b[1]); // 末条不同
+}
+
+// ===== Task 024 r2：空 lane / fork 后未 append 恢复 =====
+
+/// 空 lane 初始 `None` 恢复：spawn 空 lane（head = None）→ persist_head(None) →
+/// 崩溃恢复后 `load_lane_heads` 得 `lane → None`（空 lane，transcript 为空）。
+#[tokio::test]
+async fn empty_lane_none_head_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let inner = Arc::new(JsonlSessionStorage::open(&path, "s1").await.unwrap());
+    let shared = Arc::new(SharedSessionStorage::with_head_store(
+        inner.clone(),
+        inner.clone(),
+    ));
+
+    // spawn 空 lane（head = None），persist_head 落盘初始 head = None。
+    let lane = LaneWriter::new(shared.clone(), "lane-empty", None);
+    lane.persist_head().await.unwrap();
+
+    // 崩溃恢复：新建 storage 实例（重新 open 读全量）。
+    let reopened = JsonlSessionStorage::open(&path, "s1").await.unwrap();
+    let heads = reopened.load_lane_heads().await.unwrap();
+    // 空 lane：head = None（lane 已建但尚无节点）。
+    assert_eq!(heads.get("lane-empty"), Some(&None));
+    // tree 为空（无 message 节点）。
+    let tree = reopened.load().await.unwrap();
+    assert!(tree.nodes.is_empty());
+}
+
+/// fork 后尚未 append 的恢复：fork 新 lane（head = 源 head）→ persist_head →
+/// 不 append → 崩溃恢复后 `load_lane_heads` 得 `lane → 源 head`（分叉点）。
+#[tokio::test]
+async fn fork_without_append_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let inner = Arc::new(JsonlSessionStorage::open(&path, "s1").await.unwrap());
+    let shared = Arc::new(SharedSessionStorage::with_head_store(
+        inner.clone(),
+        inner.clone(),
+    ));
+
+    // 建根 + 源 lane append 一条（head = 1）。
+    let root = shared.append(None, user_msg("root")).await.unwrap(); // 0
+    let mut lane_src = LaneWriter::new(shared.clone(), "lane-src", Some(root));
+    let id_src = lane_src.append(user_msg("src")).await.unwrap(); // 1
+
+    // fork 新 lane（head = 源 head = 1），persist_head，不 append。
+    let lane_fork = LaneWriter::new(shared.clone(), "lane-fork", Some(id_src));
+    lane_fork.persist_head().await.unwrap();
+
+    // 崩溃恢复：新建 storage 实例（重新 open 读全量）。
+    let reopened = JsonlSessionStorage::open(&path, "s1").await.unwrap();
+    let heads = reopened.load_lane_heads().await.unwrap();
+    // 源 lane head = 1（append 自动落盘）；fork lane head = 1（persist_head 落盘）。
+    assert_eq!(heads.get("lane-src"), Some(&Some(id_src)));
+    assert_eq!(heads.get("lane-fork"), Some(&Some(id_src)));
+    // tree 有 2 节点（root + src），fork lane 未 append 无新节点。
+    let tree = reopened.load().await.unwrap();
+    assert_eq!(tree.nodes.len(), 2);
+    // fork lane 的 head（1）是叶节点，path_to 得完整 transcript。
+    let path_fork = tree.path_to(id_src).unwrap();
+    assert_eq!(path_fork.len(), 2); // root + src
 }

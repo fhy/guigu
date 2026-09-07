@@ -202,7 +202,12 @@ fn build_server(
             },
         )
     });
-    server.with_storage_factory(move |session_id| open_storage_sync(&log_dir, session_id));
+    // 017-a 兼容工厂：返回 `Arc<dyn SessionStorage>`（无 head 持久化）。
+    let log_dir_1 = log_dir.clone();
+    server
+        .with_storage_factory(move |session_id| open_storage_sync(&log_dir_1, session_id).storage);
+    // 024 bundle 工厂：返回 `SessionStorageBundle`（含 head 持久化，恢复入口用）。
+    server.with_storage_bundle_factory(move |session_id| open_storage_sync(&log_dir, session_id));
     server
 }
 

@@ -43,23 +43,61 @@ pub type RuntimeFactory = Arc<dyn Fn() -> (AgentConfig, AgentRuntime) + Send + S
 /// session 存储 + 可选 lane head 持久化（同一后端实例，024）。
 ///
 /// `storage` 是消息节点持久化（`SessionStorage`）；`head_store` 是 lane head 元数据
-/// 持久化（`LaneHeadStore`），通常与 `storage` 指向同一后端实例（如
+/// 持久化（`LaneHeadStore`），**须与 `storage` 指向同一后端实例**（如
 /// `JsonlSessionStorage` 同时实现两者）。`head_store = None` 表示后端不支持 lane
 /// head 持久化（行为等价 012）。
+///
+/// **一致性约束（024）**：`storage` 与 `head_store` 必须指向同一后端（同一
+/// session / 同一文件）。若任意组合两个不同后端，恢复时可能读取不属于当前树的
+/// head，产生错误或不可诊断的 `Protocol` 失败。优先用 [`SessionStorageBundle::from_backend`]
+/// 由同一具体后端统一构造（类型系统保证一致性）；`message_only` 构造无 head 持久化
+/// 的 bundle。直接初始化公开字段时须自行保证一致性。
 pub struct SessionStorageBundle {
     /// 消息节点持久化。
     pub storage: Arc<dyn SessionStorage>,
-    /// 可选 lane head 持久化（与 `storage` 通常同一实例）。
+    /// 可选 lane head 持久化（**须与 `storage` 同一后端实例**）。
     pub head_store: Option<Arc<dyn LaneHeadStore>>,
 }
 
-/// storage 工厂：transport 的 `CreateSession` 用它构造 session 存储。
+impl SessionStorageBundle {
+    /// 由同一具体后端构造（024，推荐）：`storage` 与 `head_store` 指向同一实例，
+    /// 类型系统保证一致性约束。
+    ///
+    /// `T` 须同时实现 `SessionStorage` 与 `LaneHeadStore`（如 `JsonlSessionStorage`）。
+    pub fn from_backend<T>(backend: Arc<T>) -> Self
+    where
+        T: SessionStorage + LaneHeadStore + Send + Sync + 'static,
+    {
+        Self {
+            storage: backend.clone(),
+            head_store: Some(backend),
+        }
+    }
+
+    /// 仅消息存储（无 lane head 持久化，行为等价 012）。
+    pub fn message_only(storage: Arc<dyn SessionStorage>) -> Self {
+        Self {
+            storage,
+            head_store: None,
+        }
+    }
+}
+
+/// storage 工厂（017-a 兼容契约，签名不动）：transport 的 `CreateSession` 用它
+/// 构造 session 存储。
 ///
-/// 返回 `SessionStorageBundle`（消息存储 + 可选 lane head 持久化，同一后端实例）；
-/// server 在 `create_session` / `load_session` 边界一次性包成
-/// `Arc<SharedSessionStorage>` 存入 `SessionState`，使 `LaneWriter` 类型约束
-/// （仅接受 `Arc<SharedSessionStorage>`）在 server 层成立。
-pub type StorageFactory = Arc<dyn Fn(&str) -> SessionStorageBundle + Send + Sync>;
+/// 返回 `Arc<dyn SessionStorage>`（消息存储，**无** lane head 持久化，行为等价
+/// 012）。需要 lane head 持久化时用 [`StorageBundleFactory`] /
+/// [`AgentServer::with_storage_bundle_factory`]。server 在 `create_session` /
+/// `load_session` 边界一次性包成 `Arc<SharedSessionStorage>` 存入 `SessionState`，
+/// 使 `LaneWriter` 类型约束（仅接受 `Arc<SharedSessionStorage>`）在 server 层成立。
+pub type StorageFactory = Arc<dyn Fn(&str) -> Arc<dyn SessionStorage> + Send + Sync>;
+
+/// storage bundle 工厂（024 新增）：返回消息存储 + 可选 lane head 持久化。
+///
+/// 返回 [`SessionStorageBundle`]（须同一后端实例，见其一致性约束）；供恢复入口
+/// [`AgentServer::load_and_resume_session_from_factory`] 绑定 lane head 持久化。
+pub type StorageBundleFactory = Arc<dyn Fn(&str) -> SessionStorageBundle + Send + Sync>;
 
 /// server 错误类型。
 #[derive(Debug, thiserror::Error)]
@@ -119,7 +157,10 @@ struct SessionState {
 struct ServerInner {
     sessions: Mutex<HashMap<SessionId, SessionState>>,
     runtime_factory: OnceLock<RuntimeFactory>,
+    /// 017-a 兼容工厂（返回 `Arc<dyn SessionStorage>`，无 head 持久化）。
     storage_factory: OnceLock<StorageFactory>,
+    /// 024 新增 bundle 工厂（返回 `SessionStorageBundle`，含 head 持久化）。
+    storage_bundle_factory: OnceLock<StorageBundleFactory>,
     next_session_id: AtomicU64,
 }
 
@@ -143,6 +184,7 @@ impl AgentServer {
                 sessions: Mutex::new(HashMap::new()),
                 runtime_factory: OnceLock::new(),
                 storage_factory: OnceLock::new(),
+                storage_bundle_factory: OnceLock::new(),
                 next_session_id: AtomicU64::new(1),
             }),
         }
@@ -158,16 +200,30 @@ impl AgentServer {
         let _ = self.inner.runtime_factory.set(Arc::new(factory));
     }
 
-    /// 设置 storage 工厂（transport 的 `CreateSession` 用它构造 session 存储）。
+    /// 设置 storage 工厂（017-a 兼容契约，签名不动）。
     ///
-    /// 工厂返回 `SessionStorageBundle`（消息存储 + 可选 lane head 持久化，同一后端
-    /// 实例）；server 在 `create_session` / `load_session` 边界统一包成
+    /// 工厂返回 `Arc<dyn SessionStorage>`（消息存储，**无** lane head 持久化，行为
+    /// 等价 012）；server 在 `create_session` / `load_session` 边界统一包成
     /// `Arc<SharedSessionStorage>`。仅首次生效（`OnceLock`）；重复调用忽略。
+    ///
+    /// 需要 lane head 持久化时用 [`AgentServer::with_storage_bundle_factory`]。
     pub fn with_storage_factory(
+        &self,
+        factory: impl Fn(&str) -> Arc<dyn SessionStorage> + Send + Sync + 'static,
+    ) {
+        let _ = self.inner.storage_factory.set(Arc::new(factory));
+    }
+
+    /// 设置 storage bundle 工厂（024 新增）：返回消息存储 + 可选 lane head 持久化。
+    ///
+    /// 工厂返回 [`SessionStorageBundle`]（须同一后端实例，见其一致性约束）；供恢复
+    /// 入口 [`AgentServer::load_and_resume_session_from_factory`] 绑定 lane head
+    /// 持久化。仅首次生效（`OnceLock`）；重复调用忽略。
+    pub fn with_storage_bundle_factory(
         &self,
         factory: impl Fn(&str) -> SessionStorageBundle + Send + Sync + 'static,
     ) {
-        let _ = self.inner.storage_factory.set(Arc::new(factory));
+        let _ = self.inner.storage_bundle_factory.set(Arc::new(factory));
     }
 
     /// 新建空 session；`session_id` 已存在于注册表 → `DuplicateSession`。
@@ -279,7 +335,8 @@ impl AgentServer {
 
     /// 用已配置的 storage 工厂新建 session（工厂未配置 → `Protocol` 错误）。
     ///
-    /// 工厂返回 `SessionStorageBundle`；若含 `head_store` 则绑定 lane head 持久化。
+    /// 工厂返回 `Arc<dyn SessionStorage>`（017-a 兼容，无 lane head 持久化，行为
+    /// 等价 012）。需要 lane head 持久化时用 `create_session_with_head_store`。
     pub async fn create_session_from_factory(
         &self,
         session_id: SessionId,
@@ -290,14 +347,14 @@ impl AgentServer {
             .get()
             .cloned()
             .ok_or_else(|| ServerError::Protocol("no storage factory".into()))?;
-        let bundle = factory(&session_id);
-        self.create_session_with_head_store(session_id, bundle.storage, bundle.head_store)
-            .await
+        let storage = factory(&session_id);
+        self.create_session(session_id, storage).await
     }
 
     /// 用已配置的 storage 工厂 load + 重建 session（工厂未配置 → `Protocol` 错误）。
     ///
-    /// 工厂返回 `SessionStorageBundle`；若含 `head_store` 则绑定 lane head 持久化。
+    /// 工厂返回 `Arc<dyn SessionStorage>`（017-a 兼容，无 lane head 持久化，行为
+    /// 等价 012）。需要 lane head 持久化时用 `load_session_with_head_store`。
     pub async fn load_session_from_factory(
         &self,
         session_id: SessionId,
@@ -308,9 +365,8 @@ impl AgentServer {
             .get()
             .cloned()
             .ok_or_else(|| ServerError::Protocol("no storage factory".into()))?;
-        let bundle = factory(&session_id);
-        self.load_session_with_head_store(session_id, bundle.storage, bundle.head_store)
-            .await
+        let storage = factory(&session_id);
+        self.load_session(session_id, storage).await
     }
 
     /// 用已配置的 runtime 工厂在 session 内 spawn 一个 lane（工厂未配置 → `Protocol` 错误）。

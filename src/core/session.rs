@@ -285,14 +285,18 @@ impl SessionRecorder {
 
 /// 进程内多 lane 共享的 session 写入口：串行化 `append`，委托 `inner`。
 ///
-/// 多个 lane（多个 agent run / 分支）并发写同一 session 时，`append` 经
-/// `write_lock` 互斥，保证 id 单调、落盘不交错；`load` / `next_id` 透传不串行。
+/// 多个 lane（多个 agent run / 分支）并发写同一 session 时，`append` /
+/// `append_with_head` 经 `write_lock`（写锁）互斥，保证 id 单调、落盘不交错；
+/// `snapshot` 持读锁与写互斥，得一致性快照；`load` / `next_id` 透传不串行。
 ///
 /// 边界：仅进程内多 lane（跨进程文件锁属 006/009 声明的后续）；`load` 与并发
-/// `append` 不互斥——约定 `load` 只在「无活跃 lane 写」时调用（崩溃恢复入口）。
+/// `append` 不互斥——约定 `load` 只在「无活跃 lane 写」时调用；恢复入口须用
+/// `snapshot`（持读锁，与 append 互斥）保证 tree 与 lane heads 同一日志视图。
 pub struct SharedSessionStorage {
     inner: Arc<dyn SessionStorage>,
-    write_lock: tokio::sync::Mutex<()>,
+    /// 写锁（024 由 `Mutex` 改 `RwLock`）：`append` / `append_with_head` 持写锁
+    /// （互斥），`snapshot` 持读锁（与写互斥、读读并发）。
+    write_lock: tokio::sync::RwLock<()>,
     /// 可选 lane head 持久化后端（024）：`None` 时 `LaneHeadStore` 为 no-op/空表，
     /// 行为等价 012。与 `inner` 通常指向同一后端实例（如 `JsonlSessionStorage`）。
     head_store: Option<Arc<dyn LaneHeadStore>>,
@@ -305,7 +309,7 @@ impl SharedSessionStorage {
     pub fn new(inner: Arc<dyn SessionStorage>) -> Self {
         Self {
             inner,
-            write_lock: tokio::sync::Mutex::new(()),
+            write_lock: tokio::sync::RwLock::new(()),
             head_store: None,
         }
     }
@@ -321,9 +325,47 @@ impl SharedSessionStorage {
     ) -> Self {
         Self {
             inner,
-            write_lock: tokio::sync::Mutex::new(()),
+            write_lock: tokio::sync::RwLock::new(()),
             head_store: Some(head_store),
         }
+    }
+
+    /// 组合提交（024）：在同一写锁内完成 message 追加 + 对应 lane head 落盘，
+    /// 构成原子提交单元。
+    ///
+    /// `head_store` 未绑定时等价于 `append`（仅 message）。head 写失败时整体返回
+    /// 错误——message 可能已落盘成为孤儿节点（可恢复的死分支），但调用方据此
+    /// 不推进内存 head、停止该 lane 后续写，杜绝内存与磁盘 head 分裂。
+    pub async fn append_with_head(
+        &self,
+        lane_id: &str,
+        parent_id: Option<NodeId>,
+        message: Message,
+    ) -> Result<NodeId, SessionError> {
+        // 写锁全程持有（含 inner 的 id 认领 + 落盘 + head 落盘），不跨其它 await。
+        let _guard = self.write_lock.write().await;
+        let id = self.inner.append(parent_id, message).await?;
+        if let Some(store) = &self.head_store {
+            store
+                .append_lane_head(lane_id.to_string(), Some(id))
+                .await?;
+        }
+        Ok(id)
+    }
+
+    /// 一致性快照（024）：持读锁一次读取，同时得到 tree 与 lane heads。
+    ///
+    /// 读锁与 `append` / `append_with_head` 的写锁互斥，保证 tree 与 heads 来自
+    /// 同一日志视图（避免 `load` + `load_lane_heads` 分次读取被并发 append 交错）。
+    /// `head_store` 未绑定时 heads 为空表。恢复入口（`resume_lane_from_factory` /
+    /// `load_and_resume_session_from_factory`）须用本方法而非分次 `load`。
+    pub async fn snapshot(
+        &self,
+    ) -> Result<(SessionTree, HashMap<LaneId, Option<NodeId>>), SessionError> {
+        let _guard = self.write_lock.read().await;
+        let tree = self.inner.load().await?;
+        let heads = self.load_lane_heads().await?;
+        Ok((tree, heads))
     }
 }
 
@@ -357,8 +399,8 @@ impl SessionStorage for SharedSessionStorage {
         parent_id: Option<NodeId>,
         message: Message,
     ) -> Result<NodeId, SessionError> {
-        // 串行化：锁全程持有（含 inner 的 id 认领 + 落盘），不跨其它 await。
-        let _guard = self.write_lock.lock().await;
+        // 串行化：写锁全程持有（含 inner 的 id 认领 + 落盘），不跨其它 await。
+        let _guard = self.write_lock.write().await;
         self.inner.append(parent_id, message).await
     }
 

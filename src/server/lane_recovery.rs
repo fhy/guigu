@@ -14,9 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::core::message::Message;
-use crate::core::session::{
-    LaneHeadStore, NodeId, SessionStorage, SessionTree, SharedSessionStorage,
-};
+use crate::core::session::{NodeId, SessionTree, SharedSessionStorage};
 
 use super::{AgentServer, ServerError, SessionId, SessionState};
 
@@ -60,10 +58,11 @@ impl AgentServer {
                 .storage
                 .clone()
         };
-        // load 树（锁外）。
-        let tree = storage.load().await?;
+        // 一致性快照（024）：持读锁一次得 tree + lane heads，避免分次读取被并发
+        // append 交错（tree 与 heads 来自同一日志视图）。
+        let (tree, heads) = storage.snapshot().await?;
         // 查持久化 head（024）：head: None 时优先用；无记录回退最大 NodeId 叶。
-        let persisted = storage.load_lane_heads().await?.get(lane_id).copied();
+        let persisted = heads.get(lane_id).copied();
         // 定目标 head + 叶路径 transcript（共享逻辑，非法 head → Protocol）。
         let (head, transcript) = resolve_resume_head(&tree, head, persisted)?;
         self.spawn_lane_resumed(session_id, lane_id, config, runtime, transcript, head)
@@ -92,25 +91,40 @@ impl AgentServer {
         lane_id: &str,
         head: Option<NodeId>,
     ) -> Result<(), ServerError> {
-        // 1. storage 工厂（未配置 → Protocol）。
-        let storage_factory = self
-            .inner
-            .storage_factory
-            .get()
-            .cloned()
-            .ok_or_else(|| ServerError::Protocol("no storage factory".into()))?;
-        let bundle = storage_factory(&session_id);
-        let storage = match bundle.head_store {
-            Some(head_store) => Arc::new(SharedSessionStorage::with_head_store(
-                bundle.storage,
-                head_store,
-            )),
-            None => Arc::new(SharedSessionStorage::new(bundle.storage)),
+        // 1. storage 工厂（024）：优先 bundle 工厂（含 lane head 持久化，同一后端
+        //    实例）；未设置则回退 017-a 兼容工厂（message-only，行为等价 012）；
+        //    两者都未设置 → Protocol。回退保证仅配置旧工厂的既有嵌入方恢复路径
+        //    不破坏（只是无 head 持久化）。
+        let storage = match self.inner.storage_bundle_factory.get() {
+            Some(bundle_factory) => {
+                let bundle = bundle_factory(&session_id);
+                match bundle.head_store {
+                    Some(head_store) => Arc::new(SharedSessionStorage::with_head_store(
+                        bundle.storage,
+                        head_store,
+                    )),
+                    None => Arc::new(SharedSessionStorage::new(bundle.storage)),
+                }
+            }
+            None => match self.inner.storage_factory.get() {
+                Some(factory) => {
+                    let storage = factory(&session_id);
+                    Arc::new(SharedSessionStorage::new(storage))
+                }
+                None => {
+                    return Err(ServerError::Protocol(
+                        "no storage factory (set with_storage_factory or \
+                         with_storage_bundle_factory)"
+                            .into(),
+                    ));
+                }
+            },
         };
-        // 2. load 树（锁外）。
-        let tree = storage.load().await?;
+        // 2. 一致性快照（024）：持读锁一次得 tree + lane heads，避免分次读取被
+        //    并发 append 交错（tree 与 heads 来自同一日志视图）。
+        let (tree, heads) = storage.snapshot().await?;
         // 3. 查持久化 head（024）：head: None 时优先用；无记录回退最大 NodeId 叶。
-        let persisted = storage.load_lane_heads().await?.get(lane_id).copied();
+        let persisted = heads.get(lane_id).copied();
         // 4. 定目标 head + transcript（**注册前**校验显式 head：非法 → Protocol，
         //    不注册 session）。
         let (head, transcript) = resolve_resume_head(&tree, head, persisted)?;

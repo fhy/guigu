@@ -87,18 +87,14 @@ impl AgentServer {
         };
         // 2. spawn runtime（seeded transcript，同步，不入锁）。
         let handle = AgentHandle::spawn_with_transcript(config, runtime, transcript);
-        // 3. 建 writer（head = 活动叶 / None），绑定 head 持久化（024）：
-        //    `SharedSessionStorage` 实现 `LaneHeadStore`，与 `storage` 同一实例。
-        let writer = Arc::new(Mutex::new(LaneWriter::with_head_store(
+        // 3. 建 writer（head = 活动叶 / None）。lane head 持久化由 `storage`
+        //    （`SharedSessionStorage`）的 `head_store` 统一决定（024）：绑定时
+        //    `append`/`persist_head` 落盘 head，未绑定时 no-op（行为等价 012）。
+        let writer = Arc::new(Mutex::new(LaneWriter::new(
             storage.clone(),
             lane_id.to_string(),
             head,
-            storage,
         )));
-        // 3.5 落盘初始 head（024）：spawn 后记录初始 head（幂等）。
-        if let Err(e) = writer.lock().await.persist_head().await {
-            tracing::warn!("server: lane {lane_id} persist initial head failed: {e}");
-        }
         // 4. spawn 桥接 task（先于登记订阅，保证事件不丢持久化）。
         let bridge = spawn_bridge(handle.clone(), writer.clone(), lane_id);
         // 5. 二次校验并入表（原子）：session 被并发移除（如 shutdown）或 lane 被
@@ -128,6 +124,14 @@ impl AgentServer {
         if let Some(e) = insert_err {
             Self::cleanup_handle(handle).await;
             return Err(e);
+        }
+        // 6. 落盘初始 head（024 修复）：**登记成功后**才持久化，失败请求不写 head
+        //    记录（杜绝污染正式 lane 元数据）。失败则回滚登记 + 清理 handle，返回
+        //    错误（不静默降级，调用方不被错误告知成功）。
+        if let Err(e) = writer.lock().await.persist_head().await {
+            self.remove_lane(session_id, lane_id).await;
+            Self::cleanup_handle(handle).await;
+            return Err(ServerError::Session(e));
         }
         Ok(())
     }
@@ -169,17 +173,13 @@ impl AgentServer {
         let source_head = source_writer.lock().await.head();
         // 3. spawn 新 runtime（同步，不入锁）。
         let handle = AgentHandle::spawn(config, runtime);
-        // 4. 建新 writer，fork_at 源 head（分支点），绑定 head 持久化（024）。
-        let writer = Arc::new(Mutex::new(LaneWriter::with_head_store(
+        // 4. 建新 writer，head = 源 head（分支点）。lane head 持久化由 `storage`
+        //    （`SharedSessionStorage`）的 `head_store` 统一决定（024）。
+        let writer = Arc::new(Mutex::new(LaneWriter::new(
             storage.clone(),
             new_lane.to_string(),
             source_head,
-            storage,
         )));
-        // 4.5 落盘初始 head（024）：fork 后记录初始 head（幂等）。
-        if let Err(e) = writer.lock().await.persist_head().await {
-            tracing::warn!("server: lane {new_lane} persist initial head failed: {e}");
-        }
         // 5. spawn 桥接 task（先于登记订阅，保证事件不丢持久化）。
         let bridge = spawn_bridge(handle.clone(), writer.clone(), new_lane);
         // 6. 二次校验并入表（原子）：session 被并发移除、`new_lane` 被并发登记、
@@ -212,6 +212,13 @@ impl AgentServer {
             Self::cleanup_handle(handle).await;
             return Err(e);
         }
+        // 7. 落盘初始 head（024 修复）：**登记成功后**才持久化，失败请求不写 head
+        //    记录（杜绝残留错误分叉点）。失败则回滚登记 + 清理 handle，返回错误。
+        if let Err(e) = writer.lock().await.persist_head().await {
+            self.remove_lane(session_id, new_lane).await;
+            Self::cleanup_handle(handle).await;
+            return Err(ServerError::Session(e));
+        }
         Ok(())
     }
 
@@ -220,6 +227,18 @@ impl AgentServer {
     async fn cleanup_handle(handle: AgentHandle) {
         if let Err(e) = handle.shutdown().await {
             tracing::warn!("server: failed to clean up unregistered lane handle: {e}");
+        }
+    }
+
+    /// 移除指定 lane（回滚用，024）：仅当 session 与 lane 均存在时移除。
+    ///
+    /// 用于 `persist_head` 失败后的回滚：移除刚登记的 lane（drop `LaneRuntime`，
+    /// 释放 handle/writer/bridge 引用），配合 `cleanup_handle` 显式 shutdown，保证
+    /// 「登记 + 落盘 head」要么都成功、要么都不残留。
+    async fn remove_lane(&self, session_id: &str, lane_id: &str) {
+        let mut sessions = self.inner.sessions.lock().await;
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.lanes.remove(lane_id);
         }
     }
 }

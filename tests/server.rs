@@ -18,11 +18,12 @@ use guigu::core::event::AgentEvent;
 use guigu::core::message::{Message, UserContent, UserMessage};
 use guigu::core::provider::ModelProvider;
 use guigu::core::session::{
-    NodeId, SessionEntry, SessionError, SessionStorage, SessionTree, SharedSessionStorage, reduce,
+    JsonlSessionStorage, LaneHeadStore, NodeId, SessionEntry, SessionError, SessionStorage,
+    SessionTree, SharedSessionStorage, reduce,
 };
 use guigu::core::{AgentRuntime, LoopConfig, ToolExecutionMode};
 use guigu::remote::codec::{LineReader, write_line};
-use guigu::server::{AgentServer, ServerError, ServerMessage, ServerRequest, SessionStorageBundle};
+use guigu::server::{AgentServer, ServerError, ServerMessage, ServerRequest};
 use tokio::io::duplex;
 
 /// 内存存储（测试用，同步构造；满足 `storage_factory` 同步闭包约束）。
@@ -91,12 +92,9 @@ fn make_server(provider: Arc<dyn ModelProvider>) -> AgentServer {
             },
         )
     });
+    // 017-a 兼容工厂：返回 `Arc<dyn SessionStorage>`（无 head 持久化，行为等价 012）。
     server.with_storage_factory(|_id| {
-        let storage = Arc::new(SharedSessionStorage::new(Arc::new(InMemoryStorage::new())));
-        SessionStorageBundle {
-            storage,
-            head_store: None,
-        }
+        Arc::new(SharedSessionStorage::new(Arc::new(InMemoryStorage::new())))
     });
     server
 }
@@ -846,4 +844,122 @@ async fn test_unsubscribe_stops_events() {
         pending.is_err(),
         "should not receive any message after Unsubscribe"
     );
+}
+
+// ===== Task 024 r2：重复 spawn 竞态不污染 head + 旧 StorageFactory API 兼容 =====
+
+/// 并发重复 spawn_lane（绑定 head 持久化）：恰好一个成功，另一个 `LaneAlreadyExists`；
+/// **失败的 spawn 不写 head 记录**（024 修复：登记成功后才 persist_head），head 表
+/// 仅含成功 lane 的一条记录（无 `lane -> None` 覆盖污染）。
+#[tokio::test]
+async fn test_concurrent_spawn_lane_race_no_head_pollution() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let backend = Arc::new(JsonlSessionStorage::open(&path, "s1").await.unwrap());
+    let provider = common::FakeProvider::new(vec![]);
+    let server = AgentServer::new();
+    // 绑定 head 持久化（同一后端实例既作消息存储又作 head store）。
+    server
+        .create_session_with_head_store("s1".to_string(), backend.clone(), Some(backend.clone()))
+        .await
+        .expect("create");
+
+    let (r1, r2) = tokio::join!(
+        server.spawn_lane(
+            "s1",
+            "l1",
+            common::make_config(),
+            common::make_runtime(
+                provider.clone(),
+                vec![],
+                ToolExecutionMode::Sequential,
+                8192
+            ),
+        ),
+        server.spawn_lane(
+            "s1",
+            "l1",
+            common::make_config(),
+            common::make_runtime(
+                provider.clone(),
+                vec![],
+                ToolExecutionMode::Sequential,
+                8192
+            ),
+        ),
+    );
+
+    let results = [r1, r2];
+    let ok = results.iter().filter(|r| r.is_ok()).count();
+    let dup = results
+        .iter()
+        .filter(|r| matches!(r, Err(ServerError::LaneAlreadyExists(_))))
+        .count();
+    assert_eq!(ok, 1, "exactly one spawn should succeed: {results:?}");
+    assert_eq!(
+        dup, 1,
+        "the other should get LaneAlreadyExists: {results:?}"
+    );
+
+    // head 表仅含成功 lane 的一条记录（空 lane head = None），无失败 spawn 的污染。
+    let heads = backend.load_lane_heads().await.unwrap();
+    assert_eq!(heads.len(), 1, "head 表应仅含成功 lane 一条记录: {heads:?}");
+    assert_eq!(heads.get("l1"), Some(&None), "空 lane 初始 head = None");
+
+    server.shutdown().await.expect("shutdown");
+}
+
+/// 旧 `StorageFactory` API 兼容性（017-a 契约）：`with_storage_factory` 接受
+/// 返回 `Arc<dyn SessionStorage>` 的闭包（非 `SessionStorageBundle`），
+/// `create_session_from_factory` / `load_session_from_factory` 正常工作。
+#[tokio::test]
+async fn test_legacy_storage_factory_api_compat() {
+    let provider = common::FakeProvider::new(vec![common::text_turn("ok")]);
+    let server = AgentServer::new();
+    server.with_runtime_factory(move || {
+        (
+            common::make_config(),
+            AgentRuntime {
+                provider: provider.clone(),
+                tools: Vec::new(),
+                loop_config: LoopConfig {
+                    retry_base_delay: Duration::from_millis(1),
+                    ..LoopConfig::default()
+                },
+            },
+        )
+    });
+    // 017-a 兼容工厂：返回 `Arc<dyn SessionStorage>`（无 head 持久化）。
+    server.with_storage_factory(|_id| {
+        Arc::new(SharedSessionStorage::new(Arc::new(InMemoryStorage::new())))
+    });
+
+    // create_session_from_factory（旧 API）正常工作。
+    server
+        .create_session_from_factory("s1".to_string())
+        .await
+        .expect("create_session_from_factory");
+    assert_eq!(server.list_sessions().await, vec!["s1".to_string()]);
+
+    // spawn_lane_from_factory + prompt 正常工作。
+    server
+        .spawn_lane_from_factory("s1", "l1")
+        .await
+        .expect("spawn_lane_from_factory");
+    server
+        .prompt("s1", "l1", vec![user_msg("hi")])
+        .await
+        .expect("prompt");
+
+    // load_session_from_factory（旧 API）正常工作（新 session id）。
+    server
+        .load_session_from_factory("s2".to_string())
+        .await
+        .expect("load_session_from_factory");
+    assert_eq!(
+        server.list_sessions().await,
+        vec!["s1".to_string(), "s2".to_string()]
+    );
+
+    server.shutdown().await.expect("shutdown");
 }

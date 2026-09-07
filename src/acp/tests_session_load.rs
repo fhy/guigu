@@ -17,7 +17,7 @@ use crate::core::message::{
 use crate::core::provider::Model;
 use crate::core::runtime::{AgentRuntime, LoopConfig};
 use crate::core::session::SessionStorage;
-use crate::server::{AgentServer, SessionStorageBundle};
+use crate::server::AgentServer;
 
 use super::testutil::{FakeClient, InMemoryStorage, NoopProvider, make_agent};
 
@@ -87,17 +87,13 @@ async fn test_session_load_explicit_head() {
             },
         )
     });
-    // "s1" 返回预置存储（有叶 2）；其余返回空存储。`InMemoryStorage` 不实现
-    // `LaneHeadStore`，故 `head_store = None`（行为等价 012）。
+    // "s1" 返回预置存储（有叶 2）；其余返回空存储。017-a 兼容工厂：返回
+    // `Arc<dyn SessionStorage>`（无 head 持久化，行为等价 012）。
     server.with_storage_factory(move |id| {
-        let storage = if id == "s1" {
+        if id == "s1" {
             pre.clone()
         } else {
             Arc::new(InMemoryStorage::new())
-        };
-        SessionStorageBundle {
-            storage,
-            head_store: None,
         }
     });
     let agent = AcpAgent::new(server);
@@ -187,17 +183,13 @@ async fn test_session_load_invalid_head_then_retry_valid() {
             },
         )
     });
-    // "s1" 返回预置存储（有叶 2）；其余返回空存储。`InMemoryStorage` 不实现
-    // `LaneHeadStore`，故 `head_store = None`（行为等价 012）。
+    // "s1" 返回预置存储（有叶 2）；其余返回空存储。017-a 兼容工厂：返回
+    // `Arc<dyn SessionStorage>`（无 head 持久化，行为等价 012）。
     server.with_storage_factory(move |id| {
-        let storage = if id == "s1" {
+        if id == "s1" {
             pre.clone()
         } else {
             Arc::new(InMemoryStorage::new())
-        };
-        SessionStorageBundle {
-            storage,
-            head_store: None,
         }
     });
     let agent = AcpAgent::new(server);

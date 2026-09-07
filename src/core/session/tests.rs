@@ -395,9 +395,15 @@ fn session_record_field_mutual_exclusion() {
 
 #[tokio::test]
 async fn lane_writer_with_head_store_append_auto_persists() {
-    let storage = Arc::new(SharedSessionStorage::new(Arc::new(MemStorage::default())));
+    // head 持久化由 `SharedSessionStorage` 的 `head_store` 统一决定（024）：
+    // 绑定时 `LaneWriter::append` 经 `append_with_head` 原子落盘 head。
+    let inner = Arc::new(MemStorage::default());
     let head_store = Arc::new(MemHeadStore::default());
-    let mut lane = LaneWriter::with_head_store(storage.clone(), "lane-1", None, head_store.clone());
+    let storage = Arc::new(SharedSessionStorage::with_head_store(
+        inner,
+        head_store.clone(),
+    ));
+    let mut lane = LaneWriter::new(storage.clone(), "lane-1", None);
     let id0 = lane.append(user_msg("a")).await.unwrap();
     let id1 = lane.append(user_msg("b")).await.unwrap();
     assert_eq!((id0, id1), (0, 1));
@@ -408,9 +414,13 @@ async fn lane_writer_with_head_store_append_auto_persists() {
 
 #[tokio::test]
 async fn lane_writer_persist_head_explicit_after_fork() {
-    let storage = Arc::new(SharedSessionStorage::new(Arc::new(MemStorage::default())));
+    let inner = Arc::new(MemStorage::default());
     let head_store = Arc::new(MemHeadStore::default());
-    let mut lane = LaneWriter::with_head_store(storage.clone(), "lane-1", None, head_store.clone());
+    let storage = Arc::new(SharedSessionStorage::with_head_store(
+        inner,
+        head_store.clone(),
+    ));
+    let mut lane = LaneWriter::new(storage.clone(), "lane-1", None);
     lane.append(user_msg("a")).await.unwrap(); // 0（自动落盘 head=Some(0)）
     lane.fork_at(Some(0)); // 纯内存，不落盘
     lane.persist_head().await.unwrap(); // 显式落盘 head = Some(0)
@@ -453,5 +463,113 @@ async fn shared_storage_lane_head_store_noop_when_unbound() {
         .await
         .unwrap();
     let heads = shared.load_lane_heads().await.unwrap();
+    assert!(heads.is_empty());
+}
+
+// ===== Task 024 r2：append_with_head 原子提交 + head 写失败 + snapshot 一致性 =====
+
+/// 失败版 `LaneHeadStore`：`append_lane_head` 始终返回 IO 错误（测试用）。
+struct FailingHeadStore;
+
+#[async_trait]
+impl LaneHeadStore for FailingHeadStore {
+    async fn append_lane_head(
+        &self,
+        _lane_id: LaneId,
+        _head: Option<NodeId>,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Io(std::io::Error::other(
+            "simulated head write failure",
+        )))
+    }
+
+    async fn load_lane_heads(&self) -> Result<HashMap<LaneId, Option<NodeId>>, SessionError> {
+        Ok(HashMap::new())
+    }
+}
+
+/// head 写失败时 `append_with_head` 整体返回错误（message 可能已落盘，但 head 未落盘）。
+#[tokio::test]
+async fn append_with_head_fails_when_head_store_fails() {
+    let inner = Arc::new(MemStorage::default());
+    let shared = Arc::new(SharedSessionStorage::with_head_store(
+        inner,
+        Arc::new(FailingHeadStore),
+    ));
+    let err = shared
+        .append_with_head("lane-1", None, user_msg("a"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, SessionError::Io(_)));
+}
+
+/// `LaneWriter::append` 绑定 head 持久化时，head 写失败 → append 返回错误、
+/// **内存 head 不推进**（杜绝内存与磁盘 head 分裂，024 修复）。
+#[tokio::test]
+async fn lane_writer_append_head_failure_does_not_advance_head() {
+    let inner = Arc::new(MemStorage::default());
+    let shared = Arc::new(SharedSessionStorage::with_head_store(
+        inner.clone(),
+        Arc::new(FailingHeadStore),
+    ));
+    let mut lane = LaneWriter::new(shared.clone(), "lane-1", None);
+    // 首次 append：head 写失败 → 返回错误，内存 head 保持 None。
+    let err = lane.append(user_msg("a")).await.unwrap_err();
+    assert!(matches!(err, SessionError::Io(_)));
+    assert_eq!(lane.head(), None, "head 写失败后内存 head 不得推进");
+    // 后续 append 仍从旧 head（None）起步，不基于已分裂的内存 head。
+    let err2 = lane.append(user_msg("b")).await.unwrap_err();
+    assert!(matches!(err2, SessionError::Io(_)));
+    assert_eq!(lane.head(), None);
+}
+
+/// `append_with_head` 成功时 message 与 head 原子提交：head 表反映最新 head。
+#[tokio::test]
+async fn append_with_head_atomic_commit_updates_head() {
+    let inner = Arc::new(MemStorage::default());
+    let head_store = Arc::new(MemHeadStore::default());
+    let shared = Arc::new(SharedSessionStorage::with_head_store(
+        inner,
+        head_store.clone(),
+    ));
+    let id0 = shared
+        .append_with_head("lane-1", None, user_msg("a"))
+        .await
+        .unwrap();
+    let id1 = shared
+        .append_with_head("lane-1", Some(id0), user_msg("b"))
+        .await
+        .unwrap();
+    // head 表反映最新 head（后写覆盖先写）。
+    let heads = head_store.load_lane_heads().await.unwrap();
+    assert_eq!(heads.get("lane-1"), Some(&Some(id1)));
+}
+
+/// `snapshot` 一致性：持读锁一次得 tree + heads，与 append 的写锁互斥。
+#[tokio::test]
+async fn snapshot_returns_consistent_tree_and_heads() {
+    let inner = Arc::new(MemStorage::default());
+    let head_store = Arc::new(MemHeadStore::default());
+    let shared = Arc::new(SharedSessionStorage::with_head_store(
+        inner,
+        head_store.clone(),
+    ));
+    let id0 = shared
+        .append_with_head("lane-1", None, user_msg("a"))
+        .await
+        .unwrap();
+    // snapshot 得 tree（1 节点）+ heads（lane-1 → id0）。
+    let (tree, heads) = shared.snapshot().await.unwrap();
+    assert_eq!(tree.nodes.len(), 1);
+    assert_eq!(heads.get("lane-1"), Some(&Some(id0)));
+}
+
+/// `snapshot` 未绑定 head store 时 heads 为空表（行为等价 012）。
+#[tokio::test]
+async fn snapshot_unbound_head_store_returns_empty_heads() {
+    let shared = Arc::new(SharedSessionStorage::new(Arc::new(MemStorage::default())));
+    shared.append(None, user_msg("a")).await.unwrap();
+    let (tree, heads) = shared.snapshot().await.unwrap();
+    assert_eq!(tree.nodes.len(), 1);
     assert!(heads.is_empty());
 }

@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use common::user_msg;
 use guigu::core::session::{
-    JsonlSessionStorage, LaneWriter, SessionEntry, SessionStorage, SharedSessionStorage,
+    JsonlSessionStorage, LaneHeadStore, LaneWriter, SessionEntry, SessionStorage,
+    SharedSessionStorage,
 };
 
 /// 两 lane 共享同一 `Arc<SharedSessionStorage>`，从同一初始 head（root）各自**连续**
@@ -85,4 +86,62 @@ async fn lane_writer_multi_step_concurrent_chains() {
     for line in &lines {
         let _: SessionEntry = serde_json::from_str(line).unwrap();
     }
+}
+
+// ===== Task 024 r2：message/head 并发交错（原子提交）=====
+
+/// 两 lane 并发 append（绑定 head 持久化）：message 与 head 经
+/// `append_with_head` 在同一写锁内原子提交，恢复后每个 lane 的 head 等于该
+/// lane 最后一次成功 append 的节点（无交错、无分裂）。
+#[tokio::test]
+async fn concurrent_append_head_consistency() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let inner = Arc::new(JsonlSessionStorage::open(&path, "s1").await.unwrap());
+    // 同一实例既作消息存储又作 lane head 持久化。
+    let shared = Arc::new(SharedSessionStorage::with_head_store(
+        inner.clone(),
+        inner.clone(),
+    ));
+
+    // 建根（初始 head），两 lane 从同一 head 各自并发 append 3 条。
+    let root = shared.append(None, user_msg("root")).await.unwrap();
+
+    let handle_a = {
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            let mut lane = LaneWriter::new(shared.clone(), "lane-a", Some(root));
+            let a0 = lane.append(user_msg("a0")).await.unwrap();
+            let a1 = lane.append(user_msg("a1")).await.unwrap();
+            let a2 = lane.append(user_msg("a2")).await.unwrap();
+            (a0, a1, a2)
+        })
+    };
+    let handle_b = {
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            let mut lane = LaneWriter::new(shared.clone(), "lane-b", Some(root));
+            let b0 = lane.append(user_msg("b0")).await.unwrap();
+            let b1 = lane.append(user_msg("b1")).await.unwrap();
+            let b2 = lane.append(user_msg("b2")).await.unwrap();
+            (b0, b1, b2)
+        })
+    };
+    let results = futures::future::join_all(vec![handle_a, handle_b]).await;
+    let mut iter = results.into_iter();
+    let (_a0, _a1, a2) = iter.next().unwrap().unwrap();
+    let (_b0, _b1, b2) = iter.next().unwrap().unwrap();
+
+    // 崩溃恢复：新建 storage 实例（重新 open 读全量）。
+    let reopened = JsonlSessionStorage::open(&path, "s1").await.unwrap();
+    let heads = reopened.load_lane_heads().await.unwrap();
+    // 每个 lane 的 head 等于该 lane 最后一次成功 append 的节点（无交错、无分裂）。
+    assert_eq!(heads.get("lane-a"), Some(&Some(a2)));
+    assert_eq!(heads.get("lane-b"), Some(&Some(b2)));
+
+    // tree 有 7 节点（root + 3 + 3），两 lane head 均为叶节点。
+    let tree = reopened.load().await.unwrap();
+    assert_eq!(tree.nodes.len(), 7);
+    assert!(tree.path_to(a2).is_some(), "lane-a head 须为叶节点");
+    assert!(tree.path_to(b2).is_some(), "lane-b head 须为叶节点");
 }
