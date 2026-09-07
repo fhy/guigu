@@ -66,7 +66,7 @@
 
 实施顺序：024 → 025（PM 定序：插入到 022/023 自定义模型+TUI 之前）
 
-- [ ] 024 — 持久化 lane head / 活动分支元数据（015 r2 遗留，无新依赖；规格 v1.0 已就绪）
+- [x] 024 — 持久化 lane head / 活动分支元数据（015 r2 遗留，无新依赖；r4 审查通过）
 - [ ] 025 — ACP SSE/HTTP 远程多 client（014 存根 acp-sse；axum+tokio-stream feature-gated 在 acp-sse 非 default；规格 v1.0 已就绪）
 
 ## 九期 Backlog（自定义模型 + TUI）
@@ -133,3 +133,4 @@
 - 026 立项（2026-09-06，Architect，依据 PM「简单任务优先级提前」）：CLI 自定义 system prompt + 默认身份改鬼谷子，正式化 `~/guigu-ms` 未提交草稿（`--system-prompt` 全局参数 + assemble 透传 `AgentConfig.system_prompt`）；独立于 022/024/025，期序插到八期之前。⚠ 草稿在 `~/guigu-ms`（与规范仓库 `/home/fhy/guigu/` 两份拷贝），Developer 落地目标仓库以 PM 确认为准
 - 026 规格 v1.1（2026-09-06，Architect，依据 PM「迁回这 2 个 src 改动」授权）：核对 `~/guigu-ms` 草稿实际内容发现 `cli.rs` 同时含 `--base-url` 全局参数、`assemble.rs` 同时含 `build_provider` 的 `base_url` 透传——与 v1.0 边界「不涉及 base_url」冲突。故 026 范围扩展为「system prompt 自定义 + 内联 base_url 端点覆盖」，正式化草稿全量两文件改动。分工：026 只做内联 `--base-url` 简单透传（复用 007 既有 `base_url` 字段），022 做完整配置化（TOML/工厂/-m 扩展/api_key 四段链）并复用 026 已落地的 `--base-url`。022 规格同步 v1.2 修订「新增 --base-url」为「复用」。
 - 026 复核（2026-09-06，Architect，响应 PM「复核完成情况」）：实现已合并（89856de，feat(cli)）；reviewer r1 审查通过（docs/reviews/026-review-r1.md，结论 PASS，四门禁全绿：check ✓ / clippy --all-targets ✓ / test --all-targets 274 库测试+10 CLI binary+全部集成 ✓ / fmt ✓）。两条非阻塞建议（① 装配测试重复样板后续提炼 helper；② 022 补本地 mock endpoint 端到端确认最终请求 URL）留待 022。⚠ `docs/reviews/026-review-r1.md` 当前 git 未跟踪（reviewer 待落库提交）。故 026 由 [ ] 转 [x] 关闭。下一动作：启动 024（八期，规格 v1.0 已就绪）
+- 024 复核（2026-09-07，Architect，响应 PM「复核任务完成情况」）：实现已合并（283be3c，fix(session) r3 修复）；reviewer 历经 r1（61d43d1 reject）→ r2/r3 打回（初始 head 与 bridge 写入反向覆盖竞态 / persist_head 未走共享写锁 / 回滚误删同名 lane）→ r4 审查通过（docs/reviews/024-review-r4.md，结论 PASS，四门禁全绿：check ✓ / clippy --all-targets ✓ / test --all-targets 296 库测试+10 binary+全部集成 ✓ / fmt ✓）。r3 三项 Critical/High 已核销（persist_initial_head 写锁内条件提交 / LaneHeadStore 委托统一读写锁 + snapshot 无锁重入 helper / generation 校验回滚身份）。故 024 由 [ ] 转 [x] 关闭。⚠ `docs/reviews/024-review-r2/r3/r4.md` 当前 git 未跟踪（reviewer 待落库提交）。下一动作：启动 025（八期，规格 v1.0 已就绪）
