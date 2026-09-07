@@ -140,6 +140,9 @@ struct LaneRuntime {
     handle: AgentHandle,
     writer: Arc<Mutex<LaneWriter>>,
     bridge: tokio::task::JoinHandle<()>,
+    /// 唯一 generation（024 r3 问题 3）：回滚时仅当 generation 匹配才删除本
+    /// `LaneRuntime`，避免误删并发期间以同名 lane 重新登记的 runtime。
+    generation: u64,
 }
 
 /// 一个 session 的运行时状态：存储 + 活跃 lane 集合。
@@ -162,6 +165,9 @@ struct ServerInner {
     /// 024 新增 bundle 工厂（返回 `SessionStorageBundle`，含 head 持久化）。
     storage_bundle_factory: OnceLock<StorageBundleFactory>,
     next_session_id: AtomicU64,
+    /// lane generation 计数器（024 r3 问题 3）：每次登记 lane 分配唯一 generation，
+    /// 回滚时据此校验身份，仅删除本次插入的 `LaneRuntime`。
+    next_lane_generation: AtomicU64,
 }
 
 /// Agent Server 门面：多 session 注册表 + 多 lane 调度（transport 无关）。
@@ -186,6 +192,7 @@ impl AgentServer {
                 storage_factory: OnceLock::new(),
                 storage_bundle_factory: OnceLock::new(),
                 next_session_id: AtomicU64::new(1),
+                next_lane_generation: AtomicU64::new(1),
             }),
         }
     }

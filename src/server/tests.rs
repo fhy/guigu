@@ -858,3 +858,113 @@ async fn test_shutdown_clears_registry() {
     server.shutdown().await.expect("shutdown");
     assert!(server.list_sessions().await.is_empty());
 }
+
+// ===== Task 024 r3：回滚 generation 身份校验 + 初始 head 条件提交端到端 =====
+
+/// 024 r3 问题 3：回滚按 generation 校验身份——仅当 generation 匹配才删除 lane，
+/// 杜绝误删并发期间以同名 lane 重新登记的 runtime。
+///
+/// generation 计数器从 1 起：首个 spawn 得 1、次个得 2（单线程测试下确定）。
+#[tokio::test]
+async fn test_remove_lane_if_generation_identity_check() {
+    let server = AgentServer::new();
+    let dir = tempdir().expect("tempdir");
+    let storage = make_storage(dir.path(), "s1").await;
+    server
+        .create_session("s1".to_string(), storage)
+        .await
+        .expect("create");
+
+    // spawn 两个 lane：generation 分别为 1（l1）、2（l2）。
+    server
+        .spawn_lane("s1", "l1", make_config(), make_runtime())
+        .await
+        .expect("spawn l1");
+    server
+        .spawn_lane("s1", "l2", make_config(), make_runtime())
+        .await
+        .expect("spawn l2");
+
+    // 用 l2 的 generation（2）尝试删除 l1（generation 1）→ 不匹配，不删除。
+    server.remove_lane_if_generation("s1", "l1", 2).await;
+    assert!(
+        server.snapshot("s1", "l1").await.is_some(),
+        "generation 不匹配时不得删除 lane（024 r3 问题 3）"
+    );
+
+    // 用 l1 的 generation（1）删除 l1 → 匹配，删除。
+    server.remove_lane_if_generation("s1", "l1", 1).await;
+    assert!(
+        server.snapshot("s1", "l1").await.is_none(),
+        "generation 匹配时应删除 lane"
+    );
+
+    // l2 不受影响。
+    assert!(server.snapshot("s1", "l2").await.is_some());
+
+    server.shutdown().await.expect("shutdown");
+}
+
+/// 024 r3 问题 1（端到端不变量）：spawn lane（绑定 head 持久化）+ prompt 后，
+/// 恢复的 lane head 必须等于最后一次 append 的节点（而非初始 head `None`）。
+///
+/// 覆盖「登记后立即 append，最终恢复 head = 最后一次 append」：初始 head
+/// （`None`）与 bridge 写入的 head（最后 append 节点）竞争时，重放取最终值。
+/// head 记录在 message 记录之后写入（`append_with_head`），故须待树稳定后轮询
+/// head 直至等于 max NodeId，避免读到中间态。
+#[tokio::test]
+async fn test_spawn_lane_recovered_head_equals_last_append() {
+    let dir = tempdir().expect("tempdir");
+    let server = AgentServer::new();
+    let jsonl = JsonlSessionStorage::open(dir.path().join("s1.jsonl"), "s1")
+        .await
+        .expect("open storage");
+    let jsonl_arc = Arc::new(jsonl);
+    let storage: Arc<dyn SessionStorage> = jsonl_arc.clone();
+    let head_store: Arc<dyn LaneHeadStore> = jsonl_arc.clone();
+    server
+        .create_session_with_head_store("s1".to_string(), storage.clone(), Some(head_store))
+        .await
+        .expect("create");
+
+    // spawn lane（初始 head = None，条件式持久化）+ prompt（bridge 写入 head）。
+    server
+        .spawn_lane("s1", "l1", make_config(), make_runtime())
+        .await
+        .expect("spawn");
+    server
+        .prompt("s1", "l1", vec![user_msg("hi")])
+        .await
+        .expect("prompt");
+    // 待树稳定（NoopProvider 单 turn = user + assistant 共 2 节点，max NodeId 稳定）。
+    wait_tree_nodes(&storage, 2).await;
+    let max_id = *jsonl_arc
+        .load()
+        .await
+        .expect("load")
+        .nodes
+        .keys()
+        .max()
+        .expect("should have nodes");
+    // 轮询 head 直至等于 max NodeId（最后一次 append），避免读到中间态。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let heads = jsonl_arc.load_lane_heads().await.expect("load heads");
+        if heads.get("l1").copied().flatten() == Some(max_id) {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("lane l1 head should be Some({max_id})");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    server.shutdown().await.expect("shutdown");
+
+    // 恢复：lane head 必须等于最后一次 append 的节点（max NodeId），而非初始 head。
+    let heads = jsonl_arc.load_lane_heads().await.expect("load heads");
+    assert_eq!(
+        heads.get("l1"),
+        Some(&Some(max_id)),
+        "恢复 head 必须等于最后一次 append 的节点"
+    );
+}

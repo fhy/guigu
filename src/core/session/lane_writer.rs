@@ -59,10 +59,15 @@ impl LaneWriter {
         self.head
     }
 
-    /// 显式落盘当前 head（lane 创建/fork 后调用一次，幂等）。
+    /// 显式落盘当前 head（**无条件**，幂等）：`fork_at` 后调用以持久化新 head。
     ///
-    /// 经 `storage` 的 `LaneHeadStore` 落盘：`storage` 未绑定 head 持久化时为空
-    /// 操作（行为等价 012）。`&self`：写盘在 `storage` 内部串行，不持跨 await 锁。
+    /// 经 `storage` 的 `LaneHeadStore`（统一写锁入口，024 r3）落盘：`storage` 未
+    /// 绑定 head 持久化时为空操作（行为等价 012）。`&self`：写锁在 `storage` 内部
+    /// 持有，调用方不跨 await 持锁。
+    ///
+    /// 注意：lane 创建/fork 的**初始** head 持久化用 `SharedSessionStorage::
+    /// persist_initial_head`（条件式 compare-and-append），非本方法——本方法无条件
+    /// 写入，若 bridge 已先写入 head 会覆盖之（024 r3 问题 1）。
     pub async fn persist_head(&self) -> Result<(), SessionError> {
         self.storage
             .append_lane_head(self.lane_id.clone(), self.head)

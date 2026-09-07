@@ -15,7 +15,7 @@ mod lane_head;
 mod lane_writer;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -294,12 +294,19 @@ impl SessionRecorder {
 /// `snapshot`（持读锁，与 append 互斥）保证 tree 与 lane heads 同一日志视图。
 pub struct SharedSessionStorage {
     inner: Arc<dyn SessionStorage>,
-    /// 写锁（024 由 `Mutex` 改 `RwLock`）：`append` / `append_with_head` 持写锁
-    /// （互斥），`snapshot` 持读锁（与写互斥、读读并发）。
+    /// 写锁（024 由 `Mutex` 改 `RwLock`）：`append` / `append_with_head` /
+    /// `persist_initial_head` / `LaneHeadStore::append_lane_head` 持写锁（互斥），
+    /// `snapshot` / `LaneHeadStore::load_lane_heads` 持读锁（与写互斥、读读并发）。
     write_lock: tokio::sync::RwLock<()>,
     /// 可选 lane head 持久化后端（024）：`None` 时 `LaneHeadStore` 为 no-op/空表，
     /// 行为等价 012。与 `inner` 通常指向同一后端实例（如 `JsonlSessionStorage`）。
     head_store: Option<Arc<dyn LaneHeadStore>>,
+    /// 已提交 head 记录的 lane 集合（024 r3）：任何 head 写入（`append_with_head` /
+    /// `persist_initial_head` / `append_lane_head`）成功后标记。仅持 `write_lock`
+    /// 时访问（同步 `Mutex` 不跨 await），支撑初始 head 的条件提交
+    /// （compare-and-append）：bridge 先写入 head 后，初始 head 被跳过，杜绝
+    /// 初始 `H0` 覆盖 bridge 的 `H1`（024 r3 问题 1）。
+    head_committed: std::sync::Mutex<HashSet<LaneId>>,
 }
 
 impl SharedSessionStorage {
@@ -311,6 +318,7 @@ impl SharedSessionStorage {
             inner,
             write_lock: tokio::sync::RwLock::new(()),
             head_store: None,
+            head_committed: std::sync::Mutex::new(HashSet::new()),
         }
     }
 
@@ -327,6 +335,7 @@ impl SharedSessionStorage {
             inner,
             write_lock: tokio::sync::RwLock::new(()),
             head_store: Some(head_store),
+            head_committed: std::sync::Mutex::new(HashSet::new()),
         }
     }
 
@@ -349,8 +358,45 @@ impl SharedSessionStorage {
             store
                 .append_lane_head(lane_id.to_string(), Some(id))
                 .await?;
+            // 标记 head 已提交（024 r3）：后续 `persist_initial_head` 据此跳过
+            // 初始 head，杜绝初始 `H0` 覆盖本次写入的 `H1`。
+            self.head_committed
+                .lock()
+                .unwrap()
+                .insert(lane_id.to_string());
         }
         Ok(id)
+    }
+
+    /// 条件式初始 head 持久化（024 r3，compare-and-append）：仅当该 lane 尚无
+    /// head 记录时追加 `head`；已有记录（如 bridge 经 `append_with_head` 先写入）
+    /// 则跳过，返回 `Ok(())` 不报错。
+    ///
+    /// 全程持写锁：检查 `head_committed` 与追加 head 记录不可被 bridge 的
+    /// `append_with_head` 插入（二者互斥），保证「初始 head 与 bridge 首次写入」
+    /// 的相对顺序安全——无论谁先，重放最终 head 都等于最后一次 append。
+    ///
+    /// 供 lane 创建（`spawn_lane` / `fork_lane`）登记后调用；恢复 lane（head 已
+    /// 在日志中）不调用本方法（见 `spawn_lane_with` 的 `persist_initial` 参数）。
+    pub async fn persist_initial_head(
+        &self,
+        lane_id: &str,
+        head: Option<NodeId>,
+    ) -> Result<(), SessionError> {
+        let _guard = self.write_lock.write().await;
+        // 检查与标记均不跨 await（同步 Mutex），且全程持写锁，与 bridge 写入互斥。
+        if self.head_committed.lock().unwrap().contains(lane_id) {
+            return Ok(());
+        }
+        if let Some(store) = &self.head_store {
+            store.append_lane_head(lane_id.to_string(), head).await?;
+        }
+        // 仅在写盘成功后标记（写失败不标记，回滚后重试可再次提交）。
+        self.head_committed
+            .lock()
+            .unwrap()
+            .insert(lane_id.to_string());
+        Ok(())
     }
 
     /// 一致性快照（024）：持读锁一次读取，同时得到 tree 与 lane heads。
@@ -364,31 +410,49 @@ impl SharedSessionStorage {
     ) -> Result<(SessionTree, HashMap<LaneId, Option<NodeId>>), SessionError> {
         let _guard = self.write_lock.read().await;
         let tree = self.inner.load().await?;
-        let heads = self.load_lane_heads().await?;
+        let heads = self.load_lane_heads_unlocked().await?;
         Ok((tree, heads))
     }
-}
 
-#[async_trait]
-impl LaneHeadStore for SharedSessionStorage {
-    async fn append_lane_head(
+    /// 内部：读取 lane heads 表（调用方须已持读锁或写锁，避免重入死锁）。
+    async fn load_lane_heads_unlocked(
         &self,
-        lane_id: LaneId,
-        head: Option<NodeId>,
-    ) -> Result<(), SessionError> {
-        match &self.head_store {
-            Some(store) => store.append_lane_head(lane_id, head).await,
-            // 未绑定 head 持久化：no-op（行为等价 012，不落盘）。
-            None => Ok(()),
-        }
-    }
-
-    async fn load_lane_heads(&self) -> Result<HashMap<LaneId, Option<NodeId>>, SessionError> {
+    ) -> Result<HashMap<LaneId, Option<NodeId>>, SessionError> {
         match &self.head_store {
             Some(store) => store.load_lane_heads().await,
             // 未绑定 head 持久化：空表（恢复入口据此回退最大 NodeId 叶）。
             None => Ok(HashMap::new()),
         }
+    }
+}
+
+#[async_trait]
+impl LaneHeadStore for SharedSessionStorage {
+    /// 统一写锁入口（024 r3 问题 2）：持写锁委托 `head_store`，与 `append` /
+    /// `append_with_head` / `persist_initial_head` 互斥，杜绝公开委托路径绕过
+    /// 共享写锁导致 head 记录与 message/head 组合提交交错。
+    async fn append_lane_head(
+        &self,
+        lane_id: LaneId,
+        head: Option<NodeId>,
+    ) -> Result<(), SessionError> {
+        let _guard = self.write_lock.write().await;
+        match &self.head_store {
+            Some(store) => {
+                store.append_lane_head(lane_id.clone(), head).await?;
+                self.head_committed.lock().unwrap().insert(lane_id);
+                Ok(())
+            }
+            // 未绑定 head 持久化：no-op（行为等价 012，不落盘）。
+            None => Ok(()),
+        }
+    }
+
+    /// 持读锁读取（与写互斥、读读并发）；`snapshot` 经 `load_lane_heads_unlocked`
+    /// 复用同一逻辑（已持读锁，避免重入死锁）。
+    async fn load_lane_heads(&self) -> Result<HashMap<LaneId, Option<NodeId>>, SessionError> {
+        let _guard = self.write_lock.read().await;
+        self.load_lane_heads_unlocked().await
     }
 }
 

@@ -573,3 +573,138 @@ async fn snapshot_unbound_head_store_returns_empty_heads() {
     assert_eq!(tree.nodes.len(), 1);
     assert!(heads.is_empty());
 }
+
+// ===== Task 024 r3：初始 head 条件提交（compare-and-append）+ 统一写锁 =====
+
+/// 024 r3 问题 1（反向覆盖竞态）：bridge 经 `append_with_head` 先写入 head `H1`
+/// 后，`persist_initial_head`（初始 `H0 = None`）须被跳过，最终 head = `H1`
+/// （最后一次 append），而非被初始 `H0` 覆盖回 `None`。
+#[tokio::test]
+async fn persist_initial_head_skipped_when_bridge_wrote_first() {
+    let inner = Arc::new(MemStorage::default());
+    let head_store = Arc::new(MemHeadStore::default());
+    let shared = Arc::new(SharedSessionStorage::with_head_store(
+        inner,
+        head_store.clone(),
+    ));
+    // bridge 首次写入：append_with_head 落 message + head H1，并标记 lane 已提交。
+    let h1 = shared
+        .append_with_head("lane-1", None, user_msg("a"))
+        .await
+        .unwrap();
+    // 初始 head 持久化（H0 = None）：lane 已提交 → 跳过，不覆盖 H1。
+    shared.persist_initial_head("lane-1", None).await.unwrap();
+    // 最终 head 必须等于最后一次 append（H1），而非初始 H0（None）。
+    let heads = head_store.load_lane_heads().await.unwrap();
+    assert_eq!(
+        heads.get("lane-1"),
+        Some(&Some(h1)),
+        "初始 head 不得覆盖 bridge 已写入的 head"
+    );
+}
+
+/// 024 r3 问题 1（正向顺序）：初始 head 先落盘、bridge 后写入时，最终 head 仍
+/// 等于最后一次 append（bridge 的 `H1`，后写覆盖先写）。
+#[tokio::test]
+async fn persist_initial_head_then_bridge_append_last_write_wins() {
+    let inner = Arc::new(MemStorage::default());
+    let head_store = Arc::new(MemHeadStore::default());
+    let shared = Arc::new(SharedSessionStorage::with_head_store(
+        inner,
+        head_store.clone(),
+    ));
+    // 初始 head 先落盘（H0 = None）。
+    shared.persist_initial_head("lane-1", None).await.unwrap();
+    // bridge 后写入 H1（parent = 初始 head None）。
+    let h1 = shared
+        .append_with_head("lane-1", None, user_msg("a"))
+        .await
+        .unwrap();
+    // 最终 head = H1（后写覆盖先写）。
+    let heads = head_store.load_lane_heads().await.unwrap();
+    assert_eq!(heads.get("lane-1"), Some(&Some(h1)));
+}
+
+/// 024 r3 问题 1（fork 场景）：fork lane 初始 head = 分叉点 `H0`；bridge 先写入
+/// `H1`（分叉点之后的新节点）后，`persist_initial_head(H0)` 须被跳过，新 lane
+/// 不回退到分叉点。
+#[tokio::test]
+async fn persist_initial_head_fork_not_reverted_to_fork_point() {
+    let inner = Arc::new(MemStorage::default());
+    let head_store = Arc::new(MemHeadStore::default());
+    let shared = Arc::new(SharedSessionStorage::with_head_store(
+        inner,
+        head_store.clone(),
+    ));
+    // 源 lane 写入根节点（分叉点 H0 = 0）。
+    let fork_point = shared
+        .append_with_head("src", None, user_msg("root"))
+        .await
+        .unwrap();
+    // 新 fork lane：bridge 先写入 H1（parent = 分叉点）。
+    let h1 = shared
+        .append_with_head("fork", Some(fork_point), user_msg("branch"))
+        .await
+        .unwrap();
+    // 初始 head 持久化（H0 = 分叉点）：lane 已提交 → 跳过。
+    shared
+        .persist_initial_head("fork", Some(fork_point))
+        .await
+        .unwrap();
+    // 新 lane head = H1（非分叉点）。
+    let heads = head_store.load_lane_heads().await.unwrap();
+    assert_eq!(
+        heads.get("fork"),
+        Some(&Some(h1)),
+        "fork lane 不得回退到分叉点"
+    );
+}
+
+/// 024 r3 问题 2：`LaneHeadStore::append_lane_head`（公开委托路径）持写锁并标记
+/// lane 已提交，后续 `persist_initial_head` 据此跳过（不绕过共享写锁）。
+#[tokio::test]
+async fn append_lane_head_marks_committed_and_blocks_initial() {
+    let inner = Arc::new(MemStorage::default());
+    let head_store = Arc::new(MemHeadStore::default());
+    let shared = Arc::new(SharedSessionStorage::with_head_store(
+        inner,
+        head_store.clone(),
+    ));
+    // 经公开 trait 路径写入 head（持写锁 + 标记已提交）。
+    shared
+        .append_lane_head("lane-1".to_string(), Some(5))
+        .await
+        .unwrap();
+    // 初始 head 持久化：lane 已提交 → 跳过，不覆盖。
+    shared.persist_initial_head("lane-1", None).await.unwrap();
+    let heads = head_store.load_lane_heads().await.unwrap();
+    assert_eq!(heads.get("lane-1"), Some(&Some(5)));
+}
+
+/// 024 r3 问题 2：`persist_initial_head` 幂等——重复调用仅首次写入，后续跳过
+/// （head 表不产生重复初始记录）。
+#[tokio::test]
+async fn persist_initial_head_is_idempotent() {
+    let inner = Arc::new(MemStorage::default());
+    let head_store = Arc::new(MemHeadStore::default());
+    let shared = Arc::new(SharedSessionStorage::with_head_store(
+        inner,
+        head_store.clone(),
+    ));
+    shared.persist_initial_head("lane-1", None).await.unwrap();
+    shared.persist_initial_head("lane-1", None).await.unwrap();
+    // 两次调用仅首次写入；head 表最终值 = None（初始空 lane）。
+    let heads = head_store.load_lane_heads().await.unwrap();
+    assert_eq!(heads.get("lane-1"), Some(&None));
+}
+
+/// 024 r3 问题 2：未绑定 head store 时 `persist_initial_head` 为空操作（行为等价
+/// 012），不报错。
+#[tokio::test]
+async fn persist_initial_head_noop_when_unbound() {
+    let shared = Arc::new(SharedSessionStorage::new(Arc::new(MemStorage::default())));
+    shared.persist_initial_head("lane-1", None).await.unwrap();
+    // 未绑定：load_lane_heads 空表。
+    let heads = shared.load_lane_heads().await.unwrap();
+    assert!(heads.is_empty());
+}

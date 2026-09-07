@@ -34,7 +34,8 @@ impl AgentServer {
         config: AgentConfig,
         runtime: AgentRuntime,
     ) -> Result<(), ServerError> {
-        self.spawn_lane_with(session_id, lane_id, config, runtime, Vec::new(), None)
+        // 新建 lane：初始 head（None）尚未落盘，须条件式持久化（persist_initial = true）。
+        self.spawn_lane_with(session_id, lane_id, config, runtime, Vec::new(), None, true)
             .await
     }
 
@@ -53,8 +54,13 @@ impl AgentServer {
         transcript: Vec<Arc<Message>>,
         head: Option<NodeId>,
     ) -> Result<(), ServerError> {
-        self.spawn_lane_with(session_id, lane_id, config, runtime, transcript, head)
-            .await
+        // 续写 lane：head 已在日志中（恢复时解析），不重复持久化初始 head
+        // （persist_initial = false），避免重启后 `head_committed` 为空导致旧 head
+        // 覆盖 bridge 新写入（024 r3 问题 1 的恢复路径变体）。
+        self.spawn_lane_with(
+            session_id, lane_id, config, runtime, transcript, head, false,
+        )
+        .await
     }
 
     /// spawn lane 的共享实现：runtime 以 `transcript` 为初始 transcript，
@@ -65,6 +71,11 @@ impl AgentServer {
     /// 后必须再次校验 session 存在且 lane 不存在；校验失败时显式 shutdown 已
     /// spawn 的 handle（桥接 task 随事件流关闭退出），避免覆盖已有 lane 或泄漏
     /// runtime。
+    ///
+    /// `persist_initial`（024 r3）区分新建/fork lane（须条件式持久化初始 head）与
+    /// 续写 lane（head 已在日志中，跳过，避免重启后覆盖 bridge 新写入）——不可由
+    /// 其它参数推导，故保留为独立参数（8 参，超 clippy 默认 7 参上限）。
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_lane_with(
         &self,
         session_id: &str,
@@ -73,6 +84,7 @@ impl AgentServer {
         runtime: AgentRuntime,
         transcript: Vec<Arc<Message>>,
         head: Option<NodeId>,
+        persist_initial: bool,
     ) -> Result<(), ServerError> {
         // 1. 检查 session 存在 + lane 不存在（不跨 await 持锁）。
         let storage = {
@@ -98,14 +110,19 @@ impl AgentServer {
         // 4. spawn 桥接 task（先于登记订阅，保证事件不丢持久化）。
         let bridge = spawn_bridge(handle.clone(), writer.clone(), lane_id);
         // 5. 二次校验并入表（原子）：session 被并发移除（如 shutdown）或 lane 被
-        //    并发登记时，显式清理已 spawn 的 handle 并返回对应错误。
-        let insert_err = {
+        //    并发登记时，显式清理已 spawn 的 handle 并返回对应错误。登记时分配唯一
+        //    generation（024 r3 问题 3），供回滚时校验身份。
+        let (insert_err, generation) = {
             let mut sessions = self.inner.sessions.lock().await;
             match sessions.get_mut(session_id) {
                 Some(session) => {
                     if session.lanes.contains_key(lane_id) {
-                        Some(ServerError::LaneAlreadyExists(lane_id.to_string()))
+                        (Some(ServerError::LaneAlreadyExists(lane_id.to_string())), 0)
                     } else {
+                        let generation = self
+                            .inner
+                            .next_lane_generation
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         session.lanes.insert(
                             lane_id.to_string(),
                             LaneRuntime {
@@ -113,23 +130,30 @@ impl AgentServer {
                                 handle: handle.clone(),
                                 writer: writer.clone(),
                                 bridge,
+                                generation,
                             },
                         );
-                        None
+                        (None, generation)
                     }
                 }
-                None => Some(ServerError::SessionNotFound(session_id.to_string())),
+                None => (
+                    Some(ServerError::SessionNotFound(session_id.to_string())),
+                    0,
+                ),
             }
         };
         if let Some(e) = insert_err {
             Self::cleanup_handle(handle).await;
             return Err(e);
         }
-        // 6. 落盘初始 head（024 修复）：**登记成功后**才持久化，失败请求不写 head
-        //    记录（杜绝污染正式 lane 元数据）。失败则回滚登记 + 清理 handle，返回
-        //    错误（不静默降级，调用方不被错误告知成功）。
-        if let Err(e) = writer.lock().await.persist_head().await {
-            self.remove_lane(session_id, lane_id).await;
+        // 6. 条件式落盘初始 head（024 r3 问题 1/2）：**登记成功后**才持久化，且仅当
+        //    该 lane 尚无 head 记录时写入（compare-and-append，全程持写锁）——bridge
+        //    若已先写入 `H1`，初始 `H0` 被跳过，重放最终 head = 最后一次 append。
+        //    `persist_initial = false`（续写 lane，head 已在日志中）跳过本步。
+        //    失败则按 generation 回滚登记（仅删本次插入的 runtime）+ 清理 handle。
+        if persist_initial && let Err(e) = storage.persist_initial_head(lane_id, head).await {
+            self.remove_lane_if_generation(session_id, lane_id, generation)
+                .await;
             Self::cleanup_handle(handle).await;
             return Err(ServerError::Session(e));
         }
@@ -184,15 +208,23 @@ impl AgentServer {
         let bridge = spawn_bridge(handle.clone(), writer.clone(), new_lane);
         // 6. 二次校验并入表（原子）：session 被并发移除、`new_lane` 被并发登记、
         //    或 `from_lane` 被并发移除时，显式清理已 spawn 的 handle 并返回错误。
-        let insert_err = {
+        //    登记时分配唯一 generation（024 r3 问题 3），供回滚时校验身份。
+        let (insert_err, generation) = {
             let mut sessions = self.inner.sessions.lock().await;
             match sessions.get_mut(session_id) {
                 Some(session) => {
                     if session.lanes.contains_key(new_lane) {
-                        Some(ServerError::LaneAlreadyExists(new_lane.to_string()))
+                        (
+                            Some(ServerError::LaneAlreadyExists(new_lane.to_string())),
+                            0,
+                        )
                     } else if !session.lanes.contains_key(from_lane) {
-                        Some(ServerError::LaneNotFound(from_lane.to_string()))
+                        (Some(ServerError::LaneNotFound(from_lane.to_string())), 0)
                     } else {
+                        let generation = self
+                            .inner
+                            .next_lane_generation
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         session.lanes.insert(
                             new_lane.to_string(),
                             LaneRuntime {
@@ -200,22 +232,29 @@ impl AgentServer {
                                 handle: handle.clone(),
                                 writer: writer.clone(),
                                 bridge,
+                                generation,
                             },
                         );
-                        None
+                        (None, generation)
                     }
                 }
-                None => Some(ServerError::SessionNotFound(session_id.to_string())),
+                None => (
+                    Some(ServerError::SessionNotFound(session_id.to_string())),
+                    0,
+                ),
             }
         };
         if let Some(e) = insert_err {
             Self::cleanup_handle(handle).await;
             return Err(e);
         }
-        // 7. 落盘初始 head（024 修复）：**登记成功后**才持久化，失败请求不写 head
-        //    记录（杜绝残留错误分叉点）。失败则回滚登记 + 清理 handle，返回错误。
-        if let Err(e) = writer.lock().await.persist_head().await {
-            self.remove_lane(session_id, new_lane).await;
+        // 7. 条件式落盘初始 head（024 r3 问题 1/2）：**登记成功后**才持久化，且仅当
+        //    该 lane 尚无 head 记录时写入（compare-and-append，全程持写锁）——bridge
+        //    若已先写入 `H1`，初始分叉点 `H0` 被跳过，新 lane 不回退到分叉点。
+        //    失败则按 generation 回滚登记（仅删本次插入的 runtime）+ 清理 handle。
+        if let Err(e) = storage.persist_initial_head(new_lane, source_head).await {
+            self.remove_lane_if_generation(session_id, new_lane, generation)
+                .await;
             Self::cleanup_handle(handle).await;
             return Err(ServerError::Session(e));
         }
@@ -230,15 +269,28 @@ impl AgentServer {
         }
     }
 
-    /// 移除指定 lane（回滚用，024）：仅当 session 与 lane 均存在时移除。
+    /// 按 generation 移除 lane（回滚用，024 r3 问题 3）：仅当 session 与 lane 均
+    /// 存在**且 lane 的 generation 匹配**时移除。
     ///
-    /// 用于 `persist_head` 失败后的回滚：移除刚登记的 lane（drop `LaneRuntime`，
+    /// 用于初始 head 持久化失败后的回滚：仅删除本次插入的 `LaneRuntime`（drop 后
     /// 释放 handle/writer/bridge 引用），配合 `cleanup_handle` 显式 shutdown，保证
-    /// 「登记 + 落盘 head」要么都成功、要么都不残留。
-    async fn remove_lane(&self, session_id: &str, lane_id: &str) {
+    /// 「登记 + 落盘 head」要么都成功、要么都不残留。generation 校验杜绝误删并发
+    /// 期间（如 shutdown/清理后）以同名 lane 重新登记的 runtime。
+    pub(super) async fn remove_lane_if_generation(
+        &self,
+        session_id: &str,
+        lane_id: &str,
+        generation: u64,
+    ) {
         let mut sessions = self.inner.sessions.lock().await;
         if let Some(session) = sessions.get_mut(session_id) {
-            session.lanes.remove(lane_id);
+            let matches = session
+                .lanes
+                .get(lane_id)
+                .is_some_and(|lane| lane.generation == generation);
+            if matches {
+                session.lanes.remove(lane_id);
+            }
         }
     }
 }
