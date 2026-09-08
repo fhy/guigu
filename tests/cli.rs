@@ -11,6 +11,12 @@
 //! 真 adapter（OpenAI/Anthropic）需网络，不在本测试覆盖（避免依赖外网）；
 //! 离线冒烟用隐藏的 `--provider fake`（规格验收「测试用 fake/offline provider
 //! 冒烟，避免依赖外网」）。
+//!
+//! 本测试经 `CARGO_BIN_EXE_guigu` 执行 CLI 二进制，而该 binary 由
+//! `required-features = ["providers-http"]` 门控（`--no-default-features` 下不构建），
+//! 故整个测试文件仅在 `providers-http` 启用时编译（否则运行时找不到 binary）。
+
+#![cfg(feature = "providers-http")]
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

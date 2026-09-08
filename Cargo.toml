@@ -61,3 +61,7 @@ bytes = "1"
 [[bin]]
 name = "guigu"
 path = "src/bin/guigu/main.rs"
+# CLI 二进制装配真实 LLM provider（`guigu::adapters`，由 `providers-http` 门控），
+# 故无 `providers-http` 的构建（`--no-default-features`）不构建该 target，
+# 使 `cargo test --no-default-features` 仅编译 lib + 集成测试（Task 025 feature 矩阵验收）。
+required-features = ["providers-http"]

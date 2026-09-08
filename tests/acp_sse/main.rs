@@ -112,9 +112,12 @@ async fn test_sse_multi_client_isolation() {
         .to_string();
     assert_ne!(session_a, session_b, "sessionIds should be unique");
 
-    // 各自 prompt：事件流互不串扰（A 的 update 全带 session_a，B 的全带 session_b）。
-    let (updates_a, resp_a) = client_a.prompt(&session_a, 102, timeout).await;
-    let (updates_b, resp_b) = client_b.prompt(&session_b, 202, timeout).await;
+    // 各自 prompt（真并发：`tokio::join!` 同时驱动两条 SSE 流，覆盖多 client 并发
+    // 时序而非串行）：事件流互不串扰（A 的 update 全带 session_a，B 的全带 session_b）。
+    let ((updates_a, resp_a), (updates_b, resp_b)) = tokio::join!(
+        client_a.prompt(&session_a, 102, timeout),
+        client_b.prompt(&session_b, 202, timeout),
+    );
 
     assert!(!updates_a.is_empty(), "client A should get updates");
     assert!(!updates_b.is_empty(), "client B should get updates");
