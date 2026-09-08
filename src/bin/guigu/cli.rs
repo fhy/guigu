@@ -50,6 +50,16 @@ pub struct Cli {
     /// 覆盖 provider 的 base URL（如 ModelScope/本地网关）。
     #[arg(long, global = true, value_name = "URL")]
     pub base_url: Option<String>,
+
+    /// 配置文件路径（缺省走 `Config::resolve` 查找链：./guigu.toml →
+    /// $XDG_CONFIG_HOME/guigu/config.toml → 空配置）。
+    #[arg(long, global = true, value_name = "FILE")]
+    pub config: Option<PathBuf>,
+
+    /// 内联指定 API key 来源环境变量名（配合内联 `-m` 场景，可选；优先级
+    /// 低于 `-k`，高于协议默认 env）。
+    #[arg(long, global = true, value_name = "VAR")]
+    pub api_key_env: Option<String>,
 }
 
 /// 子命令。
@@ -144,5 +154,32 @@ mod tests {
     fn parse_base_url_absent_is_none() {
         let cli = Cli::try_parse_from(["guigu", "acp"]).unwrap();
         assert_eq!(cli.base_url, None);
+    }
+
+    #[test]
+    fn parse_config_path() {
+        let cli = Cli::try_parse_from(["guigu", "--config", "/etc/guigu.toml", "acp"]).unwrap();
+        assert_eq!(
+            cli.config.as_deref(),
+            Some(std::path::Path::new("/etc/guigu.toml"))
+        );
+    }
+
+    #[test]
+    fn parse_config_absent_is_none() {
+        let cli = Cli::try_parse_from(["guigu", "acp"]).unwrap();
+        assert_eq!(cli.config, None);
+    }
+
+    #[test]
+    fn parse_api_key_env() {
+        let cli = Cli::try_parse_from(["guigu", "--api-key-env", "MY_KEY", "acp"]).unwrap();
+        assert_eq!(cli.api_key_env.as_deref(), Some("MY_KEY"));
+    }
+
+    #[test]
+    fn parse_api_key_env_absent_is_none() {
+        let cli = Cli::try_parse_from(["guigu", "acp"]).unwrap();
+        assert_eq!(cli.api_key_env, None);
     }
 }

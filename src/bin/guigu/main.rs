@@ -16,6 +16,7 @@ mod assemble;
 mod cli;
 mod error;
 mod fake;
+mod provider;
 mod repl;
 
 use std::process::ExitCode;

@@ -21,8 +21,14 @@ include = [
 ]
 
 [features]
-default = ["providers-http"]
+# Task 022：`config` 加入 default——toml 极轻（纯 serde 解析、无 TLS/系统依赖），
+# CLI 自定义模型配置应开箱即用（`cargo install guigu` 默认可用），且 default
+# `cargo test` 需覆盖配置解析（对标 007 `providers-http` default 的测试覆盖理由）。
+default = ["providers-http", "config"]
 providers-http = ["dep:reqwest"]
+# Task 022：TOML 配置文件解析（`Config::load`/`resolve`）。数据结构
+# （`ModelConfig`/`Protocol`/`GuiguConfig`）不 gate，仅 TOML 解析 gate 在此。
+config = ["dep:toml"]
 # Task 025：ACP SSE+HTTP 传输（多 client）。默认不含（axum/tokio-stream 编译面大，
 # 保持 default 精简）；需要远程多 client 时显式 `--features acp-sse`。
 acp-sse = ["dep:axum", "dep:tokio-stream"]
@@ -46,6 +52,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 # server + SSE 响应；tokio-stream 提供 mpsc → Stream 适配（axum `Sse` 需要）。
 axum = { version = "0.8", optional = true }
 tokio-stream = { version = "0.1", optional = true }
+# Task 022：TOML 配置文件解析（feature `config`，default 开启）。纯 serde 解析，
+# 无 TLS/系统依赖；嵌入方 `default-features = false` 可剥离。
+toml = { version = "0.8", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -61,7 +70,8 @@ bytes = "1"
 [[bin]]
 name = "guigu"
 path = "src/bin/guigu/main.rs"
-# CLI 二进制装配真实 LLM provider（`guigu::adapters`，由 `providers-http` 门控），
-# 故无 `providers-http` 的构建（`--no-default-features`）不构建该 target，
-# 使 `cargo test --no-default-features` 仅编译 lib + 集成测试（Task 025 feature 矩阵验收）。
-required-features = ["providers-http"]
+# CLI 二进制装配真实 LLM provider（`guigu::adapters`，由 `providers-http` 门控）
+# + TOML 配置加载（`guigu::config::Config`，由 `config` 门控），故缺任一 feature
+# 的构建不构建该 target，使 `cargo test --no-default-features` 仅编译 lib + 集成
+# 测试（Task 025 feature 矩阵验收；Task 022 追加 `config`）。
+required-features = ["providers-http", "config"]

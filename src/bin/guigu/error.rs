@@ -8,6 +8,7 @@
 //! `Debug`，故不直接用 `Result` 作 `main` 返回类型）。
 
 use guigu::acp::AcpError;
+use guigu::config::ProviderConfigError;
 use guigu::core::provider::ProviderError;
 use guigu::core::session::SessionError;
 use guigu::server::ServerError;
@@ -18,6 +19,9 @@ pub enum CliError {
     /// provider 构造失败。
     #[error("provider error: {0}")]
     Provider(#[from] ProviderError),
+    /// 配置错误（Task 022：TOML 解析 / api_key 解析 / provider 构建）。
+    #[error("config error: {0}")]
+    Config(#[from] ProviderConfigError),
     /// 缺少 API key。
     #[error("missing API key for {provider}: set --api-key or the {env} environment variable")]
     MissingApiKey {

@@ -14,7 +14,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use guigu::adapters::{AnthropicConfig, AnthropicProvider, OpenAiConfig, OpenAiProvider};
 use guigu::core::agent::AgentConfig;
 use guigu::core::message::{Message, ThinkingLevel};
 use guigu::core::provider::{Model, ModelProvider};
@@ -26,9 +25,9 @@ use guigu::core::tool::Tool;
 use guigu::server::{AgentServer, SessionStorageBundle};
 use guigu::tools::{BashTool, EditTool, FileMutationQueue, ReadTool, WriteTool};
 
-use super::cli::{Cli, Provider};
+use super::cli::Cli;
 use super::error::CliError;
-use super::fake::FakeProvider;
+use super::provider::select_provider;
 
 /// 缺省 system prompt：鬼谷子（Guiguzi）AI 编程助手身份。
 pub const DEFAULT_SYSTEM_PROMPT: &str = "你是鬼谷子（Guiguzi），鬼谷子 AI 编程助手。\
@@ -60,12 +59,8 @@ pub struct Assembled {
 /// `system_prompt` 为**已解析**的最终文案（入口经 [`resolve_system_prompt`] 回退
 /// 鬼谷子默认身份后传入），本函数不重复做回退。
 pub fn assemble(cli: &Cli, system_prompt: String) -> Result<Assembled, CliError> {
-    // 1. 选 provider（读 --api-key / env / --base-url）。
-    let provider = build_provider(cli)?;
-    let model = cli
-        .model
-        .clone()
-        .unwrap_or_else(|| cli.provider.default_model().to_string());
+    // 1. 选 provider + model id（Task 022：配置优先、内联回退）。
+    let selection = select_provider(cli)?;
 
     // 2. 工具集：005 read/write/edit + 006 bash（注入共享 FileMutationQueue）。
     //    工作目录经构造参数显式传递（017-b）：`--cwd` → 文件工具 `work_dir` +
@@ -74,7 +69,13 @@ pub fn assemble(cli: &Cli, system_prompt: String) -> Result<Assembled, CliError>
 
     // 3. server + 工厂。
     let log_dir = resolve_log_dir(&cli.log)?;
-    let server = build_server(provider, model, tools, log_dir.clone(), system_prompt);
+    let server = build_server(
+        selection.provider,
+        selection.model,
+        tools,
+        log_dir.clone(),
+        system_prompt,
+    );
 
     Ok(Assembled { server, log_dir })
 }
@@ -121,40 +122,6 @@ pub async fn setup_session(assembled: &Assembled, cli: &Cli) -> Result<String, C
             .await?;
     }
     Ok(session_id)
-}
-
-/// 选 provider：fake 早退（离线冒烟，无 key）；真 provider 读 `--api-key` 或对应
-/// env，缺 key → `MissingApiKey`。
-fn build_provider(cli: &Cli) -> Result<Arc<dyn ModelProvider>, CliError> {
-    if matches!(cli.provider, Provider::Fake) {
-        return Ok(Arc::new(FakeProvider));
-    }
-    let env = cli.provider.api_key_env();
-    let key = cli
-        .api_key
-        .clone()
-        .or_else(|| std::env::var(env).ok())
-        .ok_or_else(|| CliError::MissingApiKey {
-            provider: cli.provider.name().to_string(),
-            env,
-        })?;
-    // --base-url 内联端点覆盖：None → 协议默认端点（007 既有语义）；Some → 写入
-    // adapter config。仅复用 007 既有 base_url 字段，不新增 HTTP 逻辑。
-    let base_url = cli.base_url.clone();
-    match cli.provider {
-        Provider::Openai => {
-            let mut config = OpenAiConfig::new(key);
-            config.base_url = base_url;
-            Ok(Arc::new(OpenAiProvider::new(config)?))
-        }
-        Provider::Anthropic => {
-            let mut config = AnthropicConfig::new(key);
-            config.base_url = base_url;
-            Ok(Arc::new(AnthropicProvider::new(config)?))
-        }
-        // 防御分支：上方已对 Fake 早退，此处仅为穷尽 match（不 panic）。
-        Provider::Fake => Ok(Arc::new(FakeProvider)),
-    }
 }
 
 /// 工具集：read/write/edit + bash（共享 `FileMutationQueue` 串行化同文件写）。
@@ -306,7 +273,7 @@ fn io_other(reason: String) -> SessionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::Command;
+    use crate::cli::{Command, Provider};
     use std::sync::Arc;
 
     #[test]
@@ -333,6 +300,8 @@ mod tests {
             api_key: None,
             base_url: None,
             system_prompt: Some("自定义身份".to_string()),
+            config: None,
+            api_key_env: None,
         };
         let prompt = resolve_system_prompt(cli.system_prompt.clone());
         let assembled = assemble(&cli, prompt).unwrap();
@@ -368,6 +337,8 @@ mod tests {
             api_key: None,
             base_url: None,
             system_prompt: None,
+            config: None,
+            api_key_env: None,
         };
         let prompt = resolve_system_prompt(cli.system_prompt.clone());
         let assembled = assemble(&cli, prompt).unwrap();

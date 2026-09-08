@@ -12,11 +12,13 @@
 
 pub mod acc;
 pub mod anthropic;
+pub mod factory;
 pub mod openai;
 pub mod sse;
 pub mod stream;
 
 pub use anthropic::{AnthropicConfig, AnthropicProvider};
+pub use factory::build_provider;
 pub use openai::{OpenAiConfig, OpenAiProvider};
 
 /// 构造好的 HTTP 请求（URL + headers + JSON body），供 provider 发送。

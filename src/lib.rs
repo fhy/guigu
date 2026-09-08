@@ -11,6 +11,7 @@
 pub mod acp;
 #[cfg(feature = "providers-http")]
 pub mod adapters;
+pub mod config;
 pub mod core;
 pub mod plugin;
 pub mod remote;
@@ -19,7 +20,13 @@ pub mod tools;
 
 pub use acp::{AcpAgent, AcpClient, AcpError, AcpFsTool, PermissionMode};
 #[cfg(feature = "providers-http")]
-pub use adapters::{AnthropicConfig, AnthropicProvider, OpenAiConfig, OpenAiProvider};
+pub use adapters::{
+    AnthropicConfig, AnthropicProvider, OpenAiConfig, OpenAiProvider, build_provider,
+};
+// Task 022：模型端点配置。数据结构不 gate；`Config`（TOML 解析）gate 在 `config`。
+#[cfg(feature = "config")]
+pub use config::Config;
+pub use config::{GuiguConfig, ModelConfig, Protocol, ProviderConfigError};
 pub use core::{
     agent::*,
     compactor::*,
