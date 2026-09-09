@@ -1,6 +1,9 @@
 //! `config` 模块单元测试（Task 022）。
 
 use super::*;
+// `Path`/`PathBuf` 仅被 `config` feature 下的 `resolve_path` 测试使用，
+// 关闭 feature 后须剥离，否则 no-default-features 严格 clippy 报 unused imports。
+#[cfg(feature = "config")]
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -117,6 +120,23 @@ fn model_config_deserialize_full() {
     assert_eq!(c.model, "claude-3");
     assert_eq!(c.max_tokens, Some(1024));
     assert_eq!(c.anthropic_version.as_deref(), Some("2024-01-01"));
+}
+
+#[test]
+fn model_config_derives_partial_eq_eq() {
+    // 全字段相同 → 相等（验证 `PartialEq`/`Eq` 派生可用）。
+    let a = model_config(Protocol::OpenAi, Some("key"), Some("ENV"));
+    let b = model_config(Protocol::OpenAi, Some("key"), Some("ENV"));
+    assert_eq!(a, b);
+    // 协议不同 → 不等。
+    let c = model_config(Protocol::Anthropic, Some("key"), Some("ENV"));
+    assert_ne!(a, c);
+    // api_key 不同 → 不等。
+    let d = model_config(Protocol::OpenAi, Some("other"), Some("ENV"));
+    assert_ne!(a, d);
+    // api_key_env 不同 → 不等。
+    let e = model_config(Protocol::OpenAi, Some("key"), Some("OTHER_ENV"));
+    assert_ne!(a, e);
 }
 
 #[test]

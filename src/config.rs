@@ -9,6 +9,9 @@
 //!   （依赖 `toml`）。
 
 use std::collections::HashMap;
+// `Path`/`PathBuf` 仅被 `config` feature 下的 `Config::load`/`resolve` 使用，
+// 关闭 feature 后须剥离，否则 no-default-features 严格 clippy 报 unused imports。
+#[cfg(feature = "config")]
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -34,7 +37,7 @@ impl Protocol {
 }
 
 /// 模型端点配置（配置文件 `models` 表的一项）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ModelConfig {
     /// 配置键名（唯一标识），加载时由表键注入（TOML 中可省略）。
     #[serde(default)]
