@@ -18,6 +18,8 @@ mod error;
 mod fake;
 mod provider;
 mod repl;
+#[cfg(feature = "tui")]
+mod tui;
 
 use std::process::ExitCode;
 
@@ -57,6 +59,19 @@ async fn run() -> Result<(), CliError> {
             let assembled = assemble::assemble(&cli, system_prompt)?;
             let session_id = assemble::setup_session(&assembled, &cli).await?;
             repl::run_repl(assembled.server, &session_id, assemble::DEFAULT_LANE).await
+        }
+        // 全屏 TUI（feature `tui`）：复用 022 配置 + 013 AgentServer + 015 装配。
+        #[cfg(feature = "tui")]
+        Some(Command::Tui) => {
+            let assembled = assemble::assemble(&cli, system_prompt)?;
+            let session_id = assemble::setup_session(&assembled, &cli).await?;
+            tui::run(
+                assembled.server,
+                &session_id,
+                assemble::DEFAULT_LANE,
+                &assembled.model,
+            )
+            .await
         }
     }
 }

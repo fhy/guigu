@@ -359,6 +359,60 @@ async fn test_acp_loopback_prompt_roundtrip() {
     let _ = child.wait().await;
 }
 
+/// `guigu tui --help` 正常打印且退出码 0（feature `tui`）。
+///
+/// `--help` 在 `Cli::parse` 阶段触发（早于装配 / TTY 检查），故无需 TTY / API key。
+#[cfg(feature = "tui")]
+#[test]
+fn test_tui_help_exits_zero() {
+    let output = StdCommand::new(env!("CARGO_BIN_EXE_guigu"))
+        .args(["tui", "--help"])
+        .output()
+        .expect("run guigu tui --help");
+    assert!(
+        output.status.success(),
+        "guigu tui --help should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.trim().is_empty(), "help should print something");
+    assert!(
+        stdout.contains("tui"),
+        "help should mention tui, got: {stdout}"
+    );
+}
+
+/// `guigu tui` 在无 TTY 环境报清晰错误（非 panic）+ stderr + 非零退出（feature `tui`）。
+///
+/// stdin 接 `/dev/null`（非 TTY）→ `enable_raw_mode` 失败 → `CliError::Tui`
+/// （清晰提示需 TTY）→ stderr + 非零退出，不 panic。
+#[cfg(feature = "tui")]
+#[test]
+fn test_tui_no_tty_clear_error() {
+    let log_dir = tempfile::tempdir().expect("tempdir");
+    let output = StdCommand::new(env!("CARGO_BIN_EXE_guigu"))
+        .args(["tui", "--provider", "fake", "--log"])
+        .arg(log_dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run guigu tui");
+    assert!(
+        !output.status.success(),
+        "guigu tui without TTY should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TTY") || stderr.contains("tui error"),
+        "should mention TTY requirement, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "should not panic, got: {stderr}"
+    );
+}
+
 /// 跑一次 `guigu run --provider fake [--session <id>]`：pipe 单条 prompt + `/quit`。
 fn run_repl_once(log_dir: &Path, session_id: Option<&str>, prompt: &str) -> Output {
     let mut cmd = StdCommand::new(env!("CARGO_BIN_EXE_guigu"));

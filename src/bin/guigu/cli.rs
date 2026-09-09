@@ -69,6 +69,9 @@ pub enum Command {
     Run,
     /// 以 ACP agent 身份 serve stdio（供编辑器子进程拉起）。
     Acp,
+    /// 全屏 TUI（ratatui 终端 UI，feature `tui`）。
+    #[cfg(feature = "tui")]
+    Tui,
 }
 
 /// LLM provider 选择。

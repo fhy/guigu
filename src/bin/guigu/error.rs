@@ -42,4 +42,8 @@ pub enum CliError {
     /// IO 错误。
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// TUI 错误（Task 023：无 TTY / 终端 setup 失败）。
+    #[cfg(feature = "tui")]
+    #[error("tui error: {0}")]
+    Tui(String),
 }

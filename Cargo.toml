@@ -32,6 +32,10 @@ config = ["dep:toml"]
 # Task 025：ACP SSE+HTTP 传输（多 client）。默认不含（axum/tokio-stream 编译面大，
 # 保持 default 精简）；需要远程多 client 时显式 `--features acp-sse`。
 acp-sse = ["dep:axum", "dep:tokio-stream"]
+# Task 023：全屏 TUI（ratatui + crossterm）。**非 default（opt-in）**：ratatui/
+# crossterm 依赖树/编译面明显重于 toml/reqwest，保持 default 精简、降低嵌入方与
+# `cargo install guigu` 的默认编译负担；需要 TUI 时显式 `--features tui`。
+tui = ["dep:ratatui", "dep:crossterm"]
 
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
@@ -55,6 +59,11 @@ tokio-stream = { version = "0.1", optional = true }
 # Task 022：TOML 配置文件解析（feature `config`，default 开启）。纯 serde 解析，
 # 无 TLS/系统依赖；嵌入方 `default-features = false` 可剥离。
 toml = { version = "0.8", optional = true }
+# Task 023：全屏 TUI（feature `tui`，非 default）。ratatui 提供终端 UI 渲染
+# （含 `TestBackend` 无头测试），crossterm 提供终端事件/原始模式抽象。均 optional，
+# 嵌入方 `default-features = false` 或不开 `tui` 即可剥离。
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

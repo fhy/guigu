@@ -46,12 +46,17 @@ pub fn resolve_system_prompt(custom: Option<String>) -> String {
     custom.unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string())
 }
 
-/// 装配产物：server + 存储目录（REPL 建 session 用）。
+/// 装配产物：server + 存储目录（REPL 建 session 用）+ 最终 model id。
 pub struct Assembled {
     /// 013 多 session 后端。
     pub server: AgentServer,
     /// session JSONL 存储目录。
     pub log_dir: PathBuf,
+    /// 最终 model id（Task 023：TUI 状态栏显示）。
+    ///
+    /// 仅 `tui` feature 读取；非 `tui` 构建下写入但不读，故门控 `dead_code`。
+    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
+    pub model: String,
 }
 
 /// 装配 server（cwd / provider / 工具 / 工厂）。REPL 与 ACP 共用。
@@ -71,13 +76,17 @@ pub fn assemble(cli: &Cli, system_prompt: String) -> Result<Assembled, CliError>
     let log_dir = resolve_log_dir(&cli.log)?;
     let server = build_server(
         selection.provider,
-        selection.model,
+        selection.model.clone(),
         tools,
         log_dir.clone(),
         system_prompt,
     );
 
-    Ok(Assembled { server, log_dir })
+    Ok(Assembled {
+        server,
+        log_dir,
+        model: selection.model,
+    })
 }
 
 /// REPL 建 session：`--session` 存在则 `load_session` 续聊，否则新建；spawn 默认 lane。
