@@ -219,9 +219,19 @@ pub fn apply_event(state: &mut TuiState, event: &AgentEvent) {
             } => {
                 state.upsert_tool_card(id, name, arguments, ToolCardStatus::Running);
             }
-            AssistantEvent::ToolCallDelta { .. }
-            | AssistantEvent::ToolCallEnd { .. }
-            | AssistantEvent::Done { .. } => {}
+            AssistantEvent::ToolCallDelta {
+                id,
+                arguments_delta,
+            } => {
+                // 分片工具参数：累积到卡片（provider 可能流式分片发送参数；
+                // `ToolExecutionStart` 携带完整 args，执行开始时覆盖）。
+                if let Some(card) = state.find_tool_card(id) {
+                    card.args.push_str(arguments_delta);
+                }
+            }
+            AssistantEvent::ToolCallEnd { .. } | AssistantEvent::Done { .. } => {
+                // 参数流结束：卡片已处 Running 态且 args 已累积完整，无需额外更新。
+            }
             AssistantEvent::Error { message, .. } => {
                 state.error = Some(message.clone());
                 state.status = Status::Error;

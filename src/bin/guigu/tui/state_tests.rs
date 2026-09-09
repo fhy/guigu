@@ -76,6 +76,21 @@ fn tool_card_at(state: &TuiState, i: usize) -> &ToolCard {
     }
 }
 
+/// 构造一条携带任意 `AssistantEvent` 的 `MessageUpdate` 事件。
+fn assistant_update(event: AssistantEvent) -> AgentEvent {
+    AgentEvent::MessageUpdate {
+        message: Arc::new(Message::Assistant(guigu::core::message::AssistantMessage {
+            content: Vec::new(),
+            model: None,
+            usage: None,
+            stop_reason: None,
+            error_message: None,
+            timestamp: 0,
+        })),
+        assistant_event: event,
+    }
+}
+
 #[test]
 fn user_message_appends_bubble() {
     let mut state = TuiState::new("m".into(), "l".into());
@@ -174,6 +189,45 @@ fn tool_call_start_creates_card_before_execution() {
     assert_eq!(tool_card_at(&state, 0).id, "t9");
     assert_eq!(tool_card_at(&state, 0).name, "read");
     assert_eq!(tool_card_at(&state, 0).status, ToolCardStatus::Running);
+}
+
+#[test]
+fn tool_call_delta_accumulates_chunked_args() {
+    let mut state = TuiState::new("m".into(), "l".into());
+    // ToolCallStart 空参数（流式 provider 先开卡片再分片发参数）。
+    apply_event(
+        &mut state,
+        &assistant_update(AssistantEvent::ToolCallStart {
+            id: "t1".into(),
+            name: "bash".into(),
+            arguments: String::new(),
+        }),
+    );
+    assert_eq!(tool_card_at(&state, 0).args, "");
+
+    // 分片参数 delta 逐段累积。
+    for delta in ["{\"cmd\": ", "ls\"}"] {
+        apply_event(
+            &mut state,
+            &assistant_update(AssistantEvent::ToolCallDelta {
+                id: "t1".into(),
+                arguments_delta: delta.into(),
+            }),
+        );
+    }
+    assert_eq!(tool_card_at(&state, 0).args, "{\"cmd\": ls\"}");
+
+    // ToolCallEnd 不改变卡片（args 已累积完整，状态仍 Running）。
+    apply_event(
+        &mut state,
+        &assistant_update(AssistantEvent::ToolCallEnd { id: "t1".into() }),
+    );
+    assert_eq!(tool_card_at(&state, 0).args, "{\"cmd\": ls\"}");
+    assert_eq!(tool_card_at(&state, 0).status, ToolCardStatus::Running);
+
+    // ToolExecutionStart 携带完整 args，覆盖累积值。
+    apply_event(&mut state, &tool_start("t1", "bash"));
+    assert_eq!(tool_card_at(&state, 0).args, "{\"cmd\":\"ls\"}");
 }
 
 #[test]
