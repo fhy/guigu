@@ -80,7 +80,7 @@
 
 实施顺序：027 → 028 → 029（PM 定序：插件最后；schemars 与跨进程锁优先级由 Architect 排定）
 
-- [~] 027 — schemars 强类型工具参数（架构 §3.4 预留；`schemars` feature `schema` default 开启；内置工具参数 derive 化；零破坏 Tool trait）
+- [x] 027 — schemars 强类型工具参数（架构 §3.4 预留；`schemars` feature `schema` default 开启；内置工具参数 derive 化；零破坏 Tool trait）
 - [ ] 028 — 跨进程会话锁 / 多写者文件锁（006/012 声明边界；`fs2` FileLock 原语 + FileMutationQueue/JsonlSessionStorage 可选叠加；零破坏默认行为）
 - [ ] 029 — Agent 插件 / 生命周期钩子（016 排除项；`LifecycleHooks` + `AgentFactory` + `AgentPluginRegistry`；零破坏 001/016/003）
 
@@ -141,3 +141,4 @@
 - 023 复核（2026-09-10，Architect，响应 PM「复核任务完成情况」）：实现已合并（aeabe14 feat + 5e41413 r2 修复 + 8e6eef4 r3 修复）；reviewer 历经 r1（setup 失败路径 / prompt 非阻塞 / draw+reader 错误传播）→ r2（setup 逐阶段恢复 / 退出 abort 命令 task 防 shutdown 挂起）→ r3（shutdown 控制令牌绕过容量 100 命令队列背压 / 真实满队列回归测试）→ r4 审查通过（docs/reviews/023-review-r4.md，结论 PASS）：四门禁全绿（check ✓ / clippy --all-targets 0 warning ✓ / test 320 库+18 binary+集成 ✓ / test --features tui 320 库+53 binary+集成 ✓ / test --no-default-features 225 库+集成 ✓ / fmt ✓）。故 023 由 [ ] 转 [x] 关闭。九期（022/023）至此全部完成。既定范围 002~026 全部实现+审查+门禁闭环，v0.1.0 发布后所有规划任务清空。下一阶段候选 3 条（schemars / Agent 插件 / 跨进程文件锁，见 docs/roadmap.md）待 PM 定序立项
 - 十期启动（2026-09，Architect，依据 PM「插件最后做，其他两项你来决定优先级」）：三条候选全部立项，实施顺序 **027 schemars → 028 跨进程锁 → 029 Agent 插件**。优先级理由——① schemars 是 `Tool::parameters` 契约升级（靠内层、低风险、纯增量、可 feature-gate），是 ACP/插件/编辑器消费工具 schema 的前提，先定契约后做扩展；② 跨进程锁触及并发语义（FileMutationQueue/JsonlSessionStorage），风险高（锁超时/崩溃遗留锁/跨平台），置于 schemars 之后；③ Agent 插件设计面最广（001 Agent trait + 003 LoopConfig 钩子 + 插件注册），且会消费 027 定型的强类型 schema，PM 已定最后。规格 v1.0 已就绪（027/028/029）
 - 027 启动（2026-09，Architect，依据 PM「启动 027」）：规格 v1.0（docs/tasks/027-schemars-tool-params.md）已就绪并复核——`schemars` 0.8 optional dep + `schema` feature（default 追加，终态 `default=["providers-http","config","schema"]`）；helper 三件套（`schema_for`/`parameters`/`root_schema`，纯函数无 I/O）；read/write/edit/bash 四个参数结构体加 `#[derive(JsonSchema)]` + `parameters()` 改类型生成（echo 无参数不变）；零破坏 `Tool` trait（不改签名、不引入 downcast，Value↔RootSchema 往返替代双事实源）；ACP/插件消费 RootSchema 属后续。027 由 [ ] 转 [~] 进入开发，下一步 Developer 实现
+- 027 复核（2026-09-11，Architect，响应 PM「复核任务完成情况」）：实现已合并（673e015，feat(schema)）；reviewer r1 审查通过（docs/reviews/027-review-r1.md，结论 PASS）：四门禁全绿（check ✓ / clippy --all-targets 0 warning ✓ / test --all-targets 326 库+18 CLI+全部集成+schema 集成 6 ✓ / test --no-default-features 222 库 ✓ / clippy --no-default-features ✓ / fmt ✓），`Tool` trait 签名未变、feature 剥离路径有效。r1 两条非阻塞建议（内置工具 `parameters()` 的 `#[cfg]` 分支重复可提炼统一入口、`root_schema` 是结构反序列化非完整 JSON Schema 校验器）留待后续技术债。故 027 由 [~] 转 [x] 关闭。十期开篇（027）完成。下一动作：启动 028（跨进程锁，规格 v1.0 已就绪 docs/tasks/028-cross-process-lock.md）
