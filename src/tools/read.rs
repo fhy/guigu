@@ -17,13 +17,19 @@ use crate::core::tool::{ResourceScope, Tool, ToolError, ToolResult};
 use crate::tools::resolve_tool_path;
 
 /// ReadTool 参数。
+///
+/// `schema` feature 下 derive `JsonSchema`，`parameters()` 从类型生成 schema
+/// （Task 027）；`offset`/`limit` 的数值约束经 `schemars(range)` 对齐 005 手工 JSON。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ReadArgs {
     /// 文件路径。
     pub path: String,
     /// 字节偏移（缺省 0）。
+    #[cfg_attr(feature = "schema", schemars(range(min = 0)))]
     pub offset: Option<u64>,
     /// 读取字节数（缺省读全文）。
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub limit: Option<u64>,
 }
 
@@ -54,15 +60,16 @@ impl Tool for ReadTool {
     }
 
     fn parameters(&self) -> Option<serde_json::Value> {
-        Some(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "offset": { "type": "integer", "minimum": 0 },
-                "limit": { "type": "integer", "minimum": 1 }
-            },
-            "required": ["path"]
-        }))
+        // Task 027：`schema` feature 下从 `ReadArgs` 类型 derive 生成（替代手工 JSON）；
+        // 剥离 `schema` 后无类型化 schema，返回 `None`（`Tool` trait 签名不变）。
+        #[cfg(feature = "schema")]
+        {
+            crate::core::schema::parameters::<ReadArgs>()
+        }
+        #[cfg(not(feature = "schema"))]
+        {
+            None
+        }
     }
 
     fn resource_scope(&self) -> ResourceScope {
@@ -151,15 +158,24 @@ mod tests {
         assert_eq!(tool().resource_scope(), ResourceScope::ReadOnly);
     }
 
-    /// ReadTool 应声明参数 schema（path 必填）。
+    /// ReadTool 应声明参数 schema（path 必填；offset/limit 可选）。
+    /// Task 027：`schema` feature 下 schema 从 `ReadArgs` 类型 derive 生成。
+    #[cfg(feature = "schema")]
     #[test]
     fn test_read_tool_parameters() {
         let params = tool().parameters().expect("parameters should be declared");
         assert_eq!(params["type"], "object");
+        let props = params["properties"]
+            .as_object()
+            .expect("properties should be an object");
+        assert!(props.contains_key("path"));
+        assert!(props.contains_key("offset"));
+        assert!(props.contains_key("limit"));
         let required = params["required"]
             .as_array()
             .expect("required should be an array");
         assert!(required.contains(&serde_json::json!("path")));
+        assert_eq!(required.len(), 1, "only path should be required");
     }
 
     /// ReadTool 缺少 path 字段应返回 invalid_arguments。

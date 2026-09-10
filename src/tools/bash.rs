@@ -28,13 +28,18 @@ use crate::core::message::ToolResultContent;
 use crate::core::tool::{ResourceScope, Tool, ToolError, ToolResult};
 
 /// BashTool 参数。
+///
+/// `schema` feature 下 derive `JsonSchema`，`parameters()` 从类型生成 schema
+/// （Task 027）；`timeout_ms` 的 `minimum: 1` 经 `schemars(range)` 对齐 006 手工 JSON。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BashArgs {
     /// 要执行的命令（以 `sh -c` 解释，支持管道/重定向）。
     pub command: String,
     /// 工作目录（可选）。
     pub cwd: Option<String>,
     /// 超时毫秒数（可选，最小 1）。
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub timeout_ms: Option<u64>,
 }
 
@@ -142,15 +147,16 @@ impl Tool for BashTool {
     }
 
     fn parameters(&self) -> Option<serde_json::Value> {
-        Some(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "command":    { "type": "string" },
-                "cwd":        { "type": "string" },
-                "timeout_ms": { "type": "integer", "minimum": 1 }
-            },
-            "required": ["command"]
-        }))
+        // Task 027：`schema` feature 下从 `BashArgs` 类型 derive 生成（替代手工 JSON）；
+        // 剥离 `schema` 后无类型化 schema，返回 `None`（`Tool` trait 签名不变）。
+        #[cfg(feature = "schema")]
+        {
+            crate::core::schema::parameters::<BashArgs>()
+        }
+        #[cfg(not(feature = "schema"))]
+        {
+            None
+        }
     }
 
     fn resource_scope(&self) -> ResourceScope {

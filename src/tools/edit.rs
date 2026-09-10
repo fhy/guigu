@@ -20,7 +20,11 @@ use crate::tools::file_mutation_queue::FileMutationQueue;
 use crate::tools::resolve_tool_path;
 
 /// EditTool 参数。
+///
+/// `schema` feature 下 derive `JsonSchema`，`parameters()` 从类型生成 schema
+/// （Task 027）；三字段均非 Option → 自动进 required。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct EditArgs {
     /// 文件路径。
     pub path: String,
@@ -61,15 +65,16 @@ impl Tool for EditTool {
     }
 
     fn parameters(&self) -> Option<serde_json::Value> {
-        Some(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "old_string": { "type": "string" },
-                "new_string": { "type": "string" }
-            },
-            "required": ["path", "old_string", "new_string"]
-        }))
+        // Task 027：`schema` feature 下从 `EditArgs` 类型 derive 生成（替代手工 JSON）；
+        // 剥离 `schema` 后无类型化 schema，返回 `None`（`Tool` trait 签名不变）。
+        #[cfg(feature = "schema")]
+        {
+            crate::core::schema::parameters::<EditArgs>()
+        }
+        #[cfg(not(feature = "schema"))]
+        {
+            None
+        }
     }
 
     fn resource_scope(&self) -> ResourceScope {
@@ -190,16 +195,25 @@ mod tests {
     }
 
     /// EditTool 应声明参数 schema（path/old_string/new_string 必填）。
+    /// Task 027：`schema` feature 下 schema 从 `EditArgs` 类型 derive 生成。
+    #[cfg(feature = "schema")]
     #[test]
     fn test_edit_tool_parameters() {
         let params = tool().parameters().expect("parameters should be declared");
         assert_eq!(params["type"], "object");
+        let props = params["properties"]
+            .as_object()
+            .expect("properties should be an object");
+        assert!(props.contains_key("path"));
+        assert!(props.contains_key("old_string"));
+        assert!(props.contains_key("new_string"));
         let required = params["required"]
             .as_array()
             .expect("required should be an array");
         assert!(required.contains(&serde_json::json!("path")));
         assert!(required.contains(&serde_json::json!("old_string")));
         assert!(required.contains(&serde_json::json!("new_string")));
+        assert_eq!(required.len(), 3, "all three fields should be required");
     }
 
     /// EditTool 缺少 old_string 字段应返回 invalid_arguments。

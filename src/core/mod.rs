@@ -8,6 +8,9 @@ pub mod provider;
 pub mod runtime;
 pub mod session;
 pub mod tool;
+// Task 027：类型化工具参数 schema 辅助（feature `schema`，default 开启）。
+#[cfg(feature = "schema")]
+pub mod schema;
 
 pub use agent::{Agent, AgentConfig, AgentError, AgentHandle, AgentSnapshot};
 pub use compactor::{

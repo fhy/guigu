@@ -38,6 +38,10 @@ pub use core::{
     session::*,
     tool::*,
 };
+// Task 027：类型化工具参数 schema helper（feature `schema`，default 开启）。
+// 嵌入方 `default-features = false` 剥离后此 re-export 一并移除。
+#[cfg(feature = "schema")]
+pub use core::schema::{parameters, root_schema, schema_for};
 pub use plugin::{Plugin, PluginError, PluginRegistry, PluginTool};
 pub use remote::{RemoteClient, RemoteError, RemoteRequest, RemoteServer};
 pub use server::{AgentServer, ServerError, ServerMessage, ServerRequest, SessionId};

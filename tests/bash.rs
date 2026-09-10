@@ -45,6 +45,8 @@ fn test_bash_tool_resource_scope() {
 }
 
 /// BashTool 应声明参数 schema（command 必填）。
+/// Task 027：`schema` feature 下 schema 从 `BashArgs` 类型 derive 生成。
+#[cfg(feature = "schema")]
 #[test]
 fn test_bash_tool_parameters() {
     let params = tool().parameters().expect("parameters should be declared");

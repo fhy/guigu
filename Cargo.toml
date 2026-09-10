@@ -24,11 +24,18 @@ include = [
 # Task 022：`config` 加入 default——toml 极轻（纯 serde 解析、无 TLS/系统依赖），
 # CLI 自定义模型配置应开箱即用（`cargo install guigu` 默认可用），且 default
 # `cargo test` 需覆盖配置解析（对标 007 `providers-http` default 的测试覆盖理由）。
-default = ["providers-http", "config"]
+# Task 027：`schema` 加入 default——schemars 核心增量仅 serde/serde_json（已在
+# core 依赖中），不启用 chrono/uuid/url 等可选特性，开销可忽略；收益是内置工具
+# 参数 schema 从类型 derive（零手工漂移）+ 暴露 `RootSchema` 给上层，且嵌入方
+# `default-features = false` 可剥离。与 `config`（toml，轻 + 开箱即用）同策略。
+default = ["providers-http", "config", "schema"]
 providers-http = ["dep:reqwest"]
 # Task 022：TOML 配置文件解析（`Config::load`/`resolve`）。数据结构
 # （`ModelConfig`/`Protocol`/`GuiguConfig`）不 gate，仅 TOML 解析 gate 在此。
 config = ["dep:toml"]
+# Task 027：schemars 强类型工具参数 schema（feature `schema`，default 开启）。
+# 核心依赖仅 serde/serde_json（已在 core），可选特性（chrono/uuid/url）一律不启用。
+schema = ["dep:schemars"]
 # Task 025：ACP SSE+HTTP 传输（多 client）。默认不含（axum/tokio-stream 编译面大，
 # 保持 default 精简）；需要远程多 client 时显式 `--features acp-sse`。
 acp-sse = ["dep:axum", "dep:tokio-stream"]
@@ -59,6 +66,10 @@ tokio-stream = { version = "0.1", optional = true }
 # Task 022：TOML 配置文件解析（feature `config`，default 开启）。纯 serde 解析，
 # 无 TLS/系统依赖；嵌入方 `default-features = false` 可剥离。
 toml = { version = "0.8", optional = true }
+# Task 027：schemars 强类型工具参数 schema（feature `schema`，default 开启）。
+# 仅默认特性（derive 宏），不启用 chrono/uuid/url 等可选特性；核心增量仅
+# serde/serde_json（已在 core 依赖中）。嵌入方 `default-features = false` 可剥离。
+schemars = { version = "0.8", optional = true }
 # Task 023：全屏 TUI（feature `tui`，非 default）。ratatui 提供终端 UI 渲染
 # （含 `TestBackend` 无头测试），crossterm 提供终端事件/原始模式抽象。均 optional，
 # 嵌入方 `default-features = false` 或不开 `tui` 即可剥离。

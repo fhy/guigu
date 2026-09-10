@@ -48,31 +48,37 @@ fn text_of(result: &ToolResult) -> String {
 // ---------- 契约测试（Arc<dyn Tool> 完整契约） ----------
 
 /// read：name/description/parameters/resource_scope 契约。
+/// Task 027：`parameters` 断言仅 `schema` feature 下成立（剥离后返回 `None`）。
 #[test]
 fn test_read_contract() {
     let tool = read_tool();
     assert_eq!(tool.name(), "read");
     assert!(!tool.description().is_empty());
+    #[cfg(feature = "schema")]
     assert!(tool.parameters().is_some());
     assert_eq!(tool.resource_scope(), ResourceScope::ReadOnly);
 }
 
 /// write：name/description/parameters/resource_scope 契约。
+/// Task 027：`parameters` 断言仅 `schema` feature 下成立（剥离后返回 `None`）。
 #[test]
 fn test_write_contract() {
     let tool = write_tool();
     assert_eq!(tool.name(), "write");
     assert!(!tool.description().is_empty());
+    #[cfg(feature = "schema")]
     assert!(tool.parameters().is_some());
     assert_eq!(tool.resource_scope(), ResourceScope::FileWriter);
 }
 
 /// edit：name/description/parameters/resource_scope 契约。
+/// Task 027：`parameters` 断言仅 `schema` feature 下成立（剥离后返回 `None`）。
 #[test]
 fn test_edit_contract() {
     let tool = edit_tool();
     assert_eq!(tool.name(), "edit");
     assert!(!tool.description().is_empty());
+    #[cfg(feature = "schema")]
     assert!(tool.parameters().is_some());
     assert_eq!(tool.resource_scope(), ResourceScope::FileWriter);
 }

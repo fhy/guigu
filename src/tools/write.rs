@@ -19,7 +19,11 @@ use crate::tools::file_mutation_queue::FileMutationQueue;
 use crate::tools::resolve_tool_path;
 
 /// WriteTool 参数。
+///
+/// `schema` feature 下 derive `JsonSchema`，`parameters()` 从类型生成 schema
+/// （Task 027）；`path`/`content` 均非 Option → 自动进 required。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WriteArgs {
     /// 文件路径。
     pub path: String,
@@ -58,14 +62,16 @@ impl Tool for WriteTool {
     }
 
     fn parameters(&self) -> Option<serde_json::Value> {
-        Some(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "content": { "type": "string" }
-            },
-            "required": ["path", "content"]
-        }))
+        // Task 027：`schema` feature 下从 `WriteArgs` 类型 derive 生成（替代手工 JSON）；
+        // 剥离 `schema` 后无类型化 schema，返回 `None`（`Tool` trait 签名不变）。
+        #[cfg(feature = "schema")]
+        {
+            crate::core::schema::parameters::<WriteArgs>()
+        }
+        #[cfg(not(feature = "schema"))]
+        {
+            None
+        }
     }
 
     fn resource_scope(&self) -> ResourceScope {
@@ -156,15 +162,27 @@ mod tests {
     }
 
     /// WriteTool 应声明参数 schema（path/content 必填）。
+    /// Task 027：`schema` feature 下 schema 从 `WriteArgs` 类型 derive 生成。
+    #[cfg(feature = "schema")]
     #[test]
     fn test_write_tool_parameters() {
         let params = tool().parameters().expect("parameters should be declared");
         assert_eq!(params["type"], "object");
+        let props = params["properties"]
+            .as_object()
+            .expect("properties should be an object");
+        assert!(props.contains_key("path"));
+        assert!(props.contains_key("content"));
         let required = params["required"]
             .as_array()
             .expect("required should be an array");
         assert!(required.contains(&serde_json::json!("path")));
         assert!(required.contains(&serde_json::json!("content")));
+        assert_eq!(
+            required.len(),
+            2,
+            "path and content should both be required"
+        );
     }
 
     /// WriteTool 缺少 content 字段应返回 invalid_arguments。
