@@ -272,3 +272,58 @@ async fn reader_error_exits_loop_with_error() {
         "got: {err}"
     );
 }
+
+/// prompt 永不完成（命令 task 阻塞在满队列的 `server.prompt().await`）时，
+/// 退出路径（abort 命令 task + shutdown）仍能在期限内完成，不无期限挂起。
+#[tokio::test]
+async fn exit_completes_within_deadline_when_prompt_never_completes() {
+    // 空 server（shutdown 立即返回）+ 假命令 task（收到 Prompt 后永久阻塞）。
+    let server = AgentServer::new();
+
+    // 假命令 task：收到 Prompt 先信号「已收到」，再永久阻塞（模拟阻塞在
+    // 满队列、永不返回的 prompt）。
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<TuiCommand>();
+    let (prompt_received_tx, prompt_received_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut prompt_received_tx = Some(prompt_received_tx);
+    let fake_cmd = tokio::spawn(async move {
+        while let Some(cmd) = cmd_rx.recv().await {
+            match cmd {
+                TuiCommand::Prompt { .. } => {
+                    if let Some(tx) = prompt_received_tx.take() {
+                        let _ = tx.send(());
+                    }
+                    // 模拟 prompt 阻塞在满队列：永不返回。
+                    std::future::pending::<()>().await;
+                }
+                TuiCommand::Abort => {}
+            }
+        }
+    });
+
+    // 提交 prompt（假命令 task 收到后阻塞）。
+    let _ = cmd_tx.send(TuiCommand::Prompt {
+        messages: vec![Message::User(UserMessage {
+            content: vec![UserContent::Text { text: "hi".into() }],
+            timestamp: 0,
+        })],
+    });
+
+    // 等假命令 task 收到 prompt 并进入阻塞（确定性信号，非 sleep 猜测）。
+    tokio::time::timeout(Duration::from_millis(2000), prompt_received_rx)
+        .await
+        .expect("prompt should be received within 2s")
+        .expect("prompt received signal");
+
+    // 退出路径：abort + await + shutdown，prompt 永不完成仍应在期限内完成。
+    drop(cmd_tx);
+    let result = tokio::time::timeout(
+        Duration::from_millis(2000),
+        stop_command_task_and_shutdown(fake_cmd, &server),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "exit should complete within deadline even if prompt never completes"
+    );
+    result.expect("within deadline").expect("shutdown ok");
+}

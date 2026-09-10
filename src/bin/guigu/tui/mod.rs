@@ -161,14 +161,9 @@ pub async fn run(
     stop.store(true, Ordering::Relaxed);
     let _ = reader.join();
 
-    // 等命令 task 退出（shutdown 前无 in-flight prompt/abort）。
+    // 停止命令 task（in-flight prompt 时 abort，避免无期限阻塞 shutdown），再 shutdown。
     drop(cmd_tx);
-    if let Err(e) = cmd_task.await {
-        eprintln!("warning: tui command task panicked: {e}");
-    }
-
-    // 退出前 shutdown（等 runtime task 退出，桥接 task 随事件流关闭退出）。
-    server.shutdown().await?;
+    stop_command_task_and_shutdown(cmd_task, &server).await?;
 
     result
 }
@@ -184,11 +179,19 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>, CliEr
         ))
     })?;
     let mut stdout = std::io::stdout();
-    if let Err(e) = execute!(stdout, EnterAlternateScreen, Hide) {
+    // 拆分阶段：任一步失败 → 恢复已完成步骤（raw mode / alt screen / 光标）。
+    // 若 `EnterAlternateScreen` 成功而 `Hide` 失败，仅关 raw mode 会遗留
+    // alternate screen / 隐藏光标，故逐阶段清理。
+    if let Err(e) = execute!(stdout, EnterAlternateScreen) {
         disable_raw_mode().ok();
         return Err(CliError::Tui(format!(
             "failed to enter alternate screen: {e}"
         )));
+    }
+    if let Err(e) = execute!(stdout, Hide) {
+        disable_raw_mode().ok();
+        execute!(std::io::stdout(), LeaveAlternateScreen, Show).ok();
+        return Err(CliError::Tui(format!("failed to hide cursor: {e}")));
     }
     let backend = CrosstermBackend::new(stdout);
     match Terminal::new(backend) {
@@ -212,6 +215,27 @@ async fn shutdown_quietly(server: &AgentServer) {
     if let Err(e) = server.shutdown().await {
         eprintln!("warning: server shutdown failed: {e}");
     }
+}
+
+/// 停止命令 task 并 shutdown server（退出路径，可单测）。
+///
+/// 调用方先 `drop(cmd_tx)` 阻止新命令；此处 `abort` 命令 task——若存在
+/// in-flight prompt（如阻塞在满队列的 `server.prompt().await`），无期限
+/// `await` 会阻塞后续 shutdown，故主动取消（未入队的 prompt 丢弃：用户正在
+/// 退出，命令尚未进入 agent 队列）。`abort` 返回 cancelled `JoinError`
+/// （正常路径，不告警）；task panic 仍记 stderr。
+async fn stop_command_task_and_shutdown(
+    cmd_task: tokio::task::JoinHandle<()>,
+    server: &AgentServer,
+) -> Result<(), CliError> {
+    cmd_task.abort();
+    if let Err(e) = cmd_task.await
+        && !e.is_cancelled()
+    {
+        eprintln!("warning: tui command task panicked: {e}");
+    }
+    server.shutdown().await?;
+    Ok(())
 }
 
 /// 启动命令 task：串行执行 prompt/abort（独立 task，不阻塞 UI 事件循环）。
