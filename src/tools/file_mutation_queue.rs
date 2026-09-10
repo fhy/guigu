@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
+use crate::core::file_lock::{FileLock, FileLockGuard};
+
 /// 锁表自动驱逐阈值：`acquire` 持表锁后、插入前，若条目数 `>=` 该值则先驱逐
 /// 一次 `strong_count == 1` 的条目（见模块文档的回收策略）。
 pub const PRUNE_THRESHOLD: usize = 1024;
@@ -29,16 +31,38 @@ pub const PRUNE_THRESHOLD: usize = 1024;
 /// 惰性为每个 path 建锁；锁表的并发访问用 `std::sync::Mutex`（操作极短、不跨
 /// await）。锁表惰性驱逐：`strong_count == 1` 的条目在阈值触发或显式
 /// [`FileMutationQueue::prune`] 时回收（见模块文档）。
+///
+/// Task 028：可选叠加跨进程锁（[`FileMutationQueue::with_file_lock`]）。启用后
+/// `acquire` 在进程内 per-path 锁之后、IO 之前，按目标路径动态构造
+/// [`FileLock::for_path`] 并获取跨进程独占锁，实现同路径跨进程串行。
 #[derive(Debug, Default)]
 pub struct FileMutationQueue {
     locks: std::sync::Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
+    /// Task 028：跨进程锁开关。`true` 时 `acquire` 叠加跨进程锁。
+    file_lock_enabled: bool,
 }
 
 impl FileMutationQueue {
-    /// 创建空锁表。
+    /// 创建空锁表（仅进程内 per-path 锁，行为与 006 完全一致）。
     pub fn new() -> Self {
         FileMutationQueue {
             locks: std::sync::Mutex::new(HashMap::new()),
+            file_lock_enabled: false,
+        }
+    }
+
+    /// 创建带跨进程锁的锁表（Task 028）：进程内 per-path 锁 + 跨进程锁双层。
+    ///
+    /// 每个 `acquire(path)` 在拿到进程内锁后，按目标路径动态构造
+    /// [`FileLock::for_path(path)`] 并获取跨进程独占锁。不同路径互不干扰、
+    /// 同路径跨进程互斥。
+    ///
+    /// 注：规格原稿签名 `with_file_lock(lock: FileLock)` 与正文 per-path 设计
+    /// 矛盾（单个 `FileLock` 无法覆盖多路径），故采用无参数签名。
+    pub fn with_file_lock() -> Self {
+        FileMutationQueue {
+            locks: std::sync::Mutex::new(HashMap::new()),
+            file_lock_enabled: true,
         }
     }
 
@@ -49,6 +73,11 @@ impl FileMutationQueue {
     ///
     /// 持表锁后、插入前若条目数达 [`PRUNE_THRESHOLD`]，先执行一次锁内驱逐
     /// （复用 [`FileMutationQueue::prune_locked`]，避免递归获取表锁）。
+    ///
+    /// Task 028：启用跨进程锁（[`FileMutationQueue::with_file_lock`]）时，在拿到
+    /// 进程内锁之后、IO 之前，按目标路径动态构造 [`FileLock::for_path`] 并获取
+    /// 跨进程独占锁。跨进程锁获取失败时记录错误并继续（进程内锁仍持有，队列仍
+    /// 进程内安全），不破坏 `acquire` 的既有签名。
     pub async fn acquire(&self, path: &Path) -> FileMutationGuard<'_> {
         let key = normalize(path);
         // 锁表操作极短：取/建 Arc 后立即释放 std Mutex，不跨 await。
@@ -63,8 +92,26 @@ impl FileMutationQueue {
                 .clone()
         };
         let inner = lock.lock_owned().await;
+        // Task 028：跨进程锁（仅当启用时）。在进程内锁之后、IO 之前获取。
+        // `key` 已移入锁表，此处用 `path` 重新规范化（与锁 key 一致）。
+        let file_guard = if self.file_lock_enabled {
+            let lock_key = normalize(path);
+            match FileLock::for_path(&lock_key).lock_exclusive().await {
+                Ok(guard) => Some(guard),
+                Err(err) => {
+                    tracing::error!(
+                        "cross-process file lock failed for {}: {err}",
+                        lock_key.display()
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         FileMutationGuard {
             _inner: inner,
+            _file: file_guard,
             _phantom: PhantomData,
         }
     }
@@ -105,8 +152,12 @@ fn normalize(path: &Path) -> PathBuf {
 ///
 /// `Send`，可在文件 IO 的 `await` 期间持有。内部持 `OwnedMutexGuard`（owned，
 /// 使 guard 生命周期不依赖锁表项存活）。
+///
+/// Task 028：可选持 `FileLockGuard`（跨进程锁），Drop 时自动解锁。
 pub struct FileMutationGuard<'a> {
     _inner: OwnedMutexGuard<()>,
+    /// Task 028：跨进程锁 guard（仅 `with_file_lock` 启用时 `Some`）。
+    _file: Option<FileLockGuard>,
     _phantom: PhantomData<&'a ()>,
 }
 
@@ -303,6 +354,74 @@ mod tests {
             1,
             "auto-prune should evict all stale entries before insert"
         );
+    }
+
+    /// Task 028：with_file_lock 启用跨进程锁，acquire 可正常获取与释放。
+    #[tokio::test]
+    async fn test_with_file_lock_acquire_and_release() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("locked.txt");
+        let queue = Arc::new(FileMutationQueue::with_file_lock());
+
+        // 首次 acquire 成功（跨进程锁 + 进程内锁均获取）。
+        {
+            let _guard = queue.acquire(&path).await;
+        }
+        // guard Drop 后跨进程锁释放，再次 acquire 立即可得。
+        let start = Instant::now();
+        let _guard = queue.acquire(&path).await;
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "acquire after drop should be immediate"
+        );
+    }
+
+    /// Task 028：with_file_lock 同 path 并发 acquire 串行（进程内 + 跨进程双层）。
+    #[tokio::test]
+    async fn test_with_file_lock_same_path_serialized() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("serial.txt");
+        let queue = Arc::new(FileMutationQueue::with_file_lock());
+        let current = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let q = Arc::clone(&queue);
+            let p = path.clone();
+            let current = Arc::clone(&current);
+            let max_seen = Arc::clone(&max_seen);
+            handles.push(tokio::spawn(async move {
+                let _guard = q.acquire(&p).await;
+                let now = current.fetch_add(1, Ordering::SeqCst) + 1;
+                max_seen.fetch_max(now, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                current.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for h in handles {
+            h.await.expect("task should complete");
+        }
+        assert_eq!(
+            max_seen.load(Ordering::SeqCst),
+            1,
+            "same path must be serialized with file lock"
+        );
+    }
+
+    /// Task 028：with_file_lock 不同 path 可并行（跨进程锁按路径隔离）。
+    #[tokio::test]
+    async fn test_with_file_lock_different_paths_parallel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path_a = dir.path().join("a.txt");
+        let path_b = dir.path().join("b.txt");
+        let queue = Arc::new(FileMutationQueue::with_file_lock());
+
+        // 两个不同 path 的 guard 可同时持有（跨进程锁按路径隔离）。
+        let guard_a = queue.acquire(&path_a).await;
+        let guard_b = queue.acquire(&path_b).await;
+        drop(guard_a);
+        drop(guard_b);
     }
 
     /// 回归：驱逐后同 path 再 acquire 仍互斥（新建锁不破坏串行化）。

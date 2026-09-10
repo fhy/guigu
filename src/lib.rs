@@ -32,6 +32,8 @@ pub use core::{
     compactor::*,
     context::{CompactionPolicy, ContextBudget, default_convert_to_llm, prepare_context},
     event::*,
+    // Task 028：跨进程文件锁原语（fs2 flock/LockFileEx，崩溃自释放）。
+    file_lock::{FileLock, FileLockError, FileLockGuard},
     message::*,
     provider::*,
     runtime::*,

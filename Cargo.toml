@@ -75,6 +75,10 @@ schemars = { version = "0.8", optional = true }
 # 嵌入方 `default-features = false` 或不开 `tui` 即可剥离。
 ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true }
+# Task 028：跨进程文件锁（Unix flock / Windows LockFileEx 统一封装）。内核态锁，
+# 进程崩溃（含 kill -9）由内核自动释放，无「遗留锁文件」需清理。同步阻塞 API，
+# 由 `FileLock` 用 `tokio::task::spawn_blocking` 包裹，不阻塞 async runtime 线程。
+fs2 = "0.4"
 
 [dev-dependencies]
 tokio-test = "0.4"

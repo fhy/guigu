@@ -15,16 +15,23 @@ use super::{
     LaneHeadRecord, LaneHeadStore, LaneId, NodeId, SessionEntry, SessionError, SessionRecord,
     SessionStorage, SessionTree, reduce_for,
 };
+use crate::core::file_lock::{FileLock, FileLockGuard};
 use crate::core::message::Message;
 
 /// append-only JSONL 会话存储。
 ///
 /// `open` 读全量恢复 `next_id`；`append` 单行原子写 + `sync_all`（进程崩溃后已返回
 /// Ok 的 append 必已落盘）；`load` 逐行解析、跳过尾部半行、`reduce` 重建树。
+///
+/// Task 028：可选叠加跨进程锁（[`JsonlSessionStorage::open_locked`]）。启用后
+/// `append` / `append_lane_head` 在落盘前获取跨进程独占锁，实现同 session 文件
+/// 跨进程 append 串行（不交错半行）。`load` 不抢锁（对齐 012 既有约定）。
 pub struct JsonlSessionStorage {
     path: PathBuf,
     session_id: String,
     next_id: AtomicU64,
+    /// Task 028：跨进程锁（仅 `open_locked` 启用时 `Some`）。
+    file_lock: Option<FileLock>,
 }
 
 impl JsonlSessionStorage {
@@ -63,7 +70,39 @@ impl JsonlSessionStorage {
             path,
             session_id: session_id.into(),
             next_id: AtomicU64::new(next_id),
+            file_lock: None,
         })
+    }
+
+    /// 打开并启用跨进程锁（Task 028）：`append` / `append_lane_head` 落盘前获取
+    /// 跨进程独占锁，实现同 session 文件跨进程 append 串行（不交错半行）。
+    ///
+    /// `lock` 通常由 `FileLock::for_path(&path)` 构造（锁文件 =
+    /// `<session.jsonl>.guigu.lock`）。`load` 不抢锁（对齐 012 既有约定）。
+    ///
+    /// 零破坏：`open` 默认无跨进程锁，行为与 009 一致。
+    pub async fn open_locked(
+        path: impl Into<PathBuf>,
+        session_id: impl Into<String>,
+        lock: FileLock,
+    ) -> Result<Self, SessionError> {
+        let mut storage = Self::open(path, session_id).await?;
+        storage.file_lock = Some(lock);
+        Ok(storage)
+    }
+
+    /// Task 028：获取跨进程锁（仅当启用时）。返回 `None` 表示未启用跨进程锁。
+    async fn acquire_file_lock(&self) -> Result<Option<FileLockGuard>, SessionError> {
+        match &self.file_lock {
+            Some(lock) => {
+                let guard = lock
+                    .lock_exclusive()
+                    .await
+                    .map_err(|e| SessionError::Io(std::io::Error::other(e.to_string())))?;
+                Ok(Some(guard))
+            }
+            None => Ok(None),
+        }
     }
 
     /// 读全量有效行（逐行解析为 `SessionRecord`，遇首个解析失败行停止——崩溃半行
@@ -114,6 +153,9 @@ impl SessionStorage for JsonlSessionStorage {
             }
         }
         let id = cursor;
+        // Task 028：跨进程锁（仅当启用时）。在 id 认领之后、落盘之前获取，guard
+        // Drop 解锁（覆盖写盘失败/取消提前返回）。
+        let _file_guard = self.acquire_file_lock().await?;
         let mut line = serde_json::to_string(&SessionEntry {
             id,
             parent_id,
@@ -164,6 +206,9 @@ impl LaneHeadStore for JsonlSessionStorage {
         lane_id: LaneId,
         head: Option<NodeId>,
     ) -> Result<(), SessionError> {
+        // Task 028：跨进程锁（仅当启用时），与 `append` 同一锁文件，保证
+        // message 行与 lane head 行跨进程不交错。
+        let _file_guard = self.acquire_file_lock().await?;
         // 与 009 append 同一写路径、同一原子性保证：O_APPEND 单行 + sync_all。
         let mut line = serde_json::to_string(&LaneHeadRecord { lane_id, head })?;
         line.push('\n');
@@ -188,5 +233,85 @@ impl LaneHeadStore for JsonlSessionStorage {
             }
         }
         Ok(heads)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::message::{Message, UserContent, UserMessage};
+    use std::sync::Arc;
+
+    fn user_msg(text: &str) -> Message {
+        Message::User(UserMessage {
+            content: vec![UserContent::Text { text: text.into() }],
+            timestamp: 0,
+        })
+    }
+
+    /// Task 028：open_locked 启用跨进程锁，append 可正常获取锁并落盘。
+    #[tokio::test]
+    async fn test_open_locked_append() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let lock = FileLock::for_path(&path);
+        let storage = JsonlSessionStorage::open_locked(&path, "test-session", lock)
+            .await
+            .expect("open_locked should succeed");
+
+        let id = storage
+            .append(None, user_msg("hello"))
+            .await
+            .expect("append should succeed");
+        assert_eq!(id, 0, "first append should get id 0");
+
+        // load 验证落盘（load 不抢锁）。
+        let tree = storage.load().await.expect("load should succeed");
+        assert_eq!(tree.nodes.len(), 1, "should have 1 node");
+    }
+
+    /// Task 028：open_locked 顺序 append 正确（跨进程锁每次获取/释放）。
+    #[tokio::test]
+    async fn test_open_locked_sequential_append() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let lock = FileLock::for_path(&path);
+        let storage = Arc::new(
+            JsonlSessionStorage::open_locked(&path, "test-session", lock)
+                .await
+                .expect("open_locked should succeed"),
+        );
+
+        // 顺序 append 8 条（parent 链），验证每次 append 正确获取/释放跨进程锁。
+        let mut parent: Option<u64> = None;
+        for i in 0..8 {
+            let msg = user_msg(&format!("msg-{i}"));
+            let id = storage
+                .append(parent, msg)
+                .await
+                .expect("append should succeed");
+            parent = Some(id);
+        }
+
+        // load 验证条数正确、无半行、树结构正确。
+        let tree = storage.load().await.expect("load should succeed");
+        assert_eq!(tree.nodes.len(), 8, "should have 8 nodes");
+        assert_eq!(tree.root, Some(0), "root should be id 0");
+    }
+
+    /// 零破坏：open 默认无跨进程锁，行为与 009 一致。
+    #[tokio::test]
+    async fn test_open_default_no_file_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let storage = JsonlSessionStorage::open(&path, "test-session")
+            .await
+            .expect("open should succeed");
+
+        let id = storage
+            .append(None, user_msg("hello"))
+            .await
+            .expect("append should succeed");
+        assert_eq!(id, 0, "first append should get id 0");
     }
 }
