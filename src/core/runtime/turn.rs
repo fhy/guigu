@@ -289,32 +289,48 @@ pub(crate) async fn stream_turn(
     let _ = events_tx.send(AgentEvent::MessageStart { message: initial });
 
     let mut stream = stream;
-    while let Some(event) = stream.next().await {
-        // 交错 drain：Abort/Shutdown 就地取消并停止消费。
-        // Steer/FollowUp 在此不消费（留待 no-tool 边界注入），re-queue 防丢失。
-        let d = drain_commands(rx, queue, signal);
-        for msg in d.steer {
-            queue.push_back(AgentCommand::Steer(msg));
-        }
-        for msg in d.followup {
-            queue.push_back(AgentCommand::FollowUp(msg));
-        }
-        if d.aborted || d.shutdown {
-            acc.aborted = true;
-            break;
-        }
+    loop {
+        // 与取消信号竞争：即使 provider 不主动响应取消（`stream.next()` 永不
+        // 返回），`signal.cancelled()` 就绪也能退出消费循环并收尾 turn。
+        tokio::select! {
+            event = stream.next() => {
+                match event {
+                    Some(event) => {
+                        // 交错 drain：Abort/Shutdown 就地取消并停止消费。
+                        // Steer/FollowUp 在此不消费（留待 no-tool 边界注入），re-queue 防丢失。
+                        let d = drain_commands(rx, queue, signal);
+                        for msg in d.steer {
+                            queue.push_back(AgentCommand::Steer(msg));
+                        }
+                        for msg in d.followup {
+                            queue.push_back(AgentCommand::FollowUp(msg));
+                        }
+                        if d.aborted || d.shutdown {
+                            acc.aborted = true;
+                            break;
+                        }
 
-        let terminal = acc.handle_event(&event);
-        if terminal {
-            break;
-        }
+                        let terminal = acc.handle_event(&event);
+                        if terminal {
+                            break;
+                        }
 
-        // MessageUpdate：累积消息 + 增量 delta。
-        let current = acc.build_assistant(&model_id);
-        let _ = events_tx.send(AgentEvent::MessageUpdate {
-            message: Arc::new(Message::Assistant(current)),
-            assistant_event: event,
-        });
+                        // MessageUpdate：累积消息 + 增量 delta。
+                        let current = acc.build_assistant(&model_id);
+                        let _ = events_tx.send(AgentEvent::MessageUpdate {
+                            message: Arc::new(Message::Assistant(current)),
+                            assistant_event: event,
+                        });
+                    }
+                    // 流正常结束（provider 主动关闭）。
+                    None => break,
+                }
+            }
+            _ = signal.cancelled() => {
+                acc.aborted = true;
+                break;
+            }
+        }
     }
 
     // 收尾：终态消息 + tool_calls + MessageEnd。

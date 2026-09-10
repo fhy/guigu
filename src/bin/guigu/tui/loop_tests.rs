@@ -1,22 +1,21 @@
-//! TUI 事件循环测试（Task 023 r1 修复）：prompt 提交不阻塞 UI 事件循环。
+//! TUI 事件循环测试（Task 023）：prompt 提交不阻塞 UI 事件循环 + 退出路径。
 //!
 //! 从 `mod.rs` 拆出（单文件 ≤ 400 行约束），经 `#[path]` 挂为 `tui::loop_tests`。
-//! 无真实终端驱动 `run_loop`（draw 回调计数）：
-//! - prompt 未完成（命令 task 未回送）期间，循环仍能消费键事件与 agent 事件；
-//! - prompt 提交失败回送 UI 状态（error + Error 状态）；
-//! - 终端读错误以明确错误退出循环（区分正常退出）。
+//! 无真实终端驱动 `run_loop`（draw 回调计数）。
 
 use super::*;
 use async_trait::async_trait;
 use crossterm::event::{KeyCode, KeyModifiers};
 use guigu::core::agent::AgentConfig;
 use guigu::core::message::{AssistantContent, AssistantMessage, ThinkingLevel};
-use guigu::core::provider::AssistantEvent;
+use guigu::core::provider::{
+    AssistantEvent, AssistantStream, ModelProvider, ProviderError, ProviderRequest,
+};
 use guigu::core::runtime::{AgentRuntime, LoopConfig};
 use guigu::core::session::{
     NodeId, SessionEntry, SessionError, SessionStorage, SessionTree, reduce,
 };
-use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::fake::FakeProvider;
 
@@ -62,6 +61,32 @@ impl SessionStorage for MemStorage {
 
     fn next_id(&self) -> NodeId {
         self.next_id.load(Ordering::SeqCst)
+    }
+}
+
+/// 阻塞 provider（r3 回归测试用）：`stream()` 后置位信号，返回永不产出事件的流
+/// （`stream.next()` 永不返回），复现「provider 永不返回」场景。
+struct BlockingProvider {
+    /// 流建立后置 true（确定性信号，供测试确认 provider 已进入阻塞）。
+    stream_established: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl ModelProvider for BlockingProvider {
+    async fn stream(&self, _request: ProviderRequest) -> Result<AssistantStream, ProviderError> {
+        self.stream_established.store(true, Ordering::SeqCst);
+        Ok(Box::pin(futures::stream::pending()))
+    }
+}
+
+/// 等待 `AtomicBool` 置 true（带超时，超时 panic 而非永久挂起）。
+async fn wait_for_flag(flag: &AtomicBool, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while !flag.load(Ordering::SeqCst) {
+        if tokio::time::Instant::now() >= deadline {
+            panic!("timeout waiting for flag");
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
 }
 
@@ -273,57 +298,102 @@ async fn reader_error_exits_loop_with_error() {
     );
 }
 
-/// prompt 永不完成（命令 task 阻塞在满队列的 `server.prompt().await`）时，
-/// 退出路径（abort 命令 task + shutdown）仍能在期限内完成，不无期限挂起。
+/// 真实 `AgentServer` 满队列 + provider 永不返回时，退出路径（abort 命令 task
+/// + shutdown）仍能在期限内完成，不无期限挂起（r3 回归：复现生产缺陷场景）。
+///
+/// 与 r2 测试的区别：使用真实 session/lane + 阻塞 provider（`stream.next()`
+/// 永不返回），确定性填满 100 槽位 agent 命令队列，验证完整退出路径（而非
+/// 空 server + 独立 fake task）。
 #[tokio::test]
-async fn exit_completes_within_deadline_when_prompt_never_completes() {
-    // 空 server（shutdown 立即返回）+ 假命令 task（收到 Prompt 后永久阻塞）。
+async fn exit_completes_within_deadline_when_agent_queue_full_and_provider_blocks() {
+    // 阻塞 provider：流建立后置位信号，流永不产出事件（provider 永不返回）。
+    let stream_established = Arc::new(AtomicBool::new(false));
+    let stream_established_clone = stream_established.clone();
+
     let server = AgentServer::new();
-
-    // 假命令 task：收到 Prompt 先信号「已收到」，再永久阻塞（模拟阻塞在
-    // 满队列、永不返回的 prompt）。
-    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<TuiCommand>();
-    let (prompt_received_tx, prompt_received_rx) = tokio::sync::oneshot::channel::<()>();
-    let mut prompt_received_tx = Some(prompt_received_tx);
-    let fake_cmd = tokio::spawn(async move {
-        while let Some(cmd) = cmd_rx.recv().await {
-            match cmd {
-                TuiCommand::Prompt { .. } => {
-                    if let Some(tx) = prompt_received_tx.take() {
-                        let _ = tx.send(());
-                    }
-                    // 模拟 prompt 阻塞在满队列：永不返回。
-                    std::future::pending::<()>().await;
-                }
-                TuiCommand::Abort => {}
-            }
-        }
+    server.with_runtime_factory(move || {
+        (
+            AgentConfig {
+                system_prompt: "t".into(),
+                model: Some("m".into()),
+                thinking_level: ThinkingLevel::Off,
+            },
+            AgentRuntime {
+                provider: Arc::new(BlockingProvider {
+                    stream_established: stream_established_clone.clone(),
+                }),
+                tools: Vec::new(),
+                loop_config: LoopConfig::default(),
+            },
+        )
     });
+    server
+        .create_session("s".into(), Arc::new(MemStorage::new()))
+        .await
+        .expect("create session");
+    server
+        .spawn_lane_from_factory("s", "l")
+        .await
+        .expect("spawn lane");
 
-    // 提交 prompt（假命令 task 收到后阻塞）。
+    // 发送第一个 prompt（runtime 开始处理，provider 进入阻塞）。
+    server
+        .prompt(
+            "s",
+            "l",
+            vec![Message::User(UserMessage {
+                content: vec![UserContent::Text {
+                    text: "prompt 0".into(),
+                }],
+                timestamp: 0,
+            })],
+        )
+        .await
+        .expect("first prompt should be accepted");
+
+    // 等 provider 进入阻塞（确定性信号，非 sleep 猜测）。
+    wait_for_flag(&stream_established, Duration::from_millis(2000)).await;
+
+    // 发送 100 个额外 prompt 填满队列（runtime 卡在 provider 流无法 drain）。
+    for i in 1..=100 {
+        server
+            .prompt(
+                "s",
+                "l",
+                vec![Message::User(UserMessage {
+                    content: vec![UserContent::Text {
+                        text: format!("prompt {i}"),
+                    }],
+                    timestamp: 0,
+                })],
+            )
+            .await
+            .expect("prompt should be accepted (queue not yet full)");
+    }
+
+    // 队列已满。创建命令 task 并发送 prompt（阻塞在满队列）。
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<TuiCommand>();
+    let (result_tx, _result_rx) = mpsc::unbounded_channel::<CommandResult>();
+    let cmd_task = spawn_command_task(server.clone(), "s", "l", cmd_rx, result_tx);
     let _ = cmd_tx.send(TuiCommand::Prompt {
         messages: vec![Message::User(UserMessage {
-            content: vec![UserContent::Text { text: "hi".into() }],
+            content: vec![UserContent::Text {
+                text: "prompt 101".into(),
+            }],
             timestamp: 0,
         })],
     });
 
-    // 等假命令 task 收到 prompt 并进入阻塞（确定性信号，非 sleep 猜测）。
-    tokio::time::timeout(Duration::from_millis(2000), prompt_received_rx)
-        .await
-        .expect("prompt should be received within 2s")
-        .expect("prompt received signal");
-
-    // 退出路径：abort + await + shutdown，prompt 永不完成仍应在期限内完成。
+    // 退出路径：abort + shutdown，满队列 + provider 永不返回仍应在期限内完成。
     drop(cmd_tx);
     let result = tokio::time::timeout(
         Duration::from_millis(2000),
-        stop_command_task_and_shutdown(fake_cmd, &server),
+        stop_command_task_and_shutdown(cmd_task, &server),
     )
     .await;
     assert!(
         result.is_ok(),
-        "exit should complete within deadline even if prompt never completes"
+        "exit should complete within deadline even if the agent queue is full and the provider blocks"
     );
     result.expect("within deadline").expect("shutdown ok");
 }

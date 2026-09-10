@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 /// 对外不可变的 agent 快照（watch 权威最新状态）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -61,6 +62,10 @@ pub struct AgentHandle {
     processed: watch::Receiver<u64>,
     /// exited 标志：runtime task 退出前置 true，shutdown 据此等待。
     exited: watch::Receiver<bool>,
+    /// shutdown 控制令牌：与 runtime task 共享。`shutdown` 直接 cancel 它，
+    /// 绕过 bounded 命令队列的背压（队列满 + runtime 卡在 provider 流时，
+    /// `tx.send(Shutdown)` 会永久阻塞，而 cancel 不受队列容量影响）。
+    shutdown_token: CancellationToken,
 }
 
 /// Agent 错误类型。
@@ -248,6 +253,7 @@ impl AgentHandle {
         let (processed_tx, processed_rx) = watch::channel(0u64);
         let (exited_tx, exited_rx) = watch::channel(false);
         let sent = Arc::new(AtomicU64::new(0));
+        let shutdown_token = CancellationToken::new();
 
         spawn_runtime(
             rx,
@@ -255,6 +261,7 @@ impl AgentHandle {
             events_tx.clone(),
             processed_tx,
             exited_tx,
+            shutdown_token.clone(),
             config,
             runtime,
             initial_transcript,
@@ -267,6 +274,7 @@ impl AgentHandle {
             sent,
             processed: processed_rx,
             exited: exited_rx,
+            shutdown_token,
         }
     }
 
@@ -289,9 +297,14 @@ impl AgentHandle {
         wait_processed(&self.processed, &self.sent, "wait_for_idle").await
     }
 
-    /// 关闭 agent：发 Shutdown 并等 runtime task 真正退出。
+    /// 关闭 agent：cancel shutdown 控制令牌并等 runtime task 真正退出。
+    ///
+    /// 不向 bounded 命令队列发 `Shutdown`（队列满 + runtime 卡在 provider 流时
+    /// 该 send 会永久阻塞）；改为直接 cancel `shutdown_token`——runtime 主循环与
+    /// provider 流消费均与该令牌竞争，cancel 不受队列背压影响，故 shutdown 总能
+    /// 在 `wait_flag` 超时前驱动 runtime 退出。
     pub async fn shutdown(self) -> Result<(), AgentError> {
-        let _ = self.tx.send(AgentCommand::Shutdown).await;
+        self.shutdown_token.cancel();
         wait_flag(&self.exited, "shutdown").await
     }
 }

@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 use crate::core::agent::{AgentCommand, AgentConfig, AgentSnapshot};
 use crate::core::event::AgentEvent;
@@ -23,9 +24,14 @@ use crate::core::runtime::{AgentRuntime, RunContext, run_agent_loop};
 ///
 /// `initial_transcript` 为初始 transcript（session 恢复时注入历史消息；空 = 新会话）。
 ///
-/// 参数为 5 个通道 + config + runtime + initial_transcript（共 8 个）：通道是
-/// runtime task 的对外接口（命令/snapshot/事件/计数/退出），捆绑成结构体收益
-/// 不大（仅 `AgentHandle::spawn_with_transcript` 单点调用），故显式 allow。
+/// `shutdown_token` 为 shutdown 控制令牌（与 `AgentHandle` 共享）：主循环与
+/// provider 流消费均与其竞争，`AgentHandle::shutdown` cancel 它即可驱动本 task
+/// 退出，不受 bounded 命令队列背压影响。
+///
+/// 参数为 5 个通道 + shutdown_token + config + runtime + initial_transcript
+/// （共 9 个）：通道是 runtime task 的对外接口（命令/snapshot/事件/计数/退出），
+/// 捆绑成结构体收益不大（仅 `AgentHandle::spawn_with_transcript` 单点调用），
+/// 故显式 allow。
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_runtime(
     mut rx: mpsc::Receiver<AgentCommand>,
@@ -33,6 +39,7 @@ pub fn spawn_runtime(
     events_tx: broadcast::Sender<AgentEvent>,
     processed_tx: watch::Sender<u64>,
     exited_tx: watch::Sender<bool>,
+    shutdown_token: CancellationToken,
     config: AgentConfig,
     runtime: AgentRuntime,
     initial_transcript: Vec<Arc<Message>>,
@@ -49,17 +56,25 @@ pub fn spawn_runtime(
             queue: &mut queue,
             runtime: &runtime,
             config: &config,
+            shutdown_token: &shutdown_token,
         };
 
         loop {
+            // shutdown 控制令牌已 cancel → 立即退出（绕过命令队列背压）。
+            if shutdown_token.is_cancelled() {
+                break;
+            }
             // 取下一条命令：优先本地队列（run 期间到达的命令，更旧），再取通道，
-            // 保证 FIFO 顺序。
+            // 保证 FIFO 顺序；通道 recv 与 shutdown 令牌竞争（cancel 时退出）。
             let cmd = if let Some(queued) = state.queue.pop_front() {
                 queued
             } else {
-                match state.rx.recv().await {
-                    Some(cmd) => cmd,
-                    None => break,
+                tokio::select! {
+                    maybe_cmd = state.rx.recv() => match maybe_cmd {
+                        Some(cmd) => cmd,
+                        None => break,
+                    },
+                    _ = shutdown_token.cancelled() => break,
                 }
             };
 
@@ -80,7 +95,7 @@ pub fn spawn_runtime(
 }
 
 /// runtime task 的共享状态：命令通道、事件/snapshot 通道、transcript、
-/// 本地队列与运行时依赖。捆绑后避免命令处理函数参数过多。
+/// 本地队列、shutdown 控制令牌与运行时依赖。捆绑后避免命令处理函数参数过多。
 struct RuntimeState<'a> {
     rx: &'a mut mpsc::Receiver<AgentCommand>,
     events_tx: &'a broadcast::Sender<AgentEvent>,
@@ -89,6 +104,7 @@ struct RuntimeState<'a> {
     queue: &'a mut VecDeque<AgentCommand>,
     runtime: &'a AgentRuntime,
     config: &'a AgentConfig,
+    shutdown_token: &'a CancellationToken,
 }
 
 /// 处理单条命令。返回 `(shutdown, extra)`：
@@ -134,6 +150,7 @@ async fn run_with_initial(state: &mut RuntimeState<'_>, initial: Vec<Message>) -
         config: &state.runtime.loop_config,
         system_prompt: &state.config.system_prompt,
         thinking_level: state.config.thinking_level.clone(),
+        shutdown_token: state.shutdown_token,
     };
     let outcome = run_agent_loop(&mut ctx, initial).await;
     (outcome.shutdown, outcome.consumed)

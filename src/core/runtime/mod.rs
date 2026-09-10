@@ -135,6 +135,9 @@ pub(crate) struct RunContext<'a> {
     pub config: &'a LoopConfig,
     pub system_prompt: &'a str,
     pub thinking_level: ThinkingLevel,
+    /// shutdown 控制令牌（与 `AgentHandle` 共享）：run 级 `signal` 作为其 child，
+    /// `AgentHandle::shutdown` cancel 它时本 run 的 provider 流/退避等待一并取消。
+    pub shutdown_token: &'a CancellationToken,
 }
 
 /// run 结果：是否收到 Shutdown + run 期间消费的 Steer/FollowUp 数（已计入 sent）。
@@ -264,8 +267,12 @@ fn build_request(ctx: &RunContext, signal: &CancellationToken) -> ProviderReques
 /// 运行一次 agent loop（一个 run）。
 ///
 /// `initial` 为本 run 的新用户消息（`Continue` 为空）。返回 `RunOutcome`。
+///
+/// run 级 `signal` 作为 `shutdown_token` 的 child：`AgentHandle::shutdown`
+/// cancel 父令牌时本 run 的 provider 流/退避等待一并取消（即使 provider 不
+/// 主动响应取消，`stream_turn` 也与 `signal.cancelled()` 竞争）。
 pub(crate) async fn run_agent_loop(ctx: &mut RunContext<'_>, initial: Vec<Message>) -> RunOutcome {
-    let signal = CancellationToken::new();
+    let signal = ctx.shutdown_token.child_token();
     let mut consumed: u64 = 0;
 
     // 追加初始用户消息（drain 检查 Abort/Shutdown）。
