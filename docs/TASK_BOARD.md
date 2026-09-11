@@ -90,7 +90,7 @@
 
 - [x] 030 — Agent 插件 agent_factory 锁外回调纪律（029 r1 遗留：锁内复制 Arc、锁外回调 + 重入回归测试）
 - [x] 031 — schemars 工具参数统一入口 + root_schema 语义澄清（027 r1 遗留：统一 `#[cfg]` 入口 + 文档澄清非 validator）
-- [ ] 032 — config UnknownProtocol 变体清理 + 测试 unwrap 清理（022 r2 遗留：删除/映射未用变体 + tests/config.rs 去 unwrap）
+- [~] 032 — config UnknownProtocol 变体清理 + 测试 unwrap 清理（022 r2 遗留：删除/映射未用变体 + tests/config.rs 去 unwrap）
 - [ ] 033 — prune_locked 改关联函数（017-c r2 遗留：`&self` 未用改无 self helper）
 - [ ] 034 — 装配测试样板提炼 helper（026 r1 遗留：assemble.rs 测试构造/清理提取 helper）
 - [ ] 035 — chacha20 锁文件更新 + CI package 校验（019 r3 遗留；⚠ `.github/` 归属 PM 已授权 override）
@@ -168,3 +168,4 @@
 - 036 复核（2026-09-12，Architect，响应 PM「复核任务完成情况」）：reviewer 已补 r2（docs/reviews/036-review-r2.md，结论 PASS，四门禁全绿：check ✓ / clippy --all-targets ✓ / test --all-targets 365 库+18 binary+全部集成 ✓ / fmt ✓），roadmap 分项状态与任务索引及 029 交付事实一致、无阻塞问题。故 036 由 [~] 转 [x] 关闭。十一期（030~036）已完成 030/036，剩 031~035 待 PM 逐个「启动」进入开发。⚠ 本地领先 origin/main 2 个 reviewer 提交（374b843 029/030 审批落库、26a9a0a 036 r2 pass）未 push，本次随 Architect 提交连带推送
 - 031 启动（2026-09-12，Architect，依据 PM「启动 031」）：规格 v1.0（docs/tasks/031-schemars-helper-unify.md）已就绪并复核——承接 027 r1 两条非阻塞建议：① 四个内置工具（read/write/edit/bash）`parameters()` 各自重复 `#[cfg]` 分支，提炼统一 feature-gated 内部入口（`src/core/schema.rs` 收敛，工具委托该入口）；② `root_schema` 语义澄清——文档注释明确「仅 Value→RootSchema 结构反序列化 / 往返，非完整 JSON Schema 校验器」，是否更名以实际命名冲突为准（无冲突仅补注释，避免无谓 breaking）。零破坏：不改 `Tool` trait 签名、不改工具对外 schema 内容（object 类型/required 集合/数值约束与 005/006 语义一致）、无新错误类型。031 由 [ ] 转 [~] 进入开发，下一步 Developer 实现
 - 031 复核（2026-09-12，Architect，响应 PM「复核任务完成情况」）：实现已合并（fdd08f1，refactor(schema)）；reviewer r1 审查通过（docs/reviews/031-review-r1.md，结论 PASS，审查提交 60bb1de 已落库 push）：四门禁全绿（check ✓ / clippy --all-targets -D warnings ✓ / test --all-targets 366 库+18 binary+集成 ✓ / test --no-default-features 261 库+集成 ✓ / fmt ✓），无阻塞问题；统一 feature-gated `tool_parameters` 内部入口收敛四工具 `#[cfg]` 重复、`root_schema` 语义澄清为「结构反序列化/往返非 validator」，`Tool::parameters()` 对外签名不变。故 031 由 [~] 转 [x] 关闭。十一期（030~036）已完成 030/031/036，剩 032~035 待 PM 逐个「启动」
+- 032 启动（2026-09-12，Architect，依据 PM「启动 032」）：规格 v1.0（docs/tasks/032-config-error-cleanup.md）已就绪并复核——承接 022 r2 两条非阻塞建议：① `src/config.rs:118-121` 的 `UnknownProtocol` 错误变体无实际构造路径（未知协议已由 serde 解析错误统一映射 `ProviderConfigError::Parse`），公开错误 API 与实际行为不一致；② `tests/config.rs` 及相关测试仍用 `unwrap`/`expect`，违背 conventions「无 unwrap()」。清理决策：优先**删除**未用变体（零构造路径=零行为变化，公开枚举减少一个从未生效的变体）；若 Developer 审查实际代码发现 `UnknownProtocol` 有引用或语义价值，则改为「解析层显式映射为 UnknownProtocol」——以实际代码为权威，二选一后保持公开错误 API 与实际行为一致。测试清理范围仅限 config 相关（不扩全仓），`unwrap`/`expect` 改带语义 `expect` 或返回 `Result` 用 `?`/`assert`。零行为变化、无新依赖、无新错误类型（删除变体需确认无 `match` 穷尽分支受影响）。032 由 [ ] 转 [~] 进入开发，下一步 Developer 实现
