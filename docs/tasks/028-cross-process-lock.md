@@ -33,20 +33,20 @@ pub struct FileLock {
     lock_file: std::path::PathBuf,
 }
 
-pub struct FileLockGuard<'a> { /* 持有 fs2 锁句柄，Drop 自动解锁 */ }
+pub struct FileLockGuard { /* 持有已加锁的 File 句柄（Arc<File>），Drop 自动解锁 */ }
 
 impl FileLock {
     /// 构造锁（不立即加锁）。锁文件与目标文件同级目录、命名 `<目标文件名>.guigu.lock`。
     pub fn for_path(target: &Path) -> FileLock;
 
     /// 阻塞获取独占锁（spawn_blocking 包裹 fs2 锁调用，可被外层 select 取消/超时）。
-    pub async fn lock_exclusive(&self) -> Result<FileLockGuard<'_>, FileLockError>;
+    pub async fn lock_exclusive(&self) -> Result<FileLockGuard, FileLockError>;
 
     /// 非阻塞尝试：立即可得 → Some(guard)；被他人持有 → Ok(None)。
-    pub async fn try_lock_exclusive(&self) -> Result<Option<FileLockGuard<'_>>, FileLockError>;
+    pub async fn try_lock_exclusive(&self) -> Result<Option<FileLockGuard>, FileLockError>;
 }
 
-impl Drop for FileLockGuard<'_> { /* fs2 unlock */ }
+impl Drop for FileLockGuard { /* fs2 unlock */ }
 ```
 
 **关键语义**：
@@ -55,7 +55,7 @@ impl Drop for FileLockGuard<'_> { /* fs2 unlock */ }
 2. **阻塞 + 可取消 + 可超时**：`lock_exclusive` 内部用 `spawn_blocking` 跑 `fs2::FileExt::lock_exclusive`（阻塞 syscall）；调用方用 `tokio::select!` 与 `signal.cancelled()` / `sleep(timeout)` 组合实现取消与超时。**本方法不内置超时**（对齐 006 `FileMutationQueue::acquire` 的「等待可被外层 select 打断」契约）。
 3. **RAII + 崩溃释放**：`FileLockGuard` Drop 即 `fs2::unlock`，覆盖异常/取消提前返回；进程崩溃则内核释放 flock/LockFileEx，无需清理锁文件。
 4. **spawn_blocking 细节**：锁操作（`lock_exclusive`/`try_lock`/`unlock`）均在 `spawn_blocking` 内执行；guard 持有的是**已加锁的 `File` 句柄**（`Arc<File>`），Drop 时的 `unlock` 是同步快速操作，直接调用即可，不必再 spawn_blocking。
-5. **不跨 await 持 std 锁**：`FileLockGuard` 内部仅持 `File` 句柄 + 生命周期借用，无 std Mutex，天然满足「不持锁跨 await」。
+5. **不跨 await 持 std 锁**：`FileLockGuard` 内部仅持有已加锁的 `File` 句柄（`Arc<File>`，所有权语义、无生命周期借用），无 std Mutex，天然满足「不持锁跨 await」。
 
 ### 错误语义（FileLockError）
 
@@ -79,11 +79,18 @@ impl FileMutationQueue {
     pub fn new() -> Self;                                            // 既有：仅进程内
     /// 新增：进程内 per-path 锁 + 跨进程锁双层。
     pub fn with_file_lock(lock: FileLock) -> Self;                   // 或接受 Arc<FileLock>
+    /// 新增：返回 Result——跨进程锁获取失败时拒绝进入写临界区，不静默降级为仅进程内锁。
+    pub async fn acquire(&self, path: &Path) -> Result<FileMutationGuard<'_>, FileMutationError>;
 }
+
+/// acquire 的失败类型：承载跨进程锁获取失败（源自 FileLockError），保留 Open/Acquire/Cancelled/Join 语义。
+#[derive(Debug, thiserror::Error)]
+pub enum FileMutationError { /* 至少含 #[from] FileLockError 变体 */ }
 ```
 
 - `acquire(path)` 时序（在既有进程内 per-path 锁之上，**仅当配置了跨进程锁时**追加）：先进程内 per-path 锁（既有）→ 再 `file_lock.lock_exclusive()` 跨进程锁（新增）。跨进程锁在**拿到进程内锁之后、IO 之前**获取，避免「进程内已串行、跨进程还抢锁」的无效竞争。
-- **零破坏**：`WriteTool::new(queue: Arc<FileMutationQueue>)` 签名不变；`FileMutationQueue::new()` 默认行为与 006 完全一致。嵌入方需要跨进程安全时改用 `with_file_lock`。
+- **失败拒绝写临界区**（r1 打回修正）：跨进程锁 `lock_exclusive()` 的 `Open`/`Acquire`/`Join`/`Cancelled` 任一失败 → `acquire` 返回 `Err(FileMutationError)`，调用方（`WriteTool`/`EditTool`）`map_err(ToolError)` 传播，**不得**吞错误后继续返回 guard（否则退化为仅进程内锁，破坏 opt-in 跨进程串行保证）。
+- **零破坏**：`WriteTool::new(queue: Arc<FileMutationQueue>)` 签名不变；`FileMutationQueue::new()` 默认行为与 006 完全一致（未配置跨进程锁时 `acquire` 不触发 `FileMutationError` 路径）。嵌入方需要跨进程安全时改用 `with_file_lock`。
 - 锁文件路径：跨进程锁的锁文件按**目标文件路径**确定（`FileLock::for_path(target)`），故每个 `acquire(path)` 用 `FileLock::for_path(path)` 动态构造（或内部缓存 lock 对象），不同路径互不干扰、同路径跨进程互斥。
 
 ### 集成 2：JsonlSessionStorage 可选跨进程 append（core/session/jsonl.rs）
@@ -97,6 +104,8 @@ impl JsonlSessionStorage {
 ```
 
 - append 时序：`file_lock.lock_exclusive().await` → 落盘 append → guard Drop 解锁。**仅包 append**，`load` 不抢锁（对齐 012「load 只在无活跃写时调用」的既有约定）。
+- **锁覆盖整个事务**（r1 打回修正）：`next_id` 仅为进程内 `AtomicU64`，多个进程 `open_locked` 同一 session 时会从相同游标认领重复 id。故锁必须覆盖「**先抢跨进程锁 → 锁内重读文件取跨进程权威最大 id 刷新进程内游标 + 截断崩溃半行 → 认领 id → 写入 → sync_all**」整个事务，不能只包落盘 append。
+- **错误类型传播**（r1 打回修正）：`SessionError` 新增 `FileLock(#[from] FileLockError)` 变体，锁失败直接 `map_err(SessionError::FileLock)` 传播，保留错误类型与 source 链（Open/Acquire/Cancelled/Join 可区分），**不得**降级为 `SessionError::Io(std::io::Error::other(...))`。
 - **零破坏**：`open` 默认无跨进程锁，行为与 009 一致。
 - 锁文件路径：`<session.jsonl>.guigu.lock`，同一 session 文件的多个进程共享同一锁文件。
 
@@ -114,9 +123,11 @@ impl JsonlSessionStorage {
 - src/core/file_lock.rs（`FileLock` + `FileLockGuard` + `FileLockError` + 单测）
 - src/core/mod.rs（`pub mod file_lock`）
 - src/lib.rs（re-export `FileLock`/`FileLockGuard`/`FileLockError`）
-- src/tools/file_mutation_queue.rs（`with_file_lock` 可选叠加 + 单测）
-- src/core/session/jsonl.rs（`open_locked` 可选叠加 + 单测）
-- tests/file_lock.rs（跨进程锁集成测试：双进程互斥）
+- src/tools/file_mutation_queue.rs（`with_file_lock` 可选叠加 + `acquire` 返回 `Result<FileMutationGuard<'_>, FileMutationError>` + 单测；测试拆至子模块控制体量）
+- src/tools/write.rs / src/tools/edit.rs（`acquire` 失败 `map_err(ToolError)` 传播，不再吞错误继续写）
+- src/core/session/jsonl.rs（`open_locked` 可选叠加 + 锁内游标刷新/半行截断 + 单测；测试拆至子模块控制体量）
+- src/core/session/session.rs（`SessionError` 新增 `FileLock(#[from] FileLockError)` 变体）
+- tests/file_lock.rs（跨进程锁集成测试：双进程互斥 + 双进程 jsonl 并发 append 断言 id 唯一/条数完整/无半行）
 
 ## Acceptance Criteria
 
@@ -135,3 +146,4 @@ impl JsonlSessionStorage {
 ## 修订记录
 
 - v1.0（2026-09，Architect）：初稿。roadmap 候选 5 立项，十期第二项。`FileLock` 原语选 `fs2`（跨平台 flock/LockFileEx，内核态锁崩溃自释放，化解「遗留锁」风险），同步阻塞 API 用 `spawn_blocking` 包裹；`FileMutationQueue::with_file_lock` 与 `JsonlSessionStorage::open_locked` 可选叠加，零破坏既有 `new()`/`open()` 默认。锁粒度整个文件、无租约、NFS 不支持、Windows 仅声明不测试，均列为边界。
+- v1.1（2026-09，Architect，依据 028-review-r1 打回修复同步规格）：① `FileLockGuard<'a>` 生命周期参数移除——guard 持有已加锁的 `File` 句柄（`Arc<File>`，所有权语义），无生命周期借用（r1 偏差 1）；② `FileMutationQueue::acquire` 签名改为 `Result<FileMutationGuard<'_>, FileMutationError>`，跨进程锁获取失败拒绝进入写临界区，新增 `FileMutationError` 类型承载 `FileLockError`（r1 Critical/High 修正）；③ `JsonlSessionStorage` 跨进程锁覆盖「读游标/分配 id/写入/sync_all」整个事务，`SessionError` 新增 `FileLock(#[from] FileLockError)` 变体保留 source 链（r1 Critical/Warning 修正）；④ 双进程 jsonl 并发 append 集成测试补充（r1 偏差 3）。
