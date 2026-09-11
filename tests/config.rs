@@ -26,14 +26,14 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// 写一个 TOML 配置文件到临时目录，返回路径。
 fn write_config(dir: &tempfile::TempDir, name: &str, content: &str) -> std::path::PathBuf {
     let path = dir.path().join(name);
-    std::fs::write(&path, content).unwrap();
+    std::fs::write(&path, content).expect("write config file");
     path
 }
 
 /// `Config::load`：TOML 反序列化 + 表键注入 `name` + 可选字段解析。
 #[test]
 fn load_toml_parses_and_injects_name() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create temp dir");
     let path = write_config(
         &dir,
         "guigu.toml",
@@ -52,7 +52,7 @@ max_tokens = 8192
 anthropic_version = "2023-06-01"
 "#,
     );
-    let config: GuiguConfig = Config::load(&path).unwrap();
+    let config: GuiguConfig = Config::load(&path).expect("load config");
 
     let ollama = config.models.get("ollama").expect("ollama entry");
     assert_eq!(ollama.name, "ollama");
@@ -80,16 +80,16 @@ anthropic_version = "2023-06-01"
 /// `Config::load`：空文件 → 空配置（向后兼容）。
 #[test]
 fn load_empty_toml_gives_empty_config() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create temp dir");
     let path = write_config(&dir, "empty.toml", "");
-    let config = Config::load(&path).unwrap();
+    let config = Config::load(&path).expect("load config");
     assert!(config.models.is_empty());
 }
 
 /// `Config::resolve`：显式路径加载。
 #[test]
 fn resolve_explicit_path() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create temp dir");
     let path = write_config(
         &dir,
         "guigu.toml",
@@ -100,7 +100,8 @@ model = "m"
 api_key = "k"
 "#,
     );
-    let config = Config::resolve(Some(Path::new(path.to_str().unwrap()))).unwrap();
+    let config = Config::resolve(Some(Path::new(path.to_str().expect("path is valid UTF-8"))))
+        .expect("resolve config");
     assert!(config.models.contains_key("local"));
     assert_eq!(config.models["local"].name, "local");
 }
@@ -118,7 +119,7 @@ fn build_provider_openai() {
         max_tokens: None,
         anthropic_version: None,
     };
-    let provider = build_provider(&config, "sk-test").unwrap();
+    let provider = build_provider(&config, "sk-test").expect("build provider");
     assert!(std::sync::Arc::strong_count(&provider) >= 1);
 }
 
@@ -135,7 +136,7 @@ fn build_provider_anthropic() {
         max_tokens: Some(2048),
         anthropic_version: Some("2024-01-01".into()),
     };
-    let provider = build_provider(&config, "sk-test").unwrap();
+    let provider = build_provider(&config, "sk-test").expect("build provider");
     assert!(std::sync::Arc::strong_count(&provider) >= 1);
 }
 
@@ -183,7 +184,7 @@ async fn base_url_override_routes_to_custom_endpoint() {
         max_tokens: None,
         anthropic_version: None,
     };
-    let provider = build_provider(&config, "sk-test").unwrap();
+    let provider = build_provider(&config, "sk-test").expect("build provider");
     let stream = provider
         .stream(make_request(CancellationToken::new()))
         .await
@@ -228,7 +229,7 @@ async fn anthropic_base_url_override_routes_to_custom_endpoint() {
         max_tokens: None,
         anthropic_version: None,
     };
-    let provider = build_provider(&config, "sk-test").unwrap();
+    let provider = build_provider(&config, "sk-test").expect("build provider");
     let stream = provider
         .stream(make_request(CancellationToken::new()))
         .await

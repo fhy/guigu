@@ -116,9 +116,6 @@ pub struct GuiguConfig {
 /// 配置错误。
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderConfigError {
-    /// 未知协议。
-    #[error("unknown protocol: {0}")]
-    UnknownProtocol(String),
     /// 缺少 API key（api_key 与 api_key_env 均未提供有效值）。
     #[error("missing api_key (neither api_key nor api_key_env set)")]
     MissingApiKey,
