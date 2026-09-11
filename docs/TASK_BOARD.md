@@ -84,6 +84,18 @@
 - [x] 028 — 跨进程会话锁 / 多写者文件锁（`fs2` FileLock 原语 + FileMutationQueue/JsonlSessionStorage 可选叠加；r2 审查通过，四门禁全绿，零破坏默认行为）
 - [x] 029 — Agent 插件 / 生命周期钩子（016 排除项；`LifecycleHooks` + `AgentFactory` + `AgentPluginRegistry`；零破坏 001/016/003）
 
+## 十一期 Backlog（技术债收尾，逐个实现）
+
+实施顺序：030 → 031 → 032 → 033 → 034 → 035 → 036
+
+- [ ] 030 — Agent 插件 agent_factory 锁外回调纪律（029 r1 遗留：锁内复制 Arc、锁外回调 + 重入回归测试）
+- [ ] 031 — schemars 工具参数统一入口 + root_schema 语义澄清（027 r1 遗留：统一 `#[cfg]` 入口 + 文档澄清非 validator）
+- [ ] 032 — config UnknownProtocol 变体清理 + 测试 unwrap 清理（022 r2 遗留：删除/映射未用变体 + tests/config.rs 去 unwrap）
+- [ ] 033 — prune_locked 改关联函数（017-c r2 遗留：`&self` 未用改无 self helper）
+- [ ] 034 — 装配测试样板提炼 helper（026 r1 遗留：assemble.rs 测试构造/清理提取 helper）
+- [ ] 035 — chacha20 锁文件更新 + CI package 校验（019 r3 遗留；⚠ `.github/` 归属需 PM 授权 override）
+- [ ] 036 — 架构文档插件 stale 措辞同步（029 已交付，architecture.md §7.2 + roadmap.md 订正，Architect 文档任务）
+
 ## 备注
 
 - 实施顺序：002 → 001 → 003 → 004
@@ -148,4 +160,4 @@
 - 029 启动（2026-09，Architect，依据 PM「启动 029」）：规格 v1.0（docs/tasks/029-agent-plugin-hooks.md）已就绪并复核——`LifecycleHooks` trait（对齐 003 `LoopConfig` 钩子语义：before/after tool_call + should_stop + prepare_next_turn，默认空实现，`convert_to_llm`/`transform_context` 不开放）；`AgentFactory`（按 id 产出 `Arc<dyn Agent>`）+ `AgentPlugin`（id + 贡献 hooks + 可选 agent 工厂，独立新 trait 不改 016 `Plugin`）+ `AgentPluginRegistry`（std RwLock，register/unregister/get/list/merged_hooks/agent_factory）；桥接为可选注入 `LoopConfig.hooks`，插件钩子与既有闭包钩子共存（插件先执行、闭包后执行，以 003 实际调用点为权威）；零破坏 001/016/003（独立新 trait + 可选桥接，不删旧字段）；动态库加载 / 跨进程 / 插件生命周期钩子均列边界；本任务交付原语 + 单测，不改 015/013 装配逻辑。029 由 [ ] 转 [~] 进入开发，下一步 Developer 实现
 - 029 规格 v1.1（2026-09，Architect，依据 Developer 架构审查）：修正 `LifecycleHooks` 契约不一致——v1.0 伪代码 `after_tool_call`/`prepare_next_turn` 为 observation-only（`-> Result<(), HookError>`），无法表达 003 实际闭包钩子的改写/注入语义（`Fn(&ToolCall, ToolResult) -> ToolResult` / `Fn(&AssistantMessage, &[ToolResultMessage]) -> Vec<Message>`），致插件钩子严格弱于闭包钩子、违背「语义对齐 003」。采纳**方案 A** 对齐完整语义：`after_tool_call` 按值改写（`Ok(result)` 透传 / `Err` 保留原始+记日志不阻断）、`prepare_next_turn` 返回注入消息（空=不注入 / `Err` 不注入+记日志不阻断）；合并按值串接（after 按 id 字典序传递 result、prepare 拼接注入消息，任一 Err 短路保留已成功部分）；桥接顺序定为插件先、闭包后（与 029 启动记录一致）。参数形状仍以 003 实际为权威
 - 029 复核（2026-09-11，Architect，响应 PM「复核任务完成情况」）：实现已合并（cde2125，feat(agent-plugin)）；reviewer r1 审查通过（docs/reviews/029-review-r1.md，结论 PASS）：四门禁全绿（check ✓ / clippy --all-targets -D warnings ✓ / test --all-targets 546 passed / fmt ✓），无必须修复问题。r1 一条非阻塞建议（`src/plugin/agent.rs:148-151` `agent_factory()` 持注册表读锁期间调用外部 `plugin.agent_factory()` 回调，与 `merged_hooks()` 已采用的「锁内仅复制 Arc、锁外执行回调」纪律不一致，建议锁外调用 + 补重入回归测试）留待技术债收尾。故 029 由 [~] 转 [x] 关闭。⚠ `docs/reviews/029-review-r1.md` 当前 git 未跟踪（reviewer 待落库提交）。十期（027/028/029）全部完成，既定范围 002~029 全部实现+审查+门禁闭环，roadmap 候选已全部立项并交付，无剩余规划任务
-- 下一步候选（技术债收尾清单，2026-09-11，Architect 汇总历次审查非阻塞建议，待 PM 定序）：既定功能范围 002~029 已全部闭环，剩余为各审查报告的非阻塞建议/形式缺口，可打包为一个「技术债收尾」期或逐个立项，均零行为变化或纯清理、无新依赖、低风险——① 029 r1 `agent_factory()` 锁外回调纪律（持读锁调外部 plugin 回调，与 `merged_hooks` 不一致，补重入测试）；② 027 r1 `parameters()` `#[cfg]` 分支提炼统一入口 + `root_schema` 命名/文档澄清；③ 022 r2 `UnknownProtocol` 未使用变体 + 测试 `unwrap`/`expect` 清理；④ 017-c r2 `prune_locked` 改关联函数（收 `&self` 未用）；⑤ 026 r1 装配测试样板提炼 helper；⑥ 019 遗留 `chacha20` yanked 锁文件更新 + CI 补干净 checkout `cargo package --list` 校验；⑦ 架构文档 §7.2「插件延后」stale 措辞同步（029 已交付 Agent 插件，architecture.md 需订正）。是否立项/打包方式由 PM 定序
+- 十一期立项（2026-09，Architect，依据 PM「立项逐个处理」）：技术债收尾 7 项全部立项，实施顺序 030 → 031 → 032 → 033 → 034 → 035 → 036，均零行为变化或纯清理、无新依赖、低风险——① 029 r1 `agent_factory()` 锁外回调纪律（030）；② 027 r1 `parameters()` `#[cfg]` 统一入口 + `root_schema` 语义澄清（031）；③ 022 r2 `UnknownProtocol` 未用变体 + 测试 unwrap/expect 清理（032）；④ 017-c r2 `prune_locked` 改关联函数（033）；⑤ 026 r1 装配测试 helper 提炼（034）；⑥ 019 遗留 chacha20 yanked 锁文件更新 + CI 干净 checkout `cargo package --list` 校验（035，⚠ `.github/` 归属需 PM 授权 override）；⑦ 架构文档 §7.2「插件延后」stale 措辞同步（036，Architect 文档任务）。规格 v1.0 已就绪（docs/tasks/030~036），待 PM 逐个「启动」进入开发
