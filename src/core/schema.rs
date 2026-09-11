@@ -25,6 +25,11 @@ pub fn parameters<T: JsonSchema>() -> Option<serde_json::Value> {
 /// 从 `Tool::parameters()` 的 `Value` 反序列化为类型化 [`RootSchema`]，
 /// 供 ACP/插件/编辑器消费。
 ///
+/// **语义边界（Task 031）**：本函数仅做「结构反序列化 / Value→RootSchema 往返」——
+/// 把能被 `RootSchema` 反序列化的 JSON 还原为类型化 schema，**不做完整 JSON Schema
+/// 校验**（不校验实例值是否满足 schema 的 `required`/`type`/`minimum` 等约束）。
+/// 上层若需严格校验，应另立校验器，勿复用本 helper 充当 validator。
+///
 /// 旧手工 JSON 若不符合 schemars `SchemaObject` 形状则返回 `None`，调用方据此降级（容错）。
 pub fn root_schema(params: Option<&serde_json::Value>) -> Option<schemars::schema::RootSchema> {
     params.and_then(|v| serde_json::from_value(v.clone()).ok())

@@ -106,3 +106,45 @@ pub trait Tool: Send + Sync {
         on_update: Option<&(dyn Fn(ToolResult) + Send + Sync)>,
     ) -> Result<ToolResult, ToolError>;
 }
+
+/// `Tool::parameters()` 统一入口（Task 031）：`schema` feature 下从参数类型
+/// derive 生成 schema 并序列化为 `Value`；剥离 `schema` 后返回 `None`。
+///
+/// 收敛各内置工具 `parameters()` 的 `#[cfg]` 重复分支——feature 门控内聚于此，
+/// 调用方无需再写 `#[cfg]`；`Tool` trait 对外签名不变。内部 helper（`pub(crate)`），
+/// 非公开 API（公开 schema 构建仍走 `core::schema::{schema_for, parameters}`）。
+#[cfg(feature = "schema")]
+pub(crate) fn tool_parameters<T: schemars::JsonSchema>() -> Option<serde_json::Value> {
+    crate::core::schema::parameters::<T>()
+}
+#[cfg(not(feature = "schema"))]
+pub(crate) fn tool_parameters<T>() -> Option<serde_json::Value> {
+    None
+}
+
+#[cfg(all(test, feature = "schema"))]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+
+    /// 测试用参数类型：`path` 必填（非 Option → required）。
+    #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+    struct SampleArgs {
+        path: String,
+    }
+
+    /// `tool_parameters` 在 `schema` feature 下从类型生成 object schema（Task 031 统一入口）。
+    #[test]
+    fn test_tool_parameters_generates_object_schema() {
+        let params = tool_parameters::<SampleArgs>().expect("should generate schema");
+        assert_eq!(params["type"], "object");
+        let props = params["properties"]
+            .as_object()
+            .expect("properties should be an object");
+        assert!(props.contains_key("path"));
+        let required = params["required"]
+            .as_array()
+            .expect("required should be an array");
+        assert!(required.contains(&serde_json::json!("path")));
+    }
+}

@@ -25,7 +25,7 @@ use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::message::ToolResultContent;
-use crate::core::tool::{ResourceScope, Tool, ToolError, ToolResult};
+use crate::core::tool::{ResourceScope, Tool, ToolError, ToolResult, tool_parameters};
 
 /// BashTool 参数。
 ///
@@ -147,16 +147,9 @@ impl Tool for BashTool {
     }
 
     fn parameters(&self) -> Option<serde_json::Value> {
-        // Task 027：`schema` feature 下从 `BashArgs` 类型 derive 生成（替代手工 JSON）；
-        // 剥离 `schema` 后无类型化 schema，返回 `None`（`Tool` trait 签名不变）。
-        #[cfg(feature = "schema")]
-        {
-            crate::core::schema::parameters::<BashArgs>()
-        }
-        #[cfg(not(feature = "schema"))]
-        {
-            None
-        }
+        // Task 031：委托统一入口 `tool_parameters`（`schema` feature 下从 `BashArgs`
+        // derive 生成，剥离后返回 `None`）；`Tool` trait 签名不变。
+        tool_parameters::<BashArgs>()
     }
 
     fn resource_scope(&self) -> ResourceScope {
