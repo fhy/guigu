@@ -1,6 +1,6 @@
 # guigu 路线图（v0.1.0 之后）
 
-> 状态：候选方向清单（待 PM 定序，未立项）
+> 状态：候选方向清单（已全部立项并交付：024/025/027/028/029，详见各节）
 > 依据：各任务审查遗留项 + 架构预留 + 已声明边界
 
 以下为下一阶段候选方向，每条含：**动机**（引用遗留来源）+ **大致范围** + **新依赖/风险**。PM 已定序（2026-09-06）：持久化 lane head（024）与 ACP SSE/HTTP（025）**已立项并插入到 022/023 自定义模型+TUI 之前**（实施顺序 024 → 025 → 022 → 023）；`axum` 已由 PM 签核「批准 feature-gated」。剩余三条候选（schemars / Agent 插件 / 跨进程锁）已于 2026-09 全部立项：PM 定序「插件最后」，Architect 排定 **027 schemars → 028 跨进程锁 → 029 Agent 插件**（理由见 TASK_BOARD 备注十期启动记录）。
@@ -26,12 +26,12 @@
 - **依赖/风险**：新增 `schemars` 依赖；需定义与既有 `serde_json::Value` 宽松契约的迁移/兼容策略。
 - **状态**：规格 v1.0 已就绪（docs/tasks/027-schemars-tool-params.md）。feature `schema` default 开启；内置工具参数 derive 化；零破坏 `Tool` trait（Value→RootSchema 往返替代双事实源）。
 
-## 4. Agent 插件 / 生命周期钩子 ✅ 已立项 029（最后）
+## 4. Agent 插件 / 生命周期钩子 ✅ 已交付 029（最后）
 
 - **动机**：016 排除项——插件机制目前仅在 Tool 层（`Plugin` trait + `PluginRegistry`），扩展到 Agent 层（自定义 agent 类型、钩子注入）。
 - **范围**：将插件机制从 Tool 扩展到 Agent 生命周期（before/after 钩子、自定义 agent 类型注册）。
 - **依赖/风险**：需与 001 `Agent` trait + 003 主循环 `LoopConfig` 钩子对齐，边界清晰但设计面较广。
-- **状态**：规格 v1.0 已就绪（docs/tasks/029-agent-plugin-hooks.md）。PM 定序最后；`LifecycleHooks` + `AgentFactory` + `AgentPluginRegistry`，零破坏 001/016/003。
+- **状态**：✅ 已交付（029，docs/tasks/029-agent-plugin-hooks.md）。PM 定序最后；`LifecycleHooks` + `AgentFactory` + `AgentPluginRegistry`，零破坏 001/016/003。
 
 ## 5. 跨进程会话锁 / 多写者文件锁 ✅ 已立项 028
 
@@ -43,4 +43,4 @@
 ## 备注
 
 - 权威任务索引见 `docs/TASK_BOARD.md`；架构定稿见 `docs/architecture.md`（v1.0，v0.1.0 终态同步）。
-- 既定范围 002–026 已全部交付；三条剩余候选（schemars / Agent 插件 / 跨进程锁）已于 2026-09 全部立项为十期 027/028/029，权威索引与状态以 `TASK_BOARD.md` 为准。
+- 既定范围 002–029 已全部交付（含十期 027/028/029），权威索引与状态以 `TASK_BOARD.md` 为准。

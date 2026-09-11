@@ -342,7 +342,7 @@ loop {
 - **ACP 为三期对外标准协议**（Agent Client Protocol v1，JSON-RPC 2.0）：本地 stdio（1 进程 = 1 client）。远程 SSE/HTTP 多 client 的 `serve_sse` 为存根（014），补齐见 roadmap 候选 1。
 - **010 远程协议保持单连接**：不扩展多 client（避免与 ACP 双协议漂移）；需要多 client 走 ACP；010 仍用于轻量单连接场景。
 - **多 lane = 每 lane 一个写游标**（`LaneWriter`）+ 共享 append 串行化的 `SharedSessionStorage`（012），**仅进程内多 lane**；跨进程多写者（文件锁）仍不在范围（009/006 已声明）。
-- **插件机制（四期 016）**：`Plugin` trait + `PluginRegistry`（std RwLock 确定性组装）+ `PluginTool`（`tokio::sync::OnceCell` 异步惰性实例化，失败不缓存可重试）。边界排除：动态库 dlopen、Agent 插件、生命周期钩子、跨进程加载（见 roadmap）。
+- **插件机制（四期 016）**：`Plugin` trait + `PluginRegistry`（std RwLock 确定性组装）+ `PluginTool`（`tokio::sync::OnceCell` 异步惰性实例化，失败不缓存可重试）。边界排除：动态库 dlopen、跨进程加载（见 roadmap）。Agent 插件 / 生命周期钩子已由十期 029 交付（`LifecycleHooks` + `AgentFactory` + `AgentPluginRegistry`，零破坏 001/016/003）。
 - **CLI 复用嵌入库**：015 走 clap + 013 AgentServer + 007 adapters + 005/006 tools 装配真实 agent，验证「Embeddable + 可独立运行」双目标。
 - **四期技术债收尾**：017-a 会话存储并发安全加固；017-b 多 lane 恢复语义 + 工作目录隔离；017-c 锁纪律（插件锁/锁表驱逐/测试拆分）。
 - **五期收尾**：018 将 `server/lane.rs`（420 行超 400 上限）纯重组拆分为 lane/lane_ops/lane_recovery，零行为变化。

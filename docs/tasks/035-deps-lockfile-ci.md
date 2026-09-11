@@ -11,11 +11,11 @@
 ## Design Notes
 - 依赖更新：定位 `chacha20` 的 yanked 版本，`cargo update`（或指定 `-p chacha20`）升级到非 yanked 版本；重新跑全 feature 矩阵门禁。
 - CI/脚本：新增 `.github/workflows/ci.yml`（或 `scripts/` 下脚本）执行 `cargo package --list`，断言输出不含 `docs/`、`.git/`、`target/`、`.opencode/`。
-- ⚠ 归属：`.github/`/`scripts/` 不在 conventions 三方目录（src/tests/docs）内，需 PM 授权（override）后由 Developer 落库；若 PM 仅授权依赖更新，CI 部分可拆分或延后。
+- ⚠ 归属：`.github/`/`scripts/` 不在 conventions 三方目录（src/tests/docs）内，需 PM 授权（override）后由 Developer 落库。**PM 已授权**（2026-09「同意并授权处理」）：`.github/`/`scripts/` 由 Developer 以 `override:` 提交落库，CI 部分不再拆分/延后。
 
 ## Files
 - Cargo.lock（chacha20 版本更新）
-- .github/workflows/ci.yml 或 scripts/package-check.sh（新增，需 PM 授权）
+- .github/workflows/ci.yml 或 scripts/package-check.sh（新增，PM 已授权 override）
 
 ## 错误处理
 无新错误类型；CI 校验失败时应以非零退出码阻断。
