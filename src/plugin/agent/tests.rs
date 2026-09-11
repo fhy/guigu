@@ -3,7 +3,7 @@
 //! 自 `agent.rs` 拆出（单文件 ≤ 400 行约束，Task 029）。
 
 use super::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::core::agent::{AgentError, AgentSnapshot};
 use crate::core::event::AgentEvent;
@@ -268,6 +268,67 @@ async fn test_factory_build_produces_usable_agent() {
         .prompt(Vec::new())
         .await
         .expect("prompt should succeed");
+}
+
+/// 重入探针插件：`agent_factory()` 回调内重入 registry（register/unregister/get）。
+struct ReentrantFactoryPlugin {
+    id: String,
+    registry: Arc<AgentPluginRegistry>,
+    factory: Option<Arc<dyn AgentFactory>>,
+    reentered: Arc<AtomicBool>,
+}
+
+impl AgentPlugin for ReentrantFactoryPlugin {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn hooks(&self) -> Option<Arc<dyn LifecycleHooks>> {
+        None
+    }
+    fn agent_factory(&self) -> Option<Arc<dyn AgentFactory>> {
+        // 回调内重入 registry：若读锁未释放，register/unregister（写锁）将死锁。
+        let helper: Arc<dyn AgentPlugin> = Arc::new(FakeAgentPlugin {
+            id: "helper".to_string(),
+            hooks: None,
+            factory: None,
+        });
+        self.registry.register(helper).expect("reentrant register");
+        assert!(self.registry.unregister("helper").is_some());
+        assert!(self.registry.get(&self.id).is_some());
+        self.reentered.store(true, Ordering::SeqCst);
+        self.factory.clone()
+    }
+}
+
+/// 锁纪律回归：`agent_factory(id)` 回调期间插件可安全重入 registry
+/// （register/unregister/get）而不死锁，且工厂正确返回。
+#[test]
+fn test_agent_factory_callback_runs_outside_lock() {
+    let registry = Arc::new(AgentPluginRegistry::new());
+    let reentered = Arc::new(AtomicBool::new(false));
+    registry
+        .register(Arc::new(ReentrantFactoryPlugin {
+            id: "probe".to_string(),
+            registry: Arc::clone(&registry),
+            factory: Some(Arc::new(FakeFactory {
+                id: "probe".to_string(),
+                build_calls: Arc::new(AtomicUsize::new(0)),
+            }) as Arc<dyn AgentFactory>),
+            reentered: reentered.clone(),
+        }))
+        .expect("register");
+    // 若读锁未释放，回调内重入 register/unregister（写锁）将死锁。
+    let got = registry
+        .agent_factory("probe")
+        .expect("factory should be returned");
+    assert_eq!(got.id(), "probe");
+    assert!(
+        reentered.load(Ordering::SeqCst),
+        "callback should have re-entered the registry"
+    );
+    // 重入的 register/unregister 已清理，registry 状态正确。
+    assert!(registry.get("helper").is_none());
+    assert!(registry.get("probe").is_some());
 }
 
 /// 组合 hooks 的调用发生在注册表锁外：fake plugin 在 hook 内重新进入 registry

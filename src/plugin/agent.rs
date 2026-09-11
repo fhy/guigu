@@ -145,9 +145,18 @@ impl AgentPluginRegistry {
     }
 
     /// 按 `id` 取 agent 工厂（插件不存在或不贡献工厂 → `None`）。
+    ///
+    /// 锁纪律：读锁内**仅**查找并复制 `Arc<dyn AgentPlugin>`，随即释放读锁；
+    /// 外部 `plugin.agent_factory()` 回调在**锁外**调用，回调内可安全重入注册表
+    /// （`register` / `unregister` / `get`）而不会阻塞或死锁。
     pub fn agent_factory(&self, id: &str) -> Option<Arc<dyn AgentFactory>> {
-        let guard = self.plugins.read().unwrap_or_else(|e| e.into_inner());
-        guard.get(id).and_then(|plugin| plugin.agent_factory())
+        // 锁内：仅查找并复制 Arc<dyn AgentPlugin>，不调用任何外部回调。
+        let plugin: Option<Arc<dyn AgentPlugin>> = {
+            let guard = self.plugins.read().unwrap_or_else(|e| e.into_inner());
+            guard.get(id).cloned()
+        };
+        // 锁外：调用外部 plugin.agent_factory() 回调。
+        plugin.and_then(|plugin| plugin.agent_factory())
     }
 }
 
