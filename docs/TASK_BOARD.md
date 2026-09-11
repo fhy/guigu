@@ -82,7 +82,7 @@
 
 - [x] 027 — schemars 强类型工具参数（架构 §3.4 预留；`schemars` feature `schema` default 开启；内置工具参数 derive 化；零破坏 Tool trait）
 - [x] 028 — 跨进程会话锁 / 多写者文件锁（`fs2` FileLock 原语 + FileMutationQueue/JsonlSessionStorage 可选叠加；r2 审查通过，四门禁全绿，零破坏默认行为）
-- [ ] 029 — Agent 插件 / 生命周期钩子（016 排除项；`LifecycleHooks` + `AgentFactory` + `AgentPluginRegistry`；零破坏 001/016/003）
+- [~] 029 — Agent 插件 / 生命周期钩子（016 排除项；`LifecycleHooks` + `AgentFactory` + `AgentPluginRegistry`；零破坏 001/016/003）
 
 ## 备注
 
@@ -145,3 +145,4 @@
 - 028 启动（2026-09，Architect，依据 PM「启动 028」）：规格 v1.0（docs/tasks/028-cross-process-lock.md）已就绪并复核——`fs2` 跨平台内核态文件锁（flock/LockFileEx，崩溃自释放化解「遗留锁」）；`FileLock` 原语（阻塞/非阻塞/可取消，RAII guard，spawn_blocking 包裹同步 syscall）+ `FileMutationQueue::with_file_lock` + `JsonlSessionStorage::open_locked` 可选叠加，零破坏既有 `new()`/`open()` 默认；锁粒度整个文件、无租约、NFS 不支持、Windows 仅声明不测试均列为边界。028 由 [ ] 转 [~] 进入开发，下一步 Developer 实现
 - 028 规格 v1.1（2026-09，Architect，依据 028-review-r1 打回修复同步规格）：`FileLockGuard<'a>` 生命周期参数移除（guard 持 `Arc<File>` 所有权、无借用，r1 偏差 1）；`acquire` 改 `Result<FileMutationGuard<'_>, FileMutationError>` 失败拒绝写临界区（r1 Critical/High）；jsonl 锁覆盖「读游标/分配 id/写入/sync_all」整事务 + `SessionError::FileLock(#[from] FileLockError)` 变体保留 source 链（r1 Critical/Warning）；双进程 jsonl 并发 append 测试补齐（r1 偏差 3）。偏差 2（体量）由 Developer 拆测试子模块解决，偏差 3（双进程测试）由 Developer 补齐
 - 028 复核（2026-09-11，Architect，响应 PM「复核任务完成情况」）：实现已合并（9b8e64c feat + 64cd187 r1 修复 + 5d115cb 规格 v1.1 同步）；reviewer 历经 r1（Critical：`next_id` 进程内游标致双进程重复 id / High：跨进程锁失败静默降级 / Warning：FileLockError 降级为普通 Io 丢 source 链）→ r2 审查通过（docs/reviews/028-review-r2.md，结论 PASS）：四门禁全绿（check ✓ / clippy --all-targets -D warnings ✓ / test 341 库测试+集成 ✓ / fmt ✓）；r1 三项全部核销（锁覆盖「读游标/分配 id/写入/sync_all」整事务 / acquire 失败 `FileMutationError` 拒绝写临界区 / `SessionError::FileLock` 保留 source 链），双实例并发 + 跨进程 JSONL + 崩溃半行恢复测试补齐。故 028 由 [~] 转 [x] 关闭。⚠ `docs/reviews/028-review-r1.md`/`028-review-r2.md` 当前 git 未跟踪（reviewer 待落库提交）。十期（027/028）完成，剩最后一项 029。下一动作：启动 029（Agent 插件，规格 v1.0 已就绪 docs/tasks/029-agent-plugin-hooks.md）
+- 029 启动（2026-09，Architect，依据 PM「启动 029」）：规格 v1.0（docs/tasks/029-agent-plugin-hooks.md）已就绪并复核——`LifecycleHooks` trait（对齐 003 `LoopConfig` 钩子语义：before/after tool_call + should_stop + prepare_next_turn，默认空实现，`convert_to_llm`/`transform_context` 不开放）；`AgentFactory`（按 id 产出 `Arc<dyn Agent>`）+ `AgentPlugin`（id + 贡献 hooks + 可选 agent 工厂，独立新 trait 不改 016 `Plugin`）+ `AgentPluginRegistry`（std RwLock，register/unregister/get/list/merged_hooks/agent_factory）；桥接为可选注入 `LoopConfig.hooks`，插件钩子与既有闭包钩子共存（插件先执行、闭包后执行，以 003 实际调用点为权威）；零破坏 001/016/003（独立新 trait + 可选桥接，不删旧字段）；动态库加载 / 跨进程 / 插件生命周期钩子均列边界；本任务交付原语 + 单测，不改 015/013 装配逻辑。029 由 [ ] 转 [~] 进入开发，下一步 Developer 实现
