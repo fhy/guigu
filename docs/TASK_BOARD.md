@@ -89,7 +89,7 @@
 实施顺序：030 → 031 → 032 → 033 → 034 → 035 → 036
 
 - [x] 030 — Agent 插件 agent_factory 锁外回调纪律（029 r1 遗留：锁内复制 Arc、锁外回调 + 重入回归测试）
-- [ ] 031 — schemars 工具参数统一入口 + root_schema 语义澄清（027 r1 遗留：统一 `#[cfg]` 入口 + 文档澄清非 validator）
+- [~] 031 — schemars 工具参数统一入口 + root_schema 语义澄清（027 r1 遗留：统一 `#[cfg]` 入口 + 文档澄清非 validator）
 - [ ] 032 — config UnknownProtocol 变体清理 + 测试 unwrap 清理（022 r2 遗留：删除/映射未用变体 + tests/config.rs 去 unwrap）
 - [ ] 033 — prune_locked 改关联函数（017-c r2 遗留：`&self` 未用改无 self helper）
 - [ ] 034 — 装配测试样板提炼 helper（026 r1 遗留：assemble.rs 测试构造/清理提取 helper）
@@ -166,3 +166,4 @@
 - 030 复核（2026-09-12，Architect，响应 PM「复核任务完成情况」）：实现已合并（628cd3d，fix(agent-plugin)）；reviewer r1 审查通过（docs/reviews/030-review-r1.md，结论 PASS）：四门禁全绿（check ✓ / clippy --all-targets -D warnings ✓ / test --all-targets 365 库测试+全部集成 ✓ / fmt ✓），无阻塞问题；`agent_factory()` 读锁内仅查找+`Arc::cloned()`、锁外回调，重入回归测试（回调内 register/unregister/get）实际覆盖死锁场景。故 030 由 [~] 转 [x] 关闭。⚠ `docs/reviews/030-review-r1.md` 当前 git 未跟踪（reviewer 待落库提交）。十一期（030~036）已完成 030/036，剩 031~035
 - 036 打回修复（2026-09-12，Architect，响应 reviewer r1 打回 036）：reviewer 于 545ebea reject 036（docs/reviews/036-review-r1.md）——roadmap.md 文首已声明「已全部立项并交付」但第 1/2/3/5 条仍写「已立项」、状态字段仍「规格 v1.0 已就绪」，总状态与分项状态冲突。Architect 已修复：024/025/027/028 标题改「✅ 已交付」、状态字段改「✅ 已交付（任务号，docs/tasks/...）」，文首改「已全部立项并交付…本节为历史规划记录」、正文「下一阶段候选方向」改「已交付方向的规划记录」，消除 stale 措辞。036 由 [x] 改 [~] 待 reviewer 复审
 - 036 复核（2026-09-12，Architect，响应 PM「复核任务完成情况」）：reviewer 已补 r2（docs/reviews/036-review-r2.md，结论 PASS，四门禁全绿：check ✓ / clippy --all-targets ✓ / test --all-targets 365 库+18 binary+全部集成 ✓ / fmt ✓），roadmap 分项状态与任务索引及 029 交付事实一致、无阻塞问题。故 036 由 [~] 转 [x] 关闭。十一期（030~036）已完成 030/036，剩 031~035 待 PM 逐个「启动」进入开发。⚠ 本地领先 origin/main 2 个 reviewer 提交（374b843 029/030 审批落库、26a9a0a 036 r2 pass）未 push，本次随 Architect 提交连带推送
+- 031 启动（2026-09-12，Architect，依据 PM「启动 031」）：规格 v1.0（docs/tasks/031-schemars-helper-unify.md）已就绪并复核——承接 027 r1 两条非阻塞建议：① 四个内置工具（read/write/edit/bash）`parameters()` 各自重复 `#[cfg]` 分支，提炼统一 feature-gated 内部入口（`src/core/schema.rs` 收敛，工具委托该入口）；② `root_schema` 语义澄清——文档注释明确「仅 Value→RootSchema 结构反序列化 / 往返，非完整 JSON Schema 校验器」，是否更名以实际命名冲突为准（无冲突仅补注释，避免无谓 breaking）。零破坏：不改 `Tool` trait 签名、不改工具对外 schema 内容（object 类型/required 集合/数值约束与 005/006 语义一致）、无新错误类型。031 由 [ ] 转 [~] 进入开发，下一步 Developer 实现
