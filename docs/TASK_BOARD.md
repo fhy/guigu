@@ -94,7 +94,7 @@
 - [ ] 033 — prune_locked 改关联函数（017-c r2 遗留：`&self` 未用改无 self helper）
 - [ ] 034 — 装配测试样板提炼 helper（026 r1 遗留：assemble.rs 测试构造/清理提取 helper）
 - [ ] 035 — chacha20 锁文件更新 + CI package 校验（019 r3 遗留；⚠ `.github/` 归属 PM 已授权 override）
-- [~] 036 — 架构文档插件 stale 措辞同步（029 已交付，architecture.md §7.2 + roadmap.md 订正，Architect 文档任务；r1 打回 roadmap 分项状态 stale，已修复待复审）
+- [x] 036 — 架构文档插件 stale 措辞同步（029 已交付，architecture.md §7.2 + roadmap.md 订正，Architect 文档任务；r2 审查通过）
 
 ## 备注
 
@@ -165,3 +165,4 @@
 - 030 启动（2026-09，Architect，依据 PM「启动 030」）：规格 v1.0（docs/tasks/030-agent-factory-lock-discipline.md）已就绪并复核——修复 `AgentPluginRegistry::agent_factory()` 锁边界（029 r1 非阻塞建议：`src/plugin/agent.rs:148-151` 持读锁期间调用外部 `plugin.agent_factory()` 回调，重入 register/unregister/get 可死锁）；读锁内仅「查找 + 复制 `Arc<dyn AgentPlugin>`」，释放锁后再调用回调，与同文件 `merged_hooks()` 既有锁外回调纪律一致；不改公开 API 签名、返回类型以实际代码为权威；补重入回归测试（回调内重入 registry 操作，断言不死锁且返回正确）。030 由 [ ] 转 [~] 进入开发，下一步 Developer 实现
 - 030 复核（2026-09-12，Architect，响应 PM「复核任务完成情况」）：实现已合并（628cd3d，fix(agent-plugin)）；reviewer r1 审查通过（docs/reviews/030-review-r1.md，结论 PASS）：四门禁全绿（check ✓ / clippy --all-targets -D warnings ✓ / test --all-targets 365 库测试+全部集成 ✓ / fmt ✓），无阻塞问题；`agent_factory()` 读锁内仅查找+`Arc::cloned()`、锁外回调，重入回归测试（回调内 register/unregister/get）实际覆盖死锁场景。故 030 由 [~] 转 [x] 关闭。⚠ `docs/reviews/030-review-r1.md` 当前 git 未跟踪（reviewer 待落库提交）。十一期（030~036）已完成 030/036，剩 031~035
 - 036 打回修复（2026-09-12，Architect，响应 reviewer r1 打回 036）：reviewer 于 545ebea reject 036（docs/reviews/036-review-r1.md）——roadmap.md 文首已声明「已全部立项并交付」但第 1/2/3/5 条仍写「已立项」、状态字段仍「规格 v1.0 已就绪」，总状态与分项状态冲突。Architect 已修复：024/025/027/028 标题改「✅ 已交付」、状态字段改「✅ 已交付（任务号，docs/tasks/...）」，文首改「已全部立项并交付…本节为历史规划记录」、正文「下一阶段候选方向」改「已交付方向的规划记录」，消除 stale 措辞。036 由 [x] 改 [~] 待 reviewer 复审
+- 036 复核（2026-09-12，Architect，响应 PM「复核任务完成情况」）：reviewer 已补 r2（docs/reviews/036-review-r2.md，结论 PASS，四门禁全绿：check ✓ / clippy --all-targets ✓ / test --all-targets 365 库+18 binary+全部集成 ✓ / fmt ✓），roadmap 分项状态与任务索引及 029 交付事实一致、无阻塞问题。故 036 由 [~] 转 [x] 关闭。十一期（030~036）已完成 030/036，剩 031~035 待 PM 逐个「启动」进入开发。⚠ 本地领先 origin/main 2 个 reviewer 提交（374b843 029/030 审批落库、26a9a0a 036 r2 pass）未 push，本次随 Architect 提交连带推送
