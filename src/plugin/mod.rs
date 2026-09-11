@@ -1,4 +1,4 @@
-//! 插件机制（Plugin Registry + 异步工具实例化）。
+//! 插件机制（Plugin Registry + 异步工具实例化 + Agent 层插件）。
 //!
 //! 在 011 [`DeferredToolSpec`]（owned schema 元数据）之上，引入**可失败、可异步
 //! 实例化**的工具插件抽象：
@@ -8,8 +8,15 @@
 //! - [`PluginRegistry`]：进程内注册表，register/unregister/get/list + 组装全插件
 //!   工具为 `Vec<Arc<dyn Tool>>`（可直接喂给 `AgentRuntime.tools`）。
 //!
+//! Agent 层插件（Task 029，独立并行机制，不与工具插件耦合）：
+//! - [`LifecycleHooks`]（见 [`hooks`] 子模块）：主循环生命周期钩子的 trait 化抽象，
+//!   对齐 003 `LoopConfig` 钩子语义（能力对等，含改写 / 注入）。
+//! - [`AgentFactory`] / [`AgentPlugin`] / [`AgentPluginRegistry`]（见 [`agent`] 子模块）：
+//!   自定义 agent 类型工厂 + 生命周期钩子贡献 + 进程内注册表。
+//!
 //! 零破坏：产出物仍是合法 [`Tool`]，仍入 `Vec<Arc<dyn Tool>>`，不改 003 主循环
-//! 与 `AgentRuntime.tools` 注册契约。
+//! 与 `AgentRuntime.tools` 注册契约；Agent 插件不改 001 `Agent` trait、不改 016
+//! `Plugin` trait。
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -20,8 +27,12 @@ use thiserror::Error;
 use crate::core::tool::Tool;
 use crate::tools::DeferredToolSpec;
 
+pub mod agent;
+pub mod hooks;
 pub mod tool;
 
+pub use agent::{AgentFactory, AgentPlugin, AgentPluginError, AgentPluginRegistry};
+pub use hooks::{HookContext, HookError, LifecycleHooks, MergedHooks};
 pub use tool::PluginTool;
 
 /// 工具插件：声明唯一 `id`、贡献的工具 schema 集合、异步可失败的执行体实例化。

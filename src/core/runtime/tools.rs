@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::core::event::AgentEvent;
 use crate::core::message::{ToolCall, ToolResultMessage};
 use crate::core::tool::{ResourceScope, Tool, ToolResult};
+use crate::plugin::hooks::HookContext;
 
 use super::RunContext;
 
@@ -40,8 +41,8 @@ impl PreparedCall {
     }
 }
 
-/// prepare：查找工具 + 解析参数 + before_tool_call 钩子。
-fn prepare_call(ctx: &RunContext, tc: &ToolCall) -> PreparedCall {
+/// prepare：查找工具 + 解析参数 + before_tool_call 钩子（插件先、闭包后）。
+async fn prepare_call(ctx: &RunContext<'_>, tc: &ToolCall) -> PreparedCall {
     let tool = ctx
         .tools
         .iter()
@@ -60,11 +61,24 @@ fn prepare_call(ctx: &RunContext, tc: &ToolCall) -> PreparedCall {
         }
     };
 
-    let rejected = ctx
-        .config
-        .before_tool_call
-        .as_ref()
-        .and_then(|hook| hook(tc, &args).err());
+    // Task 029 桥接：插件 before_tool_call 先执行、闭包钩子后执行。
+    // 插件 Err = 否决该工具（不执行工具体）；插件通过后再查闭包。
+    let rejected = if let Some(hooks) = &ctx.config.hooks {
+        let hook_ctx = HookContext::new(ctx.transcript);
+        match hooks.before_tool_call(&hook_ctx, &args).await {
+            Ok(()) => ctx
+                .config
+                .before_tool_call
+                .as_ref()
+                .and_then(|hook| hook(tc, &args).err()),
+            Err(e) => Some(e.message),
+        }
+    } else {
+        ctx.config
+            .before_tool_call
+            .as_ref()
+            .and_then(|hook| hook(tc, &args).err())
+    };
 
     PreparedCall {
         tool_call: tc.clone(),
@@ -184,7 +198,10 @@ pub(crate) async fn execute_tool_calls(
     tool_calls: &[ToolCall],
     signal: &CancellationToken,
 ) -> Vec<ToolResultMessage> {
-    let prepared: Vec<PreparedCall> = tool_calls.iter().map(|tc| prepare_call(ctx, tc)).collect();
+    let mut prepared: Vec<PreparedCall> = Vec::new();
+    for tc in tool_calls {
+        prepared.push(prepare_call(ctx, tc).await);
+    }
 
     let results = match ctx.config.tool_execution {
         super::ToolExecutionMode::Sequential => {
@@ -198,10 +215,28 @@ pub(crate) async fn execute_tool_calls(
     let mut messages = Vec::new();
     for (i, result) in results.into_iter().enumerate() {
         let tc = &prepared[i].tool_call;
-        let final_result = match &ctx.config.after_tool_call {
-            Some(hook) => hook(tc, result),
-            None => result,
-        };
+        let mut final_result = result;
+        // Task 029 桥接：插件 after_tool_call 先执行（改写），闭包钩子后执行（二次改写）。
+        // 插件 Err = 保留原始 result（不改写）、记录日志、不阻断主循环。
+        if let Some(hooks) = &ctx.config.hooks {
+            let hook_ctx = HookContext::new(ctx.transcript);
+            match hooks
+                .after_tool_call(&hook_ctx, tc, final_result.clone())
+                .await
+            {
+                Ok(r) => final_result = r,
+                Err(e) => {
+                    tracing::warn!(
+                        "plugin after_tool_call hook failed for tool `{}`, keeping original result: {}",
+                        tc.name,
+                        e.message
+                    );
+                }
+            }
+        }
+        if let Some(hook) = &ctx.config.after_tool_call {
+            final_result = hook(tc, final_result);
+        }
         messages.push(ToolResultMessage {
             tool_call_id: tc.id.clone(),
             tool_name: tc.name.clone(),

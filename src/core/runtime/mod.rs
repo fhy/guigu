@@ -33,6 +33,7 @@ use crate::core::message::{
 };
 use crate::core::provider::{Context, Model, ModelProvider, ProviderRequest, ToolSpec};
 use crate::core::tool::{Tool, ToolResult};
+use crate::plugin::hooks::LifecycleHooks;
 
 /// 工具执行策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +92,9 @@ pub struct LoopConfig {
     pub compactor: Option<Arc<dyn Compactor>>,
     /// 二期：压缩策略（预算阈值 + 保留策略）。
     pub compaction: CompactionPolicy,
+    /// Task 029：插件生命周期钩子（`LifecycleHooks`）。`None` = 无插件钩子。
+    /// 与既有闭包钩子共存时**插件钩子先执行、闭包钩子后执行**（详见 `step` / `tools`）。
+    pub hooks: Option<Arc<dyn LifecycleHooks>>,
 }
 
 impl Default for LoopConfig {
@@ -112,6 +116,7 @@ impl Default for LoopConfig {
             retry_max_delay: Duration::from_secs(30),
             compactor: None,
             compaction: CompactionPolicy::default(),
+            hooks: None,
         }
     }
 }

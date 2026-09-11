@@ -44,7 +44,11 @@ pub use core::{
 // 嵌入方 `default-features = false` 剥离后此 re-export 一并移除。
 #[cfg(feature = "schema")]
 pub use core::schema::{parameters, root_schema, schema_for};
-pub use plugin::{Plugin, PluginError, PluginRegistry, PluginTool};
+// Task 029：Agent 层插件（生命周期钩子 + 自定义 agent 工厂 + 注册表）。
+pub use plugin::{
+    AgentFactory, AgentPlugin, AgentPluginError, AgentPluginRegistry, HookContext, HookError,
+    LifecycleHooks, MergedHooks, Plugin, PluginError, PluginRegistry, PluginTool,
+};
 pub use remote::{RemoteClient, RemoteError, RemoteRequest, RemoteServer};
 pub use server::{AgentServer, ServerError, ServerMessage, ServerRequest, SessionId};
 pub use tools::*;

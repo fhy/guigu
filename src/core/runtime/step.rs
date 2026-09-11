@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::core::agent::AgentCommand;
 use crate::core::event::AgentEvent;
 use crate::core::message::{AssistantMessage, Message};
+use crate::plugin::hooks::HookContext;
 
 use super::{RunContext, append_user_message, collect_pending, drain_commands, tools};
 
@@ -108,13 +109,46 @@ pub(super) async fn tool_step(
         tool_results: tool_results.clone(),
     });
 
-    // should_stop_after_turn 钩子。
-    if let Some(hook) = &ctx.config.should_stop_after_turn
+    // Task 029 桥接：should_stop_after_turn 插件先执行、闭包后执行。
+    // 插件 Some(true) 即停；否则再查闭包。
+    let mut should_stop = false;
+    if let Some(hooks) = &ctx.config.hooks {
+        let hook_ctx = HookContext::new(ctx.transcript);
+        if let Some(true) = hooks.should_stop_after_turn(&hook_ctx) {
+            should_stop = true;
+        }
+    }
+    if !should_stop
+        && let Some(hook) = &ctx.config.should_stop_after_turn
         && hook(&turn.assistant_message, &tool_results)
     {
+        should_stop = true;
+    }
+    if should_stop {
         return LoopStep::Break { shutdown: false };
     }
-    // prepare_next_turn 钩子：注入额外消息。
+
+    // Task 029 桥接：prepare_next_turn 插件注入消息在前、闭包注入消息在后。
+    // 插件 Err = 不注入、记录日志、不阻断主循环。
+    if let Some(hooks) = &ctx.config.hooks {
+        let hook_ctx = HookContext::new(ctx.transcript);
+        match hooks
+            .prepare_next_turn(&hook_ctx, &turn.assistant_message, &tool_results)
+            .await
+        {
+            Ok(msgs) => {
+                for msg in msgs {
+                    append_user_message(ctx, msg).await;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "plugin prepare_next_turn hook failed, not injecting messages: {}",
+                    e.message
+                );
+            }
+        }
+    }
     if let Some(hook) = &ctx.config.prepare_next_turn {
         for msg in hook(&turn.assistant_message, &tool_results) {
             append_user_message(ctx, msg).await;
