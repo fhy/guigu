@@ -23,22 +23,25 @@ roadmap 候选 4 立项（PM 定序：最后做）。本任务把插件机制从
 
 ### LifecycleHooks（src/plugin/hooks.rs 或 src/core/hooks.rs）
 
-> 钩子语义对齐 003 `LoopConfig`，签名形状以 003 实际为准（下表为语义映射，非逐字签名）。
+> 钩子语义对齐 003 `LoopConfig`，**能力对等**（含改写 / 注入，不弱化）；签名形状以 003 实际为准（下表为语义映射，非逐字签名）。
 
 ```rust
 /// Agent 主循环生命周期钩子。所有方法默认空实现，插件按需覆盖。
 #[async_trait]
 pub trait LifecycleHooks: Send + Sync {
-    /// 工具执行前（对齐 LoopConfig::before_tool_call）。
+    /// 工具执行前（对齐 LoopConfig::before_tool_call）。Err = 否决该工具（按 ToolError 语义，不执行工具体）。
     async fn before_tool_call(&self, ctx: &HookContext, args: &serde_json::Value)
         -> Result<(), HookError> { Ok(()) }
-    /// 工具执行后（对齐 LoopConfig::after_tool_call）。
-    async fn after_tool_call(&self, ctx: &HookContext, result: &ToolResult)
-        -> Result<(), HookError> { Ok(()) }
+    /// 工具执行后（对齐 LoopConfig::after_tool_call 的 `Fn(&ToolCall, ToolResult) -> ToolResult`，可改写）。
+    /// 按值收 / 返：`Ok(r)` = 采用 r（默认 `Ok(result)` 原样透传 = 不改写）；`Err` = 保留原始 result、记录日志、不阻断主循环。
+    async fn after_tool_call(&self, ctx: &HookContext, tool_call: &ToolCall, result: ToolResult)
+        -> Result<ToolResult, HookError> { Ok(result) }
     /// 本轮是否提前结束（对齐 LoopConfig::should_stop_after_turn）；None = 不干预。
     fn should_stop_after_turn(&self, ctx: &HookContext) -> Option<bool> { None }
-    /// 下一轮准备（对齐 LoopConfig::prepare_next_turn）。
-    async fn prepare_next_turn(&self, ctx: &HookContext) -> Result<(), HookError> { Ok(()) }
+    /// 下一轮准备（对齐 LoopConfig::prepare_next_turn 的 `Fn(&AssistantMessage, &[ToolResultMessage]) -> Vec<Message>`，可注入）。
+    /// 返回要注入的额外消息：空 = 不注入；`Err` = 不注入、记录日志、不阻断主循环。
+    async fn prepare_next_turn(&self, ctx: &HookContext, assistant: &AssistantMessage, tool_results: &[ToolResultMessage])
+        -> Result<Vec<Message>, HookError> { Ok(Vec::new()) }
 }
 ```
 
@@ -46,14 +49,14 @@ pub trait LifecycleHooks: Send + Sync {
 
 | 003 LoopConfig 钩子 | LifecycleHooks 方法 | 备注 |
 |---|---|---|
-| `before_tool_call` | `before_tool_call` | 一期必做 |
-| `after_tool_call` | `after_tool_call` | 一期必做 |
-| `should_stop_after_turn` | `should_stop_after_turn` | 一期必做 |
-| `prepare_next_turn` | `prepare_next_turn` | 一期必做（可选，若 003 有则纳入） |
+| `before_tool_call` | `before_tool_call` | 一期必做；`Err` = 否决该工具 |
+| `after_tool_call` | `after_tool_call` | 一期必做；按值改写 `ToolResult`（能力对等） |
+| `should_stop_after_turn` | `should_stop_after_turn` | 一期必做；`Some(true)` = 停止 |
+| `prepare_next_turn` | `prepare_next_turn` | 一期必做；返回注入的 `Vec<Message>`（能力对等） |
 | `convert_to_llm` / `transform_context` | 不在 `LifecycleHooks` 一期 | 声明为边界：上下文投影/裁剪属核心逻辑，不开放为插件钩子，避免插件破坏上下文一致性 |
 
 - `HookContext`：钩子上下文结构体（承载当前 transcript 快照、本轮消息、当前 tool_call 等），**字段以 003 主循环实际可用状态为准**，本规格固定语义（钩子只读上下文、可返回 HookError 中断该工具/该轮，不得直接改 transcript）。
-- **错误语义**：钩子返回 `HookError` 时的传播策略——`before_tool_call` 失败 = 该工具调用按失败处理（进 `ToolError` 语义，不执行工具体）；`after_tool_call` 失败 = 记录进 result，不阻断主循环；`should_stop_after_turn` 返回 `Some(true)` = 本轮后停止。**以 003 主循环既有的钩子失败处理为准**（语义固定，实现对齐）。
+- **错误语义**：钩子返回 `HookError` 时的传播策略——`before_tool_call` 失败 = 否决该工具调用（按 `ToolError` 语义，不执行工具体）；`after_tool_call` 失败（`Err`）= 保留原始 `ToolResult`（不改写）、错误记录日志、不阻断主循环；`prepare_next_turn` 失败（`Err`）= 不注入消息、错误记录日志、不阻断主循环；`should_stop_after_turn` 返回 `Some(true)` = 本轮后停止。**以 003 主循环既有的钩子失败处理为准**（语义固定，实现对齐）。
 
 ### AgentFactory / AgentPlugin（src/plugin/agent.rs）
 
@@ -101,12 +104,12 @@ impl AgentPluginRegistry {
 ```
 
 - 用 `std::sync::RwLock`（同 016，短临界区无 await）；`merged_hooks` 返回的组合钩子**在锁外**调用各插件 hook（只复制 `Arc<dyn AgentPlugin>` 后释放锁，避免外部回调置于注册表锁内——对齐 016 r1 教训）。
-- `merged_hooks` 组合语义：按 id 字典序依次调用各插件的同方法；`before_tool_call`/`after_tool_call`/`prepare_next_turn` 任一返回 `Err` 即短路（后续插件不调用）；`should_stop_after_turn` 首个 `Some(true)` 即停。
+- `merged_hooks` 组合语义：按 id 字典序依次调用各插件的同方法；`before_tool_call`/`after_tool_call`/`prepare_next_turn` 任一返回 `Err` 即短路（后续插件不调用）；`should_stop_after_turn` 首个 `Some(true)` 即停。改写 / 注入方法按值串接：`after_tool_call` 前一插件的返回值作为后一插件的 `result` 入参（短路时采用最后一个成功值）；`prepare_next_turn` 各插件返回的 `Vec<Message>` 按 id 字典序拼接（短路时保留已成功部分）。
 - `unregister` 语义：只阻止新查询/新合并；已分发出去的 `Arc<dyn AgentPlugin>` 仍可调用（Arc 延长生命周期），doc 注释写明（对齐 016）。
 
 ### 与 LoopConfig 的桥接
 
-- 提供从 `Arc<dyn LifecycleHooks>` 到 003 `LoopConfig` 钩子的适配（或让 `LoopConfig` 新增一个可选的 `hooks: Option<Arc<dyn LifecycleHooks>>` 字段，由主循环在既有钩子调用点优先查 trait 钩子）。**以 003 定稿实际调用点为权威**，语义固定：插件钩子与既有闭包钩子共存时，插件钩子先执行、闭包钩子后执行（或反之，二选一并记录）。
+- 提供从 `Arc<dyn LifecycleHooks>` 到 003 `LoopConfig` 钩子的适配（或让 `LoopConfig` 新增一个可选的 `hooks: Option<Arc<dyn LifecycleHooks>>` 字段，由主循环在既有钩子调用点优先查 trait 钩子）。**以 003 定稿实际调用点为权威**，语义固定：插件钩子与既有闭包钩子共存时，**插件钩子先执行、闭包钩子后执行**（已定，记录在案）。改写 / 注入按此顺序串接：`after_tool_call` 插件改写后的 result 再交闭包钩子二次改写；`prepare_next_turn` 插件注入消息在前、闭包注入消息在后。
 - CLI（015）/Server（013）装配时：`merged_hooks()` → 注入 LoopConfig；`agent_factory(id)` → 按名选用自定义 agent 类型。**本任务交付原语 + 单测，不改 015/013 装配逻辑**（声明为边界，避免范围膨胀）。
 
 ### 边界声明（明确不做）
@@ -135,6 +138,8 @@ impl AgentPluginRegistry {
 - [ ] `LifecycleHooks` 默认实现：未覆盖的方法不 panic、不干预主循环（空操作）
 - [ ] `AgentPluginRegistry`：register 重复 id → `DuplicateAgentPlugin`；unregister 不存在 → `None`；get/list 正确且 list 字典序
 - [ ] `merged_hooks`：多插件 hooks 按 id 字典序链式调用；`before_tool_call` 任一 `Err` 短路（后续插件不被调用，用调用计数断言）；`should_stop_after_turn` 首个 `Some(true)` 即停；无插件贡献 hooks 时返回 `None`
+- [ ] `after_tool_call` 改写：fake hook 返回改写后的 `ToolResult`，断言合并结果采用改写值且按 id 字典序按值串接；默认 `Ok(result)` 原样透传（不改写）
+- [ ] `prepare_next_turn` 注入：fake hook 返回 `Vec<Message>`，断言合并/桥接注入这些消息且按 id 字典序拼接；默认 `Ok(Vec::new())` 不注入
 - [ ] `agent_factory(id)` 正确取到工厂；`AgentFactory::build` 产出可用的 `Arc<dyn Agent>`（fake agent 断言 prompt/snapshot 生命周期）
 - [ ] 组合 hooks 的调用发生在注册表锁外（fake plugin 在 hook 内重新进入 registry 不产生死锁，对齐 016 r1 教训）
 - [ ] `unregister` 语义：已取出的 `Arc<dyn AgentPlugin>` 在 unregister 后仍可调用（Arc 延长生命周期）
@@ -144,4 +149,5 @@ impl AgentPluginRegistry {
 
 ## 修订记录
 
+- v1.1（2026-09，Architect，依据 Developer 架构审查）：修正 `LifecycleHooks` 契约不一致——v1.0 伪代码中 `after_tool_call`（`-> Result<(), HookError>` 只读）与 `prepare_next_turn`（`-> Result<(), HookError>` 只读）无法表达 003 实际闭包钩子的改写 / 注入语义（`Fn(&ToolCall, ToolResult) -> ToolResult` / `Fn(&AssistantMessage, &[ToolResultMessage]) -> Vec<Message>`），导致插件钩子严格弱于闭包钩子、违背「语义对齐 003」。采纳**方案 A**：trait 对齐 003 完整语义——`after_tool_call(&self, ctx, tool_call: &ToolCall, result: ToolResult) -> Result<ToolResult, HookError>`（按值改写，默认 `Ok(result)` 透传，`Err` 保留原始 result 记录日志不阻断）；`prepare_next_turn(&self, ctx, assistant: &AssistantMessage, tool_results: &[ToolResultMessage]) -> Result<Vec<Message>, HookError>`（返回注入消息，默认空，`Err` 不注入记录日志不阻断）。合并语义按值串接（after 按 id 字典序传递 result、prepare 拼接注入消息，任一 Err 短路保留已成功部分）。桥接顺序定为**插件钩子先执行、闭包钩子后执行**（与 TASK_BOARD 029 启动记录一致）。参数名 / 类型形状仍以 003 实际为权威。
 - v1.0（2026-09，Architect）：初稿。roadmap 候选 4 立项（PM 定序最后，十期第三项）。`LifecycleHooks` trait 化 003 `LoopConfig` 钩子（before/after tool_call + should_stop + prepare_next_turn，默认空实现）；`AgentFactory` + `AgentPlugin` + `AgentPluginRegistry` 支撑自定义 agent 类型注册；零破坏 001/016/003（独立新 trait + 可选桥接，不删旧字段）。`convert_to_llm`/`transform_context` 不开放、动态库加载不做、跨进程不做，均列边界。钩子/上下文具体签名以 003 定稿实际为权威，语义固定（对齐 007 规格「语义固定、形状以实际为准」的处理方式）。
