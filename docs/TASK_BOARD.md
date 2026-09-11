@@ -88,7 +88,7 @@
 
 实施顺序：030 → 031 → 032 → 033 → 034 → 035 → 036
 
-- [ ] 030 — Agent 插件 agent_factory 锁外回调纪律（029 r1 遗留：锁内复制 Arc、锁外回调 + 重入回归测试）
+- [~] 030 — Agent 插件 agent_factory 锁外回调纪律（029 r1 遗留：锁内复制 Arc、锁外回调 + 重入回归测试）
 - [ ] 031 — schemars 工具参数统一入口 + root_schema 语义澄清（027 r1 遗留：统一 `#[cfg]` 入口 + 文档澄清非 validator）
 - [ ] 032 — config UnknownProtocol 变体清理 + 测试 unwrap 清理（022 r2 遗留：删除/映射未用变体 + tests/config.rs 去 unwrap）
 - [ ] 033 — prune_locked 改关联函数（017-c r2 遗留：`&self` 未用改无 self helper）
@@ -162,3 +162,4 @@
 - 029 复核（2026-09-11，Architect，响应 PM「复核任务完成情况」）：实现已合并（cde2125，feat(agent-plugin)）；reviewer r1 审查通过（docs/reviews/029-review-r1.md，结论 PASS）：四门禁全绿（check ✓ / clippy --all-targets -D warnings ✓ / test --all-targets 546 passed / fmt ✓），无必须修复问题。r1 一条非阻塞建议（`src/plugin/agent.rs:148-151` `agent_factory()` 持注册表读锁期间调用外部 `plugin.agent_factory()` 回调，与 `merged_hooks()` 已采用的「锁内仅复制 Arc、锁外执行回调」纪律不一致，建议锁外调用 + 补重入回归测试）留待技术债收尾。故 029 由 [~] 转 [x] 关闭。⚠ `docs/reviews/029-review-r1.md` 当前 git 未跟踪（reviewer 待落库提交）。十期（027/028/029）全部完成，既定范围 002~029 全部实现+审查+门禁闭环，roadmap 候选已全部立项并交付，无剩余规划任务
 - 十一期立项（2026-09，Architect，依据 PM「立项逐个处理」）：技术债收尾 7 项全部立项，实施顺序 030 → 031 → 032 → 033 → 034 → 035 → 036，均零行为变化或纯清理、无新依赖、低风险——① 029 r1 `agent_factory()` 锁外回调纪律（030）；② 027 r1 `parameters()` `#[cfg]` 统一入口 + `root_schema` 语义澄清（031）；③ 022 r2 `UnknownProtocol` 未用变体 + 测试 unwrap/expect 清理（032）；④ 017-c r2 `prune_locked` 改关联函数（033）；⑤ 026 r1 装配测试 helper 提炼（034）；⑥ 019 遗留 chacha20 yanked 锁文件更新 + CI 干净 checkout `cargo package --list` 校验（035，⚠ `.github/` 归属需 PM 授权 override）；⑦ 架构文档 §7.2「插件延后」stale 措辞同步（036，Architect 文档任务）。规格 v1.0 已就绪（docs/tasks/030~036），待 PM 逐个「启动」进入开发
 - 035 授权 + 036 交付（2026-09，Architect，依据 PM「同意并授权处理」）：① PM 已授权 035 `.github/`/`scripts/` 跨目录 override——Developer 以 `override:` 提交落库 CI/脚本，CI 部分不再拆分/延后（035 规格 ⚠ 行已订正）；② 036 为 Architect 自有文档任务，已直接交付——architecture.md §7.2 边界排除移除「Agent 插件、生命周期钩子」改注「已由十期 029 交付」，保留「动态库 dlopen、跨进程加载」为真边界；roadmap.md 文首状态改「已全部立项并交付」+ 候选 4「已立项」改「已交付 029」+ 备注「002–026」改「002–029」。故 036 由 [ ] 转 [x] 关闭。十一期剩余 030~035 待 PM 逐个「启动」Developer 开发
+- 030 启动（2026-09，Architect，依据 PM「启动 030」）：规格 v1.0（docs/tasks/030-agent-factory-lock-discipline.md）已就绪并复核——修复 `AgentPluginRegistry::agent_factory()` 锁边界（029 r1 非阻塞建议：`src/plugin/agent.rs:148-151` 持读锁期间调用外部 `plugin.agent_factory()` 回调，重入 register/unregister/get 可死锁）；读锁内仅「查找 + 复制 `Arc<dyn AgentPlugin>`」，释放锁后再调用回调，与同文件 `merged_hooks()` 既有锁外回调纪律一致；不改公开 API 签名、返回类型以实际代码为权威；补重入回归测试（回调内重入 registry 操作，断言不死锁且返回正确）。030 由 [ ] 转 [~] 进入开发，下一步 Developer 实现
