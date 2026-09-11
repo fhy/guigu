@@ -19,7 +19,7 @@ pub use bash::BashTool;
 pub use deferred::{DeferredTool, DeferredToolSpec};
 pub use echo::EchoTool;
 pub use edit::EditTool;
-pub use file_mutation_queue::{FileMutationGuard, FileMutationQueue};
+pub use file_mutation_queue::{FileMutationError, FileMutationGuard, FileMutationQueue};
 pub use read::ReadTool;
 pub use write::WriteTool;
 

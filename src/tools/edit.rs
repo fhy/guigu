@@ -102,7 +102,7 @@ impl Tool for EditTool {
         let path = resolve_tool_path(self.work_dir.as_deref(), &edit_args.path);
 
         // 可取消 acquire：read-modify-write 全程持锁，避免跨 agent 丢更新。
-        let _guard = tokio::select! {
+        let acquired = tokio::select! {
             g = self.queue.acquire(&path) => g,
             _ = signal.cancelled() => {
                 return Err(ToolError::new(
@@ -110,6 +110,9 @@ impl Tool for EditTool {
                 ));
             }
         };
+        // Task 028：跨进程锁获取失败时拒绝进入写临界区（不静默退化为仅进程内锁）。
+        let _guard =
+            acquired.map_err(|e| ToolError::new(format!("acquire file lock failed: {e}")))?;
         // 拿锁后二次取消检查，消除 acquire 等待期间被取消的竞态。
         if signal.is_cancelled() {
             return Err(ToolError::new(

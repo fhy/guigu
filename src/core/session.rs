@@ -122,6 +122,12 @@ pub enum SessionError {
     /// 节点 id 游标耗尽（已达 `u64::MAX`，无法分配新 id）。
     #[error("node id cursor exhausted")]
     IdExhausted,
+    /// 跨进程文件锁错误（Task 028：`open_locked` 启用时 append 获取锁失败）。
+    ///
+    /// 保留 `FileLockError` 类型与 source 链（打开失败 / 获取失败 / 取消 / join
+    /// 失败可区分），不降级为普通 IO 错误。
+    #[error("file lock error: {0}")]
+    FileLock(#[from] crate::core::file_lock::FileLockError),
 }
 
 /// 会话存储（落定 architecture 3.8 预留接口）。
