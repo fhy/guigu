@@ -283,6 +283,7 @@ fn io_other(reason: String) -> SessionError {
 mod tests {
     use super::*;
     use crate::cli::{Command, Provider};
+    use guigu::core::agent::AgentSnapshot;
     use std::sync::Arc;
 
     #[test]
@@ -295,9 +296,13 @@ mod tests {
         assert_eq!(resolve_system_prompt(Some("自定义".to_string())), "自定义");
     }
 
-    /// 离线装配验证：自定义 system_prompt 经 assemble → AgentConfig → snapshot 生效。
-    #[tokio::test]
-    async fn assemble_injects_custom_system_prompt() {
+    /// 离线装配测试 helper：构造 CLI（`system_prompt` 可变）→ `assemble` → 建
+    /// session "t" + spawn 默认 lane → 取 snapshot → `shutdown` 清理，返回
+    /// snapshot。收敛两个装配测试中重复的 CLI 构造 / session 创建 / shutdown 样板。
+    ///
+    /// `TempDir` 为 RAII 守卫（panic 也清理目录）；`shutdown` 在成功路径末尾调用
+    /// （保证桥接 task 落盘），panic 路径由 `#[tokio::test]` runtime 拆除兜底。
+    async fn assemble_snapshot(system_prompt: Option<String>) -> AgentSnapshot {
         let dir = tempfile::tempdir().unwrap();
         let cli = Cli {
             command: Some(Command::Acp),
@@ -308,7 +313,7 @@ mod tests {
             log: Some(dir.path().to_path_buf()),
             api_key: None,
             base_url: None,
-            system_prompt: Some("自定义身份".to_string()),
+            system_prompt,
             config: None,
             api_key_env: None,
         };
@@ -328,44 +333,21 @@ mod tests {
             .await
             .unwrap();
         let snap = assembled.server.snapshot("t", DEFAULT_LANE).await.unwrap();
-        assert_eq!(snap.system_prompt, "自定义身份");
         assembled.server.shutdown().await.unwrap();
+        snap
+    }
+
+    /// 离线装配验证：自定义 system_prompt 经 assemble → AgentConfig → snapshot 生效。
+    #[tokio::test]
+    async fn assemble_injects_custom_system_prompt() {
+        let snap = assemble_snapshot(Some("自定义身份".to_string())).await;
+        assert_eq!(snap.system_prompt, "自定义身份");
     }
 
     /// 离线装配验证：缺省（不传 --system-prompt）回退到鬼谷子默认身份。
     #[tokio::test]
     async fn assemble_injects_default_system_prompt() {
-        let dir = tempfile::tempdir().unwrap();
-        let cli = Cli {
-            command: Some(Command::Acp),
-            model: None,
-            provider: Provider::Fake,
-            session: None,
-            cwd: None,
-            log: Some(dir.path().to_path_buf()),
-            api_key: None,
-            base_url: None,
-            system_prompt: None,
-            config: None,
-            api_key_env: None,
-        };
-        let prompt = resolve_system_prompt(cli.system_prompt.clone());
-        let assembled = assemble(&cli, prompt).unwrap();
-        let storage = JsonlSessionStorage::open(dir.path().join("t.jsonl"), "t")
-            .await
-            .unwrap();
-        assembled
-            .server
-            .create_session("t".to_string(), Arc::new(storage))
-            .await
-            .unwrap();
-        assembled
-            .server
-            .spawn_lane_from_factory("t", DEFAULT_LANE)
-            .await
-            .unwrap();
-        let snap = assembled.server.snapshot("t", DEFAULT_LANE).await.unwrap();
+        let snap = assemble_snapshot(None).await;
         assert_eq!(snap.system_prompt, DEFAULT_SYSTEM_PROMPT);
-        assembled.server.shutdown().await.unwrap();
     }
 }
