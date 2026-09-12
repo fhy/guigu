@@ -736,7 +736,7 @@ async fn head_committed_poison_recovery() {
     let mut shared = SharedSessionStorage::with_head_store(inner, head_store.clone());
 
     // 替换 head_committed 为已 poison 的 mutex。
-    std::mem::replace(&mut shared.head_committed, poisoned_lane_set());
+    shared.head_committed = poisoned_lane_set();
     assert!(
         shared.head_committed.lock().is_err(),
         "mutex should be poisoned"
@@ -760,7 +760,7 @@ async fn head_committed_poison_recovery_append_with_head() {
     let mut shared = SharedSessionStorage::with_head_store(inner, head_store.clone());
 
     // 替换 head_committed 为已 poison 的 mutex。
-    std::mem::replace(&mut shared.head_committed, poisoned_lane_set());
+    shared.head_committed = poisoned_lane_set();
     assert!(shared.head_committed.lock().is_err());
 
     // append_with_head 不应 panic，且 head 正常落盘。
