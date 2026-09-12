@@ -1,0 +1,25 @@
+# Task 035：CI 发布包白名单校验。
+# 干净 checkout 下执行 `cargo package --list`，断言敏感目录（docs/、.git/、
+# target/、.opencode/）不进入发布包。校验逻辑见 scripts/package-check.sh。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  package-check:
+    name: Package whitelist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Package whitelist check
+        run: bash scripts/package-check.sh
