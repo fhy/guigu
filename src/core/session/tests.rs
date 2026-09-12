@@ -708,3 +708,66 @@ async fn persist_initial_head_noop_when_unbound() {
     let heads = shared.load_lane_heads().await.unwrap();
     assert!(heads.is_empty());
 }
+
+// ===== 维护巡检问题3：head_committed mutex poison 恢复 =====
+
+/// 构造一个已 poison 的 `Mutex<HashSet<LaneId>>`（测试用）。
+///
+/// 在独立线程中持锁 panic 触发 poison；线程结束后 `Arc` 仅剩单引用，
+/// `try_unwrap` 取回内层 mutex。
+fn poisoned_lane_set() -> std::sync::Mutex<HashSet<LaneId>> {
+    let mutex = Arc::new(std::sync::Mutex::new(HashSet::new()));
+    let mutex_clone = mutex.clone();
+    std::thread::spawn(move || {
+        let _guard = mutex_clone.lock().unwrap();
+        panic!("poison the mutex");
+    })
+    .join()
+    .unwrap_err(); // 线程 panic（预期）。
+    Arc::try_unwrap(mutex).expect("single reference after thread join")
+}
+
+/// 回归（维护巡检问题3）：`head_committed` mutex poison 后，方法不 panic
+/// （恢复 poisoned guard，将可恢复故障降级为正常操作，而非升级为进程崩溃）。
+#[tokio::test]
+async fn head_committed_poison_recovery() {
+    let inner = Arc::new(MemStorage::default());
+    let head_store = Arc::new(MemHeadStore::default());
+    let mut shared = SharedSessionStorage::with_head_store(inner, head_store.clone());
+
+    // 替换 head_committed 为已 poison 的 mutex。
+    std::mem::replace(&mut shared.head_committed, poisoned_lane_set());
+    assert!(
+        shared.head_committed.lock().is_err(),
+        "mutex should be poisoned"
+    );
+
+    // 调用使用 mutex 的方法：不应 panic（恢复 guard）。
+    let result = shared.persist_initial_head("lane-1", None).await;
+    assert!(result.is_ok(), "should not panic on poisoned mutex");
+
+    // head 正常落盘（lane 已标记提交）。
+    let heads = head_store.load_lane_heads().await.unwrap();
+    assert_eq!(heads.get("lane-1"), Some(&None));
+}
+
+/// 回归（维护巡检问题3）：poison 后 `append_with_head` 也不 panic，
+/// 且 head 正常落盘（恢复 guard 后状态一致）。
+#[tokio::test]
+async fn head_committed_poison_recovery_append_with_head() {
+    let inner = Arc::new(MemStorage::default());
+    let head_store = Arc::new(MemHeadStore::default());
+    let mut shared = SharedSessionStorage::with_head_store(inner, head_store.clone());
+
+    // 替换 head_committed 为已 poison 的 mutex。
+    std::mem::replace(&mut shared.head_committed, poisoned_lane_set());
+    assert!(shared.head_committed.lock().is_err());
+
+    // append_with_head 不应 panic，且 head 正常落盘。
+    let id = shared
+        .append_with_head("lane-1", None, user_msg("a"))
+        .await
+        .expect("should not panic on poisoned mutex");
+    let heads = head_store.load_lane_heads().await.unwrap();
+    assert_eq!(heads.get("lane-1"), Some(&Some(id)));
+}

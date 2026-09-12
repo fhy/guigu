@@ -91,14 +91,21 @@ pub async fn spawn_stdio(cmd: &mut tokio::process::Command) -> Result<StdioStrea
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| RemoteError::Protocol("stdin not piped".into()))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| RemoteError::Protocol("stdout not piped".into()))?;
+    // 取 stdin/stdout；任一失败则回收子进程（kill + wait），避免 zombie。
+    let stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            reap_child(&mut child).await;
+            return Err(RemoteError::Protocol("stdin not piped".into()));
+        }
+    };
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            reap_child(&mut child).await;
+            return Err(RemoteError::Protocol("stdout not piped".into()));
+        }
+    };
     let pid = child.id();
 
     // 子进程回收 task：等待子进程自然退出，或 drop 触发 kill + wait（回收）。
@@ -124,6 +131,15 @@ pub async fn spawn_stdio(cmd: &mut tokio::process::Command) -> Result<StdioStrea
         pid,
         token,
     })
+}
+
+/// 回收子进程：kill 后 wait（避免 zombie）。
+///
+/// 用于 `spawn_stdio` 的失败路径（stdin/stdout 管道获取失败）：子进程已 spawn
+/// 但无法建立双工流，须显式 kill + wait 回收，否则留下 zombie。
+async fn reap_child(child: &mut tokio::process::Child) {
+    let _ = child.kill().await;
+    let _ = child.wait().await;
 }
 
 /// tcp connector：连接 TCP 服务器，返回双工流（`TcpStream` 天然实现
@@ -220,6 +236,28 @@ mod tests {
         assert!(
             !std::path::Path::new(&proc_path).exists(),
             "child process should be reaped (no /proc/{pid} entry)"
+        );
+    }
+
+    /// 回归（维护巡检问题2）：`reap_child` 回收子进程（kill + wait，无 zombie）。
+    ///
+    /// 覆盖 `spawn_stdio` 失败路径（stdin/stdout 管道获取失败）的回收逻辑：
+    /// 子进程已 spawn 但无法建立双工流时，`reap_child` 须 kill + wait 回收。
+    #[tokio::test]
+    async fn test_reap_child_reaps_process() {
+        let mut cmd = tokio::process::Command::new("sleep");
+        cmd.arg("10");
+        let mut child = cmd.spawn().expect("spawn");
+        let pid = child.id().expect("pid available after spawn");
+
+        reap_child(&mut child).await;
+
+        // 验证子进程已回收（无 zombie）。
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let proc_path = format!("/proc/{pid}");
+        assert!(
+            !std::path::Path::new(&proc_path).exists(),
+            "child process should be reaped by reap_child (no /proc/{pid} entry)"
         );
     }
 }

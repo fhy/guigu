@@ -345,6 +345,17 @@ impl SharedSessionStorage {
         }
     }
 
+    /// 锁定 `head_committed`（poison 时恢复 guard，不 panic）。
+    ///
+    /// `head_committed` 是 `HashSet<LaneId>`，任何时刻都处于有效状态（即使持锁
+    /// 线程 panic，set 本身仍一致），故 poison 后恢复 guard 安全。避免生产代码
+    /// 对 mutex 使用 `unwrap()`（poison 后再次 panic，将可恢复故障升级为崩溃）。
+    fn head_committed_lock(&self) -> std::sync::MutexGuard<'_, HashSet<LaneId>> {
+        self.head_committed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// 组合提交（024）：在同一写锁内完成 message 追加 + 对应 lane head 落盘，
     /// 构成原子提交单元。
     ///
@@ -366,10 +377,7 @@ impl SharedSessionStorage {
                 .await?;
             // 标记 head 已提交（024 r3）：后续 `persist_initial_head` 据此跳过
             // 初始 head，杜绝初始 `H0` 覆盖本次写入的 `H1`。
-            self.head_committed
-                .lock()
-                .unwrap()
-                .insert(lane_id.to_string());
+            self.head_committed_lock().insert(lane_id.to_string());
         }
         Ok(id)
     }
@@ -391,17 +399,14 @@ impl SharedSessionStorage {
     ) -> Result<(), SessionError> {
         let _guard = self.write_lock.write().await;
         // 检查与标记均不跨 await（同步 Mutex），且全程持写锁，与 bridge 写入互斥。
-        if self.head_committed.lock().unwrap().contains(lane_id) {
+        if self.head_committed_lock().contains(lane_id) {
             return Ok(());
         }
         if let Some(store) = &self.head_store {
             store.append_lane_head(lane_id.to_string(), head).await?;
         }
         // 仅在写盘成功后标记（写失败不标记，回滚后重试可再次提交）。
-        self.head_committed
-            .lock()
-            .unwrap()
-            .insert(lane_id.to_string());
+        self.head_committed_lock().insert(lane_id.to_string());
         Ok(())
     }
 
@@ -446,7 +451,7 @@ impl LaneHeadStore for SharedSessionStorage {
         match &self.head_store {
             Some(store) => {
                 store.append_lane_head(lane_id.clone(), head).await?;
-                self.head_committed.lock().unwrap().insert(lane_id);
+                self.head_committed_lock().insert(lane_id);
                 Ok(())
             }
             // 未绑定 head 持久化：no-op（行为等价 012，不落盘）。

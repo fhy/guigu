@@ -100,20 +100,29 @@ impl Tool for ReadTool {
         let bytes = tokio::fs::read(&path)
             .await
             .map_err(|e| ToolError::new(format!("read {}: {e}", path.display())))?;
-        let content = String::from_utf8(bytes)
-            .map_err(|e| ToolError::new(format!("read {}: invalid UTF-8: {e}", path.display())))?;
 
+        // 严格校验整个文件是有效 UTF-8（拒绝二进制文件，保持旧行为）。
+        if std::str::from_utf8(&bytes).is_err() {
+            return Err(ToolError::new(format!(
+                "read {}: invalid UTF-8",
+                path.display()
+            )));
+        }
+
+        // 在字节层面做 offset/limit 切片（安全，不会 panic），再转文本。
+        // from_utf8_lossy 处理多字节边界截断（截断的字符替换为 U+FFFD），
+        // 与文件头"字节切片可能截断多字节字符，一期接受"的注释一致。
         let offset = read_args.offset.unwrap_or(0) as usize;
-        let start = offset.min(content.len());
+        let start = offset.min(bytes.len());
         let end = match read_args.limit {
-            Some(limit) => offset.saturating_add(limit as usize).min(content.len()),
-            None => content.len(),
+            Some(limit) => offset.saturating_add(limit as usize).min(bytes.len()),
+            None => bytes.len(),
         };
-        let text = content[start..end].to_string();
+        let text = String::from_utf8_lossy(&bytes[start..end]).into_owned();
 
         let mut details = serde_json::json!({
             "path": path.to_string_lossy(),
-            "bytes": text.len(),
+            "bytes": end - start,
         });
         if let Some(offset) = read_args.offset {
             details["offset"] = serde_json::json!(offset);
@@ -262,5 +271,93 @@ mod tests {
             ToolResultContent::Text { text } => assert_eq!(text, "abs content"),
             other => panic!("expected Text content, got {other:?}"),
         }
+    }
+
+    /// 回归（维护巡检问题1）：offset 落在 UTF-8 多字节字符中间时不 panic，
+    /// 截断的字符经 from_utf8_lossy 替换为 U+FFFD。
+    #[tokio::test]
+    async fn test_read_tool_offset_in_multibyte_char() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("chinese.txt");
+        // "你好世界" = 4 个中文字符，每个 3 字节，共 12 字节。
+        std::fs::write(&path, "你好世界").expect("write file");
+
+        let tool = ReadTool::new(Some(dir.path().to_path_buf()));
+        // offset=1 落在第一个中文字符（3 字节）中间。
+        let result = tool
+            .execute(
+                "call1",
+                serde_json::json!({ "path": path.to_string_lossy(), "offset": 1 }),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("read should not panic on multibyte boundary");
+        match &result.content[0] {
+            ToolResultContent::Text { text } => {
+                // 首字符被截断（剩 2 个孤立续字节 BD A0）→ 各替换为 U+FFFD，
+                // 后 3 个字符完整。
+                assert_eq!(text, "\u{FFFD}\u{FFFD}好世界");
+            }
+            other => panic!("expected Text content, got {other:?}"),
+        }
+        // details.bytes 应为实际读取的字节数（12 - 1 = 11）。
+        assert_eq!(result.details.as_ref().unwrap()["bytes"], 11);
+    }
+
+    /// 回归（维护巡检问题1）：limit 落在 UTF-8 多字节字符中间时不 panic，
+    /// 截断的字符经 from_utf8_lossy 替换为 U+FFFD。
+    #[tokio::test]
+    async fn test_read_tool_limit_in_multibyte_char() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("chinese.txt");
+        // "你好世界" = 4 个中文字符，每个 3 字节，共 12 字节。
+        std::fs::write(&path, "你好世界").expect("write file");
+
+        let tool = ReadTool::new(Some(dir.path().to_path_buf()));
+        // limit=4 在第二个中文字符（好，字节 3-5）中间截断（读到字节 0-3）。
+        let result = tool
+            .execute(
+                "call1",
+                serde_json::json!({ "path": path.to_string_lossy(), "limit": 4 }),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("read should not panic on multibyte boundary");
+        match &result.content[0] {
+            ToolResultContent::Text { text } => {
+                // 你（3 字节）完整，好的首字节（E5）孤立 → U+FFFD。
+                assert_eq!(text, "你\u{FFFD}");
+            }
+            other => panic!("expected Text content, got {other:?}"),
+        }
+        // details.bytes 应为实际读取的字节数（4）。
+        assert_eq!(result.details.as_ref().unwrap()["bytes"], 4);
+    }
+
+    /// 回归（维护巡检问题1）：offset 越界（超过文件长度）时返回空文本，不 panic。
+    #[tokio::test]
+    async fn test_read_tool_offset_beyond_eof() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("short.txt");
+        std::fs::write(&path, "abc").expect("write file");
+
+        let tool = ReadTool::new(Some(dir.path().to_path_buf()));
+        // offset=100 远超文件长度（3 字节），应返回空文本。
+        let result = tool
+            .execute(
+                "call1",
+                serde_json::json!({ "path": path.to_string_lossy(), "offset": 100 }),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("read should not panic on out-of-bounds offset");
+        match &result.content[0] {
+            ToolResultContent::Text { text } => assert_eq!(text, ""),
+            other => panic!("expected Text content, got {other:?}"),
+        }
+        assert_eq!(result.details.as_ref().unwrap()["bytes"], 0);
     }
 }
