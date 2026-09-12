@@ -102,7 +102,7 @@ impl FileMutationQueue {
         let lock = {
             let mut table = self.locks.lock().unwrap_or_else(|e| e.into_inner());
             if table.len() >= PRUNE_THRESHOLD {
-                self.prune_locked(&mut table);
+                Self::prune_locked(&mut table);
             }
             table
                 .entry(key)
@@ -130,12 +130,12 @@ impl FileMutationQueue {
     /// 被驱逐的 path 后续 `acquire` 会新建锁，互斥语义不变（见模块文档）。
     pub fn prune(&self) {
         let mut table = self.locks.lock().unwrap_or_else(|e| e.into_inner());
-        self.prune_locked(&mut table);
+        Self::prune_locked(&mut table);
     }
 
     /// 锁内驱逐实现：调用方必须已持有表锁（`prune` 与 `acquire` 的阈值路径复用，
     /// 避免在已持 `std::sync::Mutex` 时递归获取导致死锁）。
-    fn prune_locked(&self, table: &mut HashMap<PathBuf, Arc<Mutex<()>>>) {
+    fn prune_locked(table: &mut HashMap<PathBuf, Arc<Mutex<()>>>) {
         table.retain(|_, lock| Arc::strong_count(lock) > 1);
     }
 
