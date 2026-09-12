@@ -93,7 +93,7 @@
 - [x] 032 — config UnknownProtocol 变体清理 + 测试 unwrap 清理（022 r2 遗留：删除/映射未用变体 + tests/config.rs 去 unwrap）
 - [x] 033 — prune_locked 改关联函数（017-c r2 遗留：`&self` 未用改无 self helper）
 - [x] 034 — 装配测试样板提炼 helper（026 r1 遗留：assemble.rs 测试构造/清理提取 helper）
-- [~] 035 — chacha20 锁文件更新 + CI package 校验（019 r3 遗留；⚠ `.github/` 归属 PM 已授权 override）
+- [x] 035 — chacha20 锁文件更新 + CI package 校验（019 r3 遗留；⚠ `.github/` 归属 PM 已授权 override）
 - [x] 036 — 架构文档插件 stale 措辞同步（029 已交付，architecture.md §7.2 + roadmap.md 订正，Architect 文档任务；r2 审查通过）
 
 ## 备注
@@ -175,3 +175,4 @@
 - 034 启动（2026-09-12，Architect，依据 PM「启动 034」）：规格 v1.0（docs/tasks/034-assemble-test-helper.md）已就绪并复核——承接 026 r1 非阻塞建议 1（`src/bin/guigu/assemble.rs:307-375` 测试重复构造 CLI/创建 session/shutdown 样板）：提取「构造 CLI 参数 + 创建 session + shutdown 清理」为共享测试 helper（`#[cfg(test)]` 内），纯测试内部重构、不改产品逻辑、保持既有断言语义等价；无新错误类型，helper 清理需可靠（避免 panic 泄漏资源）；既有装配测试（system prompt 注入/base_url 透传）全部保持通过。034 由 [ ] 转 [~] 进入开发，下一步 Developer 实现
 - 034 复核（2026-09-12，Architect，响应 PM「复核任务完成情况」）：实现已合并（bc84af8，refactor(test)）；reviewer r1 审查通过（docs/reviews/034-review-r1.md，结论 PASS）：四门禁全绿（check ✓ / clippy --all-targets -D warnings ✓ / test --all-targets 367 库+18 二进制+全部集成 ✓ / fmt ✓），无阻塞问题；改动仅落 `#[cfg(test)]` 测试模块，`assemble_snapshot` helper 收敛两测试的 CLI 构造/session/lane 初始化/snapshot/shutdown 样板，断言语义等价。故 034 由 [~] 转 [x] 关闭。⚠ review 提交 8a7b0e5 领先 origin/main 未 push，本次随 Architect 提交连带推送。十一期（030~036）已完成 030/031/032/033/034/036，剩 035。下一动作：启动 035
 - 035 启动（2026-09-12，Architect，依据 PM「启动 035」）：规格 v1.0（docs/tasks/035-deps-lockfile-ci.md）已就绪并复核——① 更新 Cargo.lock 消除 `chacha20` yanked 警告（`cargo update -p chacha20` 至非 yanked 版本，重跑全 feature 矩阵门禁）；② 新增 CI/脚本在干净 checkout 下执行 `cargo package --list` 并断言 `docs/` `.git/` `target/` `.opencode/` 不出现。⚠ `.github/` `scripts/` 归属 PM 已授权（2026-09「同意并授权处理」），Developer 以 `override:` 提交落库，CI 部分不再拆分/延后。无新错误类型、无新依赖（仅锁文件版本推进），CI 校验失败以非零退出码阻断。035 由 [ ] 转 [~] 进入开发，下一步 Developer 实现
+- 035 复核（2026-09-12，Architect，响应 PM「复核任务完成情况」）：实现已合并（ec920ef override + 4204e99 r1 修复）；reviewer 历经 r1（Critical：`--no-default-features` 严格 clippy 失败——`src/core/tool.rs:121` `tool_parameters<T>` 泛型未使用，系 031 引入、于 035 全 feature 矩阵门禁下暴露）→ r2 审查通过（docs/reviews/035-review-r2.md，结论 PASS）：四门禁全绿（check ✓ / clippy --all-targets -D warnings ✓ / test --all-targets 367 库+18 binary+集成 ✓ / fmt ✓）+ 全 feature 矩阵绿（clippy --no-default-features ✓ / test --no-default-features 261 ✓ / acp-sse ✓ / tui ✓ / package-check.sh ✓）；`chacha20` 0.10.1→0.10.2 消除 yanked、CI 干净 checkout 白名单校验落库、`tool_parameters<T>` 以 PhantomData 零成本使用泛型（未 allow 掩盖）。故 035 由 [~] 转 [x] 关闭。⚠ 032 r1 遗留「tool_parameters<T> no-default-features clippy」技术债已随本任务一并核销。十一期（030~036）至此全部完成；既定范围 002~036 全部实现+审查+门禁闭环，roadmap 候选全部交付，无剩余规划任务，待 PM 定下一阶段方向
