@@ -191,7 +191,7 @@ AgentSnapshot / AgentEvent       （订阅方）
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
-    fn parameters(&self) -> Option<serde_json::Value>;   // 一期宽松，schemars 强类型化见 roadmap
+    fn parameters(&self) -> Option<serde_json::Value>;   // 宽松 JSON 契约；schemars 类型化 schema 由 027 交付（feature `schema`，default）
     /// 资源声明：一期用于判定并发安全性
     fn resource_scope(&self) -> ResourceScope;            // ReadOnly | FileWriter | Exclusive
     async fn execute(
@@ -289,8 +289,9 @@ loop {
 | HTTP | `reqwest` | **仅 `providers-http` feature 下**，核心库不依赖 |
 | 异步 trait | `async-trait` | 动态工具注册（`Vec<Arc<dyn Tool>>`）需对象安全，原生 async fn in trait（edition 2024）在 `dyn` 下不对象安全，故采用 async-trait |
 | CLI | `clap` | 015 CLI 独立运行（交互式 REPL + `--acp` 模式） |
+| JSON Schema | `schemars` | 027 强类型工具参数（feature `schema`，default 开启） |
 
-**刻意不引入**：`pin-project-lite`（仅手写 Stream/Future 状态机时再加）、schemars/jsonschema（后续，见 roadmap）、workspace 多 crate。
+**刻意不引入**：`pin-project-lite`（仅手写 Stream/Future 状态机时再加）、workspace 多 crate。
 
 ## 6. 一期范围与里程碑
 
@@ -328,7 +329,7 @@ loop {
 └────────────┬──────────────────┘   └────────────┬───────────────┘
              │                                   │
              ▼                                   ▼
-          ACP 适配 (014)  ← JSON-RPC 2.0：stdio（本地 1:1）；SSE 为存根（见 roadmap）
+          ACP 适配 (014/025)  ← JSON-RPC 2.0：stdio（本地 1:1）+ SSE/HTTP 远程多 client（025）
              │
              ▼
           Agent Server (013)  ← 多 session 注册表 + 多 lane 调度（transport 无关核心）
@@ -339,9 +340,9 @@ loop {
 
 ### 7.2 关键决策
 
-- **ACP 为三期对外标准协议**（Agent Client Protocol v1，JSON-RPC 2.0）：本地 stdio（1 进程 = 1 client）。远程 SSE/HTTP 多 client 的 `serve_sse` 为存根（014），补齐见 roadmap 候选 1。
+- **ACP 为对外标准协议**（Agent Client Protocol v1，JSON-RPC 2.0）：本地 stdio（1 进程 = 1 client）+ 远程 SSE/HTTP 多 client（025，`axum`+`tokio-stream` feature-gated 在 `acp-sse` 非 default）。
 - **010 远程协议保持单连接**：不扩展多 client（避免与 ACP 双协议漂移）；需要多 client 走 ACP；010 仍用于轻量单连接场景。
-- **多 lane = 每 lane 一个写游标**（`LaneWriter`）+ 共享 append 串行化的 `SharedSessionStorage`（012），**仅进程内多 lane**；跨进程多写者（文件锁）仍不在范围（009/006 已声明）。
+- **多 lane = 每 lane 一个写游标**（`LaneWriter`）+ 共享 append 串行化的 `SharedSessionStorage`（012），**仅进程内多 lane**；跨进程多写者由 028 `fs2` 文件锁可选叠加（`FileMutationQueue`/`JsonlSessionStorage`，零破坏默认行为）。
 - **插件机制（四期 016）**：`Plugin` trait + `PluginRegistry`（std RwLock 确定性组装）+ `PluginTool`（`tokio::sync::OnceCell` 异步惰性实例化，失败不缓存可重试）。边界排除：动态库 dlopen、跨进程加载（见 roadmap）。Agent 插件 / 生命周期钩子已由十期 029 交付（`LifecycleHooks` + `AgentFactory` + `AgentPluginRegistry`，零破坏 001/016/003）。
 - **CLI 复用嵌入库**：015 走 clap + 013 AgentServer + 007 adapters + 005/006 tools 装配真实 agent，验证「Embeddable + 可独立运行」双目标。
 - **四期技术债收尾**：017-a 会话存储并发安全加固；017-b 多 lane 恢复语义 + 工作目录隔离；017-c 锁纪律（插件锁/锁表驱逐/测试拆分）。
