@@ -90,3 +90,7 @@
 
 - 037（2026-09-12）：架构文档 stale 引用收尾——订正 architecture.md 5 处 stale 措辞（027 schemars / 025 ACP SSE/HTTP / 028 跨进程锁），§5 补 schemars 行。
 - 038（2026-09-12）：TASK_BOARD 备注段归档 HISTORY.md——TASK_BOARD 还原为 ≤50 行纯索引。
+
+## 维护巡检（v0.1.0 全量回归）
+
+- 维护巡检闭环（2026-09-12，reviewer 主导 / Architect 归档）：维护模式下对 src/ 全量回归巡检，历经 r1 打回 → r2 打回 → r3 PASS。r1 三处问题——① `src/tools/read.rs` offset/limit 按字节切片直接用于 String 切片，UTF-8 多字节字符处 panic（Critical）；② `src/remote/mod.rs` spawn_stdio 取 stdout 失败未 kill/wait 致子进程 zombie；③ `src/core/session.rs` head_committed Mutex 生产代码 unwrap 违反禁止 unwrap 约定。r2 一处——session tests 两处 `std::mem::replace` 返回值未使用（unused_must_use warning）。修复 commit 58a4cec + 6e4955b 已合并，四门禁全绿（check ✓ / clippy --all-targets -D warnings ✓ / test 373 库 + 18 binary + 集成 ✓ / fmt ✓）。review 文件 docs/reviews/maintenance-review-r1/r2/r3.md 已落库。维护巡检闭环，无后续阻塞项。
