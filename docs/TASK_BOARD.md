@@ -91,8 +91,8 @@
 - [x] 030 — Agent 插件 agent_factory 锁外回调纪律（029 r1 遗留：锁内复制 Arc、锁外回调 + 重入回归测试）
 - [x] 031 — schemars 工具参数统一入口 + root_schema 语义澄清（027 r1 遗留：统一 `#[cfg]` 入口 + 文档澄清非 validator）
 - [x] 032 — config UnknownProtocol 变体清理 + 测试 unwrap 清理（022 r2 遗留：删除/映射未用变体 + tests/config.rs 去 unwrap）
-- [~] 033 — prune_locked 改关联函数（017-c r2 遗留：`&self` 未用改无 self helper）
-- [ ] 034 — 装配测试样板提炼 helper（026 r1 遗留：assemble.rs 测试构造/清理提取 helper）
+- [x] 033 — prune_locked 改关联函数（017-c r2 遗留：`&self` 未用改无 self helper）
+- [~] 034 — 装配测试样板提炼 helper（026 r1 遗留：assemble.rs 测试构造/清理提取 helper）
 - [ ] 035 — chacha20 锁文件更新 + CI package 校验（019 r3 遗留；⚠ `.github/` 归属 PM 已授权 override）
 - [x] 036 — 架构文档插件 stale 措辞同步（029 已交付，architecture.md §7.2 + roadmap.md 订正，Architect 文档任务；r2 审查通过）
 
@@ -171,3 +171,5 @@
 - 032 启动（2026-09-12，Architect，依据 PM「启动 032」）：规格 v1.0（docs/tasks/032-config-error-cleanup.md）已就绪并复核——承接 022 r2 两条非阻塞建议：① `src/config.rs:118-121` 的 `UnknownProtocol` 错误变体无实际构造路径（未知协议已由 serde 解析错误统一映射 `ProviderConfigError::Parse`），公开错误 API 与实际行为不一致；② `tests/config.rs` 及相关测试仍用 `unwrap`/`expect`，违背 conventions「无 unwrap()」。清理决策：优先**删除**未用变体（零构造路径=零行为变化，公开枚举减少一个从未生效的变体）；若 Developer 审查实际代码发现 `UnknownProtocol` 有引用或语义价值，则改为「解析层显式映射为 UnknownProtocol」——以实际代码为权威，二选一后保持公开错误 API 与实际行为一致。测试清理范围仅限 config 相关（不扩全仓），`unwrap`/`expect` 改带语义 `expect` 或返回 `Result` 用 `?`/`assert`。零行为变化、无新依赖、无新错误类型（删除变体需确认无 `match` 穷尽分支受影响）。032 由 [ ] 转 [~] 进入开发，下一步 Developer 实现
 - 032 复核（2026-09-12，Architect，响应 PM「复核任务完成情况」）：实现已合并（6e635ce，refactor(config)）；reviewer r1 审查通过（docs/reviews/032-review-r1.md，结论 PASS）：四门禁全绿（check ✓ / clippy --all-targets -D warnings ✓ / test --all-targets ✓ / test --no-default-features 261 passed ✓ / fmt ✓）；`UnknownProtocol` 已删除（全仓无 Rust 引用、无受影响穷尽匹配）、未知协议仍经 serde 失败统一映射 `Parse`（新增回归测试验证）、config 测试 unwrap 改带语义 expect（未扩全仓）。故 032 由 [~] 转 [x] 关闭。⚠ `docs/reviews/032-review-r1.md` 当前 git 未跟踪（reviewer 待落库提交）。**新增技术债**：r1 发现 `src/core/tool.rs:121` `tool_parameters<T>()` 在 `--no-default-features` 下触发 `extra_unused_type_parameters`（clippy），系 031 引入、非 032 引入，不在 032 验收命令范围，建议后续单独立项（暂列候选，待 PM 定序）。十一期（030~036）已完成 030/031/032/036，剩 033~035
 - 033 启动（2026-09-12，Architect，依据 PM「启动 033」）：规格 v1.0（docs/tasks/033-prune-locked-assoc-fn.md）已就绪并复核——承接 017-c r2 非阻塞建议：`src/tools/file_mutation_queue.rs:83` `prune_locked` 接收 `&self` 但未使用，改关联函数（无 self）表达纯 helper 语义；纯签名调整零行为变化、私有 helper 无对外影响；调用点 `self.prune_locked(...)` → `Self::prune_locked(...)`（以实际代码为权威）。033 由 [ ] 转 [~] 进入开发，下一步 Developer 实现
+- 033 复核（2026-09-12，Architect，响应 PM「复核任务完成情况」）：实现已合并（276be69，refactor(tools)）；reviewer r1 审查通过（docs/reviews/033-review-r1.md，结论 PASS，审查提交 b227352 已落库 push）：四门禁全绿（check ✓ / clippy --all-targets -D warnings ✓ / test --all-targets 367 库+18 二进制+集成 ✓ / fmt ✓），无阻塞问题；提交仅移除 `prune_locked` 未用 `&self` + 同步两调用点，零行为变化、公开 API 不变。故 033 由 [~] 转 [x] 关闭。十一期（030~036）已完成 030/031/032/033/036，剩 034/035。下一动作：启动 034（规格 v1.0 已就绪）
+- 034 启动（2026-09-12，Architect，依据 PM「启动 034」）：规格 v1.0（docs/tasks/034-assemble-test-helper.md）已就绪并复核——承接 026 r1 非阻塞建议 1（`src/bin/guigu/assemble.rs:307-375` 测试重复构造 CLI/创建 session/shutdown 样板）：提取「构造 CLI 参数 + 创建 session + shutdown 清理」为共享测试 helper（`#[cfg(test)]` 内），纯测试内部重构、不改产品逻辑、保持既有断言语义等价；无新错误类型，helper 清理需可靠（避免 panic 泄漏资源）；既有装配测试（system prompt 注入/base_url 透传）全部保持通过。034 由 [ ] 转 [~] 进入开发，下一步 Developer 实现
