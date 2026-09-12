@@ -119,6 +119,8 @@ pub(crate) fn tool_parameters<T: schemars::JsonSchema>() -> Option<serde_json::V
 }
 #[cfg(not(feature = "schema"))]
 pub(crate) fn tool_parameters<T>() -> Option<serde_json::Value> {
+    // 保留 `T` 以统一调用方签名（无 `#[cfg]`）；零成本消费避免 unused 警告。
+    let _ = std::marker::PhantomData::<T>;
     None
 }
 
