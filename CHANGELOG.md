@@ -2,6 +2,43 @@
 
 All notable changes to guigu are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-09-13
+
+Adds the incremental capabilities delivered since v0.1.0 (phases 9–11) to crates.io. All changes are additive — no breaking changes to the public trait contracts.
+
+### Configuration
+
+- Custom model configuration via TOML (feature `config`, default on): `ModelConfig` / `Protocol` / `GuiguConfig` data model, a `ProviderFactory` reusing the built-in adapters, and CLI `--config` / `--base-url` / `--api-key-env` with an extended `-m` (config-name-first, inline fallback) and a four-stage `api_key` resolution chain (CLI > plaintext > env > protocol default).
+- Custom system prompt and inline `base_url` endpoint override: `--system-prompt` global flag with the default identity set to Guiguzi, and `--base-url` passthrough to the provider.
+
+### TUI
+
+- Full-screen TUI (feature `tui`, opt-in): a `guigu tui` subcommand with a three-zone layout (status bar / conversation / input) and single-column inline tool cards, driven by pure `apply_event` / `handle_key` logic with headless `TestBackend` rendering.
+
+### Sessions
+
+- Persistent lane head: the active branch pointer is now persisted and recovered across restarts, with a unified read/write lock and generation-validated rollback.
+
+### Remote & protocols
+
+- ACP SSE/HTTP transport for remote multi-client (feature `acp-sse`, opt-in): `axum`-based SSE/HTTP serving with per-session permission mode to prevent cross-client crosstalk.
+
+### Tools
+
+- Strongly-typed tool parameter schemas (feature `schema`, default on): built-in `read` / `write` / `edit` / `bash` parameter structs derive `JsonSchema`, so `Tool::parameters` is generated from types (no manual drift) and a `RootSchema` is exposed for upstream consumers.
+
+### Concurrency & locking
+
+- Cross-process session / file locking: a kernel-level `FileLock` primitive (Unix `flock` / Windows `LockFileEx`, auto-released on crash) with blocking / non-blocking / cancellable acquisition, optionally layered onto the file mutation queue and JSONL session storage.
+
+### Extension
+
+- Agent plugins and lifecycle hooks: a `LifecycleHooks` trait (before/after tool call, should-stop, prepare-next-turn), an `AgentFactory` + `AgentPlugin` + `AgentPluginRegistry`, and optional bridging into the runtime loop config.
+
+### Housekeeping
+
+- Maintenance pass (phases 11): lock-discipline cleanup, removal of `unwrap`/`expect`, unified schema entry point, lock-file update, and CI package-whitelist validation.
+
 ## [0.1.0] - 2026-09-06
 
 First release: a complete, embeddable AI Agent runtime.

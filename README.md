@@ -10,13 +10,18 @@ guigu is a trait-based, async-first runtime for building AI agents in Rust. Insp
 - **Async-first** — built on `tokio`; non-blocking, cancellation-aware execution end to end.
 - **Single-writer runtime** — one runtime task owns state. `AgentHandle` exposes commands, authoritative snapshots (`watch`), and incremental events (`broadcast`).
 - **Built-in tools** — file `read`/`write`/`edit` and `bash`, with a per-path mutation queue to serialize concurrent writes.
+- **Strongly-typed tool schemas** — built-in tool parameters derive `JsonSchema` (feature `schema`), so `Tool::parameters` is generated from types with no manual drift.
 - **Real LLM adapters** — OpenAI and Anthropic over `reqwest` (feature-gated, rustls TLS).
+- **Custom model configuration** — TOML profiles plus `--config` / `--base-url` / `--api-key-env` for any OpenAI/Anthropic-compatible endpoint (feature `config`).
 - **Context management** — token budgeting, truncation, and a `Compactor` for summarization.
 - **Session tree + crash recovery** — append-only JSONL storage with fork/reduce and replay recovery.
-- **Multi-lane sessions** — concurrent in-process lanes writing to a single session tree.
-- **Remote & protocols** — an NDJSON remote protocol, a multi-session `AgentServer`, and the Agent Client Protocol (ACP v1, stdio).
+- **Multi-lane sessions** — concurrent in-process lanes writing to a single session tree, with a persistent lane head recovered across restarts.
+- **Cross-process file locking** — a kernel-level `FileLock` (Unix `flock` / Windows `LockFileEx`) to serialize concurrent access across processes.
+- **Remote & protocols** — an NDJSON remote protocol, a multi-session `AgentServer`, the Agent Client Protocol (ACP v1, stdio), and an ACP SSE/HTTP transport for remote multi-client (feature `acp-sse`).
 - **CLI** — an interactive REPL and an `--acp` mode for editor integration.
+- **Full-screen TUI** — a `guigu tui` subcommand with a three-zone layout and inline tool cards (feature `tui`).
 - **Plugins & deferred tools** — lazily instantiate tools and register plugins with async initialization.
+- **Agent plugins & lifecycle hooks** — contribute lifecycle hooks and agent factories via `AgentPlugin` / `AgentPluginRegistry`.
 
 ## Installation
 
@@ -24,7 +29,7 @@ Add `guigu` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-guigu = "0.1.0"
+guigu = "0.2.0"
 ```
 
 ### Feature flags
@@ -32,13 +37,16 @@ guigu = "0.1.0"
 | Feature           | Default | Description                                                        |
 |-------------------|---------|--------------------------------------------------------------------|
 | `providers-http`  | ✅       | OpenAI/Anthropic adapters over `reqwest` (rustls TLS)              |
-| `acp-sse`         | —       | ACP SSE/HTTP transport for remote clients (reserved stub)          |
+| `config`          | ✅       | TOML config + custom model profiles (`--config` / `-m`)            |
+| `schema`          | ✅       | Strongly-typed tool parameter schemas via `schemars`               |
+| `tui`             | —       | Full-screen TUI (`guigu tui`) over `ratatui` + `crossterm`         |
+| `acp-sse`         | —       | ACP SSE/HTTP transport for remote multi-client                     |
 
 Disable default features to get a pure core library with no `reqwest` dependency:
 
 ```toml
 [dependencies]
-guigu = { version = "0.1.0", default-features = false }
+guigu = { version = "0.2.0", default-features = false }
 ```
 
 ## Quick start
