@@ -115,3 +115,4 @@ error: the package 'guigu' does not contain this feature: tui
 
 - v1.0（2026-09-13，Architect）：初稿。定位 `cargo install --features tui` 失败根因 = crates.io v0.1.0 为六期快照、缺九期才加入的 `tui` feature；发布 v0.2.0 minor bump 补齐九~十一期能力。分「准备（阶段 A）」与「发布（阶段 B，需凭证+PM 决策）」两阶段。
 - v1.1（2026-09-13，Architect）：验收清单补记。v0.2.0 已实际发布完成——`Cargo.toml` version=0.2.0、CHANGELOG `[0.2.0] - 2026-09-13`、README 版本号与 5 行 feature flags 表均已就位；阶段 A 经 reviewer approve（commit `d1d4270`），阶段 B `cargo publish` + tag `v0.2.0` 完成（commit `1c4d47a`，tag 存在）。勾选全部验收项。
+- v1.2（2026-09-13，Architect）：端到端安装验证闭环。Developer 以 `cargo install guigu --version 0.2.0 --features tui --force` 强制重装（规避本地缓存），release 编译 33.80s、全程无 warning/error，`tui` 依赖（crossterm v0.28.1、ratatui v0.29.0）正常编译；安装后 `guigu --version` → `0.2.0`、`guigu --help` 含 `tui` 子命令、`guigu tui --help` exit 0，确认 `tui` feature 已编译进二进制。发布闭环完整，任务终态确认。
