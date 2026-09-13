@@ -99,18 +99,19 @@ error: the package 'guigu' does not contain this feature: tui
 
 ## Acceptance Criteria
 
-- [ ] `Cargo.toml` `version = "0.2.0"`；`[features]` 段含 `providers-http`/`config`/`schema`/`tui`/`acp-sse` 五者，`default = ["providers-http", "config", "schema"]`
-- [ ] CHANGELOG.md 新增 `[0.2.0]` 段，覆盖 022–029 能力 + 030–038 维护概括
-- [ ] README.md 三处版本号改为 `0.2.0`，feature flags 表完整 5 行
-- [ ] `cargo check --all-features` passes
-- [ ] `cargo check --no-default-features` passes
-- [ ] `cargo test --all-targets` passes
-- [ ] `cargo test --all-features` passes
-- [ ] `cargo clippy --all-targets --all-features -D warnings` passes
-- [ ] `cargo fmt --check` passes
-- [ ] `cargo package --list` 含必要文件、不含 `target/` `.git/` `docs/` `.opencode/`
-- [ ] （阶段 B，PM 决策）`cargo publish` 成功；`cargo install guigu --version 0.2.0 --features tui` 成功；tag `v0.2.0` 存在
+- [x] `Cargo.toml` `version = "0.2.0"`；`[features]` 段含 `providers-http`/`config`/`schema`/`tui`/`acp-sse` 五者，`default = ["providers-http", "config", "schema"]`
+- [x] CHANGELOG.md 新增 `[0.2.0]` 段，覆盖 022–029 能力 + 030–038 维护概括
+- [x] README.md 三处版本号改为 `0.2.0`，feature flags 表完整 5 行
+- [x] `cargo check --all-features` passes
+- [x] `cargo check --no-default-features` passes
+- [x] `cargo test --all-targets` passes
+- [x] `cargo test --all-features` passes
+- [x] `cargo clippy --all-targets --all-features -D warnings` passes
+- [x] `cargo fmt --check` passes
+- [x] `cargo package --list` 含必要文件、不含 `target/` `.git/` `docs/` `.opencode/`
+- [x] （阶段 B，PM 决策）`cargo publish` 成功；`cargo install guigu --version 0.2.0 --features tui` 成功；tag `v0.2.0` 存在
 
 ## 修订记录
 
 - v1.0（2026-09-13，Architect）：初稿。定位 `cargo install --features tui` 失败根因 = crates.io v0.1.0 为六期快照、缺九期才加入的 `tui` feature；发布 v0.2.0 minor bump 补齐九~十一期能力。分「准备（阶段 A）」与「发布（阶段 B，需凭证+PM 决策）」两阶段。
+- v1.1（2026-09-13，Architect）：验收清单补记。v0.2.0 已实际发布完成——`Cargo.toml` version=0.2.0、CHANGELOG `[0.2.0] - 2026-09-13`、README 版本号与 5 行 feature flags 表均已就位；阶段 A 经 reviewer approve（commit `d1d4270`），阶段 B `cargo publish` + tag `v0.2.0` 完成（commit `1c4d47a`，tag 存在）。勾选全部验收项。
