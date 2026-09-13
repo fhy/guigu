@@ -43,3 +43,4 @@
 - [x] 036 架构文档插件措辞同步（十一期）
 - [x] 037 架构文档 stale 引用收尾（维护）
 - [x] 038 TASK_BOARD 归档 HISTORY（维护）
+- [ ] 039 发布 v0.2.0（补齐 tui/config/schema/acp-sse 等九~十一期能力）
