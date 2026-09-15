@@ -58,12 +58,18 @@ pub struct ProviderRequest {
 /// - `HttpStatus`：HTTP 非 2xx（401 认证 / 400 参数 / 429 限流 / 5xx）
 /// - `Parse`：SSE / JSON 结构非法
 /// - `Build`：请求体构造失败（防御性，正常不应发生）
+///
+/// 040 补齐（additive）：
+/// - `Aborted`：建流阶段被取消（runtime 不重试，立即传播 abort 终态）
+/// - `Timeout`：建流阶段超过 `LoopConfig::request_timeout`（可重试，分类见 042）
 #[derive(Error, Debug)]
 pub enum ProviderError {
     #[error("Provider request failed: {0}")]
     Request(String),
     #[error("Provider request aborted")]
     Aborted,
+    #[error("provider request timed out")]
+    Timeout,
     #[error("Network error: {0}")]
     Network(String),
     #[error("HTTP status {status}: {body}")]

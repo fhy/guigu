@@ -11,9 +11,14 @@
 //!
 //! 模块拆分：`turn`（流消费 + 重试）、`tools`（工具编排）、`step`（turn 收尾）。
 
+mod commands;
 mod step;
 mod tools;
 mod turn;
+
+pub(crate) use commands::{
+    append_user_message, collect_pending, drain_commands, stop_reason_for_error, update_snapshot,
+};
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
@@ -28,9 +33,7 @@ use crate::core::context::{
     CompactionPolicy, ContextBudget, default_convert_to_llm, prepare_context,
 };
 use crate::core::event::AgentEvent;
-use crate::core::message::{
-    AssistantMessage, Message, StopReason, ThinkingLevel, ToolCall, ToolResultMessage,
-};
+use crate::core::message::{AssistantMessage, Message, ThinkingLevel, ToolCall, ToolResultMessage};
 use crate::core::provider::{Context, Model, ModelProvider, ProviderRequest, ToolSpec};
 use crate::core::tool::{Tool, ToolResult};
 use crate::plugin::hooks::LifecycleHooks;
@@ -88,6 +91,10 @@ pub struct LoopConfig {
     pub retry_base_delay: Duration,
     /// 重试退避上限。
     pub retry_max_delay: Duration,
+    /// provider 建流请求超时（每次 `stream()` 建立，非跨重试累计）。
+    /// `None` = 无超时（保持既有语义）；`Some(d)` 时建流与 `d` 竞争，
+    /// 超时产出 `ProviderError::Timeout`（可重试，分类见 Task 042）。
+    pub request_timeout: Option<Duration>,
     /// 二期：摘要压缩器。`None` = 关闭压缩（回退一期截断）。
     pub compactor: Option<Arc<dyn Compactor>>,
     /// 二期：压缩策略（预算阈值 + 保留策略）。
@@ -114,6 +121,7 @@ impl Default for LoopConfig {
             max_retries: 3,
             retry_base_delay: Duration::from_millis(500),
             retry_max_delay: Duration::from_secs(30),
+            request_timeout: None,
             compactor: None,
             compaction: CompactionPolicy::default(),
             hooks: None,
@@ -149,83 +157,6 @@ pub(crate) struct RunContext<'a> {
 pub(crate) struct RunOutcome {
     pub shutdown: bool,
     pub consumed: u64,
-}
-
-/// 一次 drain 的收集结果。
-struct Drain {
-    aborted: bool,
-    shutdown: bool,
-    steer: Vec<Message>,
-    followup: Vec<Message>,
-}
-
-/// 非阻塞排空命令通道：Abort/Shutdown 就地取消 signal，Steer/FollowUp 收集，
-/// 其余（Prompt/Continue/Reset）入队待 run 结束后处理。
-fn drain_commands(
-    rx: &mut mpsc::Receiver<AgentCommand>,
-    queue: &mut VecDeque<AgentCommand>,
-    signal: &CancellationToken,
-) -> Drain {
-    let mut drain = Drain {
-        aborted: false,
-        shutdown: false,
-        steer: Vec::new(),
-        followup: Vec::new(),
-    };
-    while let Ok(cmd) = rx.try_recv() {
-        match cmd {
-            AgentCommand::Abort => {
-                drain.aborted = true;
-                signal.cancel();
-            }
-            AgentCommand::Shutdown => {
-                drain.shutdown = true;
-                signal.cancel();
-            }
-            AgentCommand::Steer(msg) => drain.steer.push(msg),
-            AgentCommand::FollowUp(msg) => drain.followup.push(msg),
-            other => queue.push_back(other),
-        }
-    }
-    drain
-}
-
-/// 收集待处理的 steering/followUp：先 drain 通道，再从 queue 弹出流式期间
-/// re-queue 的 Steer/FollowUp（其余命令保留在 queue）。
-fn collect_pending(
-    rx: &mut mpsc::Receiver<AgentCommand>,
-    queue: &mut VecDeque<AgentCommand>,
-    signal: &CancellationToken,
-) -> Drain {
-    let mut d = drain_commands(rx, queue, signal);
-    let mut remaining = VecDeque::new();
-    while let Some(cmd) = queue.pop_front() {
-        match cmd {
-            AgentCommand::Steer(msg) => d.steer.push(msg),
-            AgentCommand::FollowUp(msg) => d.followup.push(msg),
-            other => remaining.push_back(other),
-        }
-    }
-    queue.extend(remaining);
-    d
-}
-
-/// 更新 snapshot（transcript / streaming / pending_tool_calls / error）。
-fn update_snapshot(
-    snapshot_tx: &watch::Sender<AgentSnapshot>,
-    transcript: &[Arc<Message>],
-    is_streaming: bool,
-    streaming_message: Option<Arc<Message>>,
-    pending_tool_calls: &HashSet<String>,
-    error_message: Option<String>,
-) {
-    let mut snap = snapshot_tx.borrow().clone();
-    snap.messages = transcript.to_vec();
-    snap.is_streaming = is_streaming;
-    snap.streaming_message = streaming_message;
-    snap.pending_tool_calls = pending_tool_calls.clone();
-    snap.error_message = error_message;
-    let _ = snapshot_tx.send(snap);
 }
 
 /// 把工具列表投影为传给 LLM 的 `ToolSpec`。
@@ -369,31 +300,4 @@ pub(crate) async fn run_agent_loop(ctx: &mut RunContext<'_>, initial: Vec<Messag
     });
 
     RunOutcome { shutdown, consumed }
-}
-
-/// 追加一条用户消息到 transcript 并发事件。
-async fn append_user_message(ctx: &mut RunContext<'_>, msg: Message) {
-    let arc = Arc::new(msg);
-    let _ = ctx.events_tx.send(AgentEvent::MessageStart {
-        message: arc.clone(),
-    });
-    ctx.transcript.push(arc.clone());
-    update_snapshot(
-        ctx.snapshot_tx,
-        ctx.transcript,
-        false,
-        None,
-        &HashSet::new(),
-        None,
-    );
-    let _ = ctx.events_tx.send(AgentEvent::MessageEnd { message: arc });
-}
-
-/// stop_reason 映射：取消 → Aborted，其余（流内 Error / 重试耗尽）→ Error。
-pub(crate) fn stop_reason_for_error(aborted: bool) -> StopReason {
-    if aborted {
-        StopReason::Aborted
-    } else {
-        StopReason::Error
-    }
 }

@@ -90,7 +90,14 @@ pub(super) async fn tool_step(
     signal: &CancellationToken,
 ) -> LoopStep {
     // prepare → execute → after_tool_call → 结果入上下文。
-    let tool_results = tools::execute_tool_calls(ctx, &turn.tool_calls, signal).await;
+    // Task 040：传入 stop_reason，Length 截断时走保护路径（不执行工具）。
+    let tool_results = tools::execute_tool_calls(
+        ctx,
+        &turn.tool_calls,
+        turn.assistant_message.stop_reason.clone(),
+        signal,
+    )
+    .await;
 
     for tr in &tool_results {
         let arc = Arc::new(Message::ToolResult(tr.clone()));

@@ -102,6 +102,28 @@ impl ModelProvider for FakeProvider {
     }
 }
 
+/// 挂起 provider：`stream()` 永不返回（`pending()` future），用于验证建流阶段
+/// 的取消/超时（Task 040）。runtime 的 `select!` 应在 provider 返回前抢先取消。
+struct HangingProvider {
+    call_count: AtomicUsize,
+}
+
+impl HangingProvider {
+    fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ModelProvider for HangingProvider {
+    async fn stream(&self, _request: ProviderRequest) -> Result<AssistantStream, ProviderError> {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        // 挂起：永不返回（runtime 的 select! 应抢先取消/超时）。
+        futures::future::pending::<()>().await;
+        Err(ProviderError::Request("unreachable".to_string()))
+    }
+}
+
 // ---------- 测试工具 ----------
 
 /// 顺序记录工具：execute 时取一个递增序号写进结果（验证执行顺序）。
@@ -213,6 +235,36 @@ fn tool_call_turn(id: &str, name: &str, args: &str) -> Vec<AssistantEvent> {
     ]
 }
 
+/// 指定 `stop_reason` 的 tool call turn（Task 040 Length 保护测试用）。
+fn tool_call_turn_with_stop(
+    id: &str,
+    name: &str,
+    args: &str,
+    stop: StopReason,
+) -> Vec<AssistantEvent> {
+    let message = AssistantMessage {
+        content: vec![AssistantContent::ToolCall(ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: args.to_string(),
+        })],
+        model: None,
+        usage: None,
+        stop_reason: Some(stop),
+        error_message: None,
+        timestamp: 0,
+    };
+    vec![
+        AssistantEvent::ToolCallStart {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: args.to_string(),
+        },
+        AssistantEvent::ToolCallEnd { id: id.to_string() },
+        AssistantEvent::Done { message },
+    ]
+}
+
 /// 多工具调用 turn：所有 toolCall 的 Start/End 事件 + 末尾**单个** `Done`
 /// （message 含全部 toolCall）。真实 provider 一个 turn 只发一个 `Done`。
 fn multi_tool_call_turn(calls: &[(&str, &str, &str)]) -> Vec<AssistantEvent> {
@@ -252,7 +304,7 @@ fn make_config() -> AgentConfig {
 }
 
 fn make_runtime(
-    provider: Arc<FakeProvider>,
+    provider: Arc<dyn ModelProvider>,
     tools: Vec<Arc<dyn Tool>>,
     mode: ToolExecutionMode,
     context_window: u32,
@@ -697,6 +749,244 @@ async fn test_context_budget_truncation() {
         "context should be truncated (got {} messages, expected < 5)",
         provider.last_context_size()
     );
+}
+
+// ---------- Task 040：Length 截断保护 + 建流取消/超时 ----------
+
+/// Length 保护：stop_reason == Length 且含 ToolCall → 不执行任何工具，
+/// 每个 tool_call 产出合成错误 ToolResult（is_error: true）入 transcript。
+#[tokio::test]
+async fn test_length_truncation_protects_tool_calls() {
+    let provider = FakeProvider::new(vec![
+        tool_call_turn_with_stop("c1", "seq", "{}", StopReason::Length),
+        text_turn("done"),
+    ]);
+    let counter = Arc::new(AtomicUsize::new(0));
+    let tools = vec![Arc::new(SeqTool {
+        name: "seq".to_string(),
+        counter: counter.clone(),
+    }) as Arc<dyn Tool>];
+    let handle = AgentHandle::spawn(
+        make_config(),
+        make_runtime(provider.clone(), tools, ToolExecutionMode::Sequential, 8192),
+    );
+    handle
+        .prompt(vec![user_msg("hi")])
+        .await
+        .expect("prompt should succeed");
+    handle.wait_for_idle().await.expect("should settle");
+
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "no tool should be executed on Length truncation"
+    );
+    let snapshot = handle.snapshot();
+    // user + assistant(toolcall, Length) + toolresult(synthesized error) + assistant(text)
+    assert_eq!(snapshot.messages.len(), 4, "expected 4 messages");
+    let Message::ToolResult(tr) = snapshot.messages[2].as_ref() else {
+        panic!("third message should be ToolResult");
+    };
+    assert!(tr.is_error, "synthesized tool result should be an error");
+    let text = tr.content.iter().find_map(|c| match c {
+        guigu::core::message::ToolResultContent::Text { text } => Some(text.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        text.as_deref(),
+        Some("tool call arguments truncated by length limit"),
+        "synthesized tool result should carry the truncation message"
+    );
+}
+
+/// Length 保护负例：stop_reason == Completed 且含 ToolCall → 正常执行工具（行为不变）。
+#[tokio::test]
+async fn test_length_negative_completed_executes() {
+    let provider = FakeProvider::new(vec![
+        tool_call_turn_with_stop("c1", "seq", "{}", StopReason::Completed),
+        text_turn("done"),
+    ]);
+    let counter = Arc::new(AtomicUsize::new(0));
+    let tools = vec![Arc::new(SeqTool {
+        name: "seq".to_string(),
+        counter: counter.clone(),
+    }) as Arc<dyn Tool>];
+    let handle = AgentHandle::spawn(
+        make_config(),
+        make_runtime(provider.clone(), tools, ToolExecutionMode::Sequential, 8192),
+    );
+    handle
+        .prompt(vec![user_msg("hi")])
+        .await
+        .expect("prompt should succeed");
+    handle.wait_for_idle().await.expect("should settle");
+
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "Completed stop_reason should execute the tool normally"
+    );
+}
+
+/// Length 且无 ToolCall → 正常结束，无合成 ToolResult（仅截断文本，合法终态）。
+#[tokio::test]
+async fn test_length_without_tool_calls() {
+    let message = AssistantMessage {
+        content: vec![AssistantContent::Text {
+            text: "truncated".to_string(),
+        }],
+        model: None,
+        usage: None,
+        stop_reason: Some(StopReason::Length),
+        error_message: None,
+        timestamp: 0,
+    };
+    let events = vec![
+        AssistantEvent::TextDelta {
+            text: "truncated".to_string(),
+        },
+        AssistantEvent::Done { message },
+    ];
+    let provider = FakeProvider::new(vec![events]);
+    let handle = AgentHandle::spawn(
+        make_config(),
+        make_runtime(
+            provider.clone(),
+            Vec::new(),
+            ToolExecutionMode::Sequential,
+            8192,
+        ),
+    );
+    handle
+        .prompt(vec![user_msg("hi")])
+        .await
+        .expect("prompt should succeed");
+    handle.wait_for_idle().await.expect("should settle");
+
+    let snapshot = handle.snapshot();
+    // user + assistant(text, Length) —— 无合成 ToolResult。
+    assert_eq!(
+        snapshot.messages.len(),
+        2,
+        "expected 2 messages (no synthesized ToolResult)"
+    );
+    let last = snapshot
+        .messages
+        .last()
+        .expect("transcript should not be empty");
+    let Message::Assistant(a) = last.as_ref() else {
+        panic!("last message should be assistant");
+    };
+    assert_eq!(
+        a.stop_reason,
+        Some(StopReason::Length),
+        "should preserve Length stop_reason"
+    );
+}
+
+/// 建流取消：provider 的 stream() 挂起（pending future）→ 取消 signal 后
+/// 建流返回 Aborted，不进入重试（call_count == 1），run 产出 Aborted 终态。
+#[tokio::test]
+async fn test_stream_establishment_cancel() {
+    let provider = Arc::new(HangingProvider {
+        call_count: AtomicUsize::new(0),
+    });
+    let handle = AgentHandle::spawn(
+        make_config(),
+        make_runtime(
+            provider.clone(),
+            Vec::new(),
+            ToolExecutionMode::Sequential,
+            8192,
+        ),
+    );
+    let mut rx = handle.subscribe();
+    handle
+        .prompt(vec![user_msg("hi")])
+        .await
+        .expect("prompt should succeed");
+    // 等 run 进入建流（AgentStart 在建流前发出）。
+    wait_event(&mut rx, |e| {
+        matches!(e, guigu::core::event::AgentEvent::AgentStart)
+    })
+    .await
+    .expect("should receive AgentStart");
+    // 取消 run signal（shutdown 直接 cancel shutdown_token → run 级 child signal）。
+    handle.shutdown().await.expect("shutdown should succeed");
+    // 建流被取消：不进入重试，provider.stream() 仅调用一次。
+    assert_eq!(
+        provider.call_count(),
+        1,
+        "Aborted should not retry (stream called once)"
+    );
+    // run 产出 Aborted 终态（AgentEnd 携带 transcript）。
+    let end = wait_event(&mut rx, |e| {
+        matches!(e, guigu::core::event::AgentEvent::AgentEnd { .. })
+    })
+    .await
+    .expect("AgentEnd should be delivered");
+    let guigu::core::event::AgentEvent::AgentEnd { messages } = end else {
+        panic!("expected AgentEnd");
+    };
+    let last = messages.last().expect("transcript should not be empty");
+    let Message::Assistant(a) = last.as_ref() else {
+        panic!("last message should be assistant");
+    };
+    assert_eq!(
+        a.stop_reason,
+        Some(StopReason::Aborted),
+        "cancelled stream establishment should produce Aborted"
+    );
+}
+
+/// 建流超时：request_timeout = Some(small) + 挂起 provider → 建流超时（可重试），
+/// 重试耗尽后 run 产出 Error 终态（error_message 含 timeout）。
+#[tokio::test]
+async fn test_stream_establishment_timeout() {
+    let provider = Arc::new(HangingProvider {
+        call_count: AtomicUsize::new(0),
+    });
+    let runtime = AgentRuntime {
+        provider: provider.clone(),
+        tools: Vec::new(),
+        loop_config: LoopConfig {
+            model: Model {
+                id: "test-model".to_string(),
+                context_window: 8192,
+            },
+            request_timeout: Some(Duration::from_millis(50)),
+            max_retries: 2,
+            retry_base_delay: Duration::from_millis(1),
+            ..LoopConfig::default()
+        },
+    };
+    let handle = AgentHandle::spawn(make_config(), runtime);
+    handle
+        .prompt(vec![user_msg("hi")])
+        .await
+        .expect("prompt should succeed");
+    handle.wait_for_idle().await.expect("should settle");
+
+    // Timeout 可重试：2 次重试 + 1 次首次 = 3 次建流调用。
+    assert_eq!(
+        provider.call_count(),
+        3,
+        "timeout should be retried (2 retries + 1 initial = 3 calls)"
+    );
+    let snapshot = handle.snapshot();
+    let last = snapshot
+        .messages
+        .last()
+        .expect("transcript should not be empty");
+    let Message::Assistant(a) = last.as_ref() else {
+        panic!("last message should be assistant");
+    };
+    assert_eq!(
+        a.stop_reason,
+        Some(StopReason::Error),
+        "timeout (retries exhausted) should produce Error"
+    );
+    assert!(a.error_message.is_some(), "should carry an error message");
 }
 
 /// 从 broadcast 接收事件直到匹配 predicate，带 5s 超时兜底。

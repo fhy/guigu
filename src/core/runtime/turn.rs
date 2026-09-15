@@ -30,6 +30,11 @@ pub(crate) struct TurnResult {
 }
 
 /// 建立 provider 流（含重试）。仅重试 `stream()` 建立失败。
+///
+/// Task 040：每次 `provider.stream()` 建流纳入 `select!`，与取消信号竞争
+/// （`request_timeout = Some(d)` 时再与 `d` 超时竞争）。即使 provider 建流
+/// 阶段挂起（不响应取消），`signal.cancelled()` 就绪也能立即返回 `Aborted`，
+/// 不再永久等待。`Aborted` 不进入指数退避重试，立即向上传播。
 async fn stream_with_retry(
     provider: &Arc<dyn ModelProvider>,
     request: &ProviderRequest,
@@ -38,10 +43,23 @@ async fn stream_with_retry(
 ) -> Result<AssistantStream, ProviderError> {
     let mut attempt: u32 = 0;
     loop {
-        match provider.stream(request.clone()).await {
+        // 建流与取消（及可选超时）竞争。
+        let established = match config.request_timeout {
+            Some(d) => tokio::select! {
+                r = provider.stream(request.clone()) => r,
+                _ = signal.cancelled() => Err(ProviderError::Aborted),
+                _ = tokio::time::sleep(d) => Err(ProviderError::Timeout),
+            },
+            None => tokio::select! {
+                r = provider.stream(request.clone()) => r,
+                _ = signal.cancelled() => Err(ProviderError::Aborted),
+            },
+        };
+        match established {
             Ok(stream) => return Ok(stream),
             Err(e) => {
-                if signal.is_cancelled() {
+                // Aborted（含 provider 自身返回）不重试，立即传播 abort 终态。
+                if matches!(e, ProviderError::Aborted) || signal.is_cancelled() {
                     return Err(ProviderError::Aborted);
                 }
                 if attempt >= config.max_retries {

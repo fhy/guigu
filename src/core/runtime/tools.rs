@@ -16,7 +16,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::event::AgentEvent;
-use crate::core::message::{ToolCall, ToolResultMessage};
+use crate::core::message::{StopReason, ToolCall, ToolResultMessage};
 use crate::core::tool::{ResourceScope, Tool, ToolResult};
 use crate::plugin::hooks::HookContext;
 
@@ -192,12 +192,58 @@ async fn execute_readonly_parallel(
     pairs.into_iter().map(|(_, r)| r).collect()
 }
 
+/// Task 040：Length 截断保护——`stop_reason == Length` 且含 tool call 时，
+/// 模型在工具参数中途达到 token 上限，截断后的参数即使碰巧是合法 JSON 也
+/// **不执行**（避免不完整的 bash/write/edit 落盘真实副作用）。为每个 tool call
+/// 按顺序发出 `ToolExecutionStart` → `ToolExecutionEnd{ is_error: true }`，合成
+/// 错误 `ToolResult` 注入上下文，供下一轮模型看到失败并自行纠正。
+async fn synthesize_truncated_results(
+    ctx: &RunContext<'_>,
+    tool_calls: &[ToolCall],
+) -> Vec<ToolResultMessage> {
+    let mut messages = Vec::new();
+    for tc in tool_calls {
+        // 截断参数可能非法 JSON：解析失败按 `Null` 处理（与 prepare_call 一致）。
+        let args = serde_json::from_str::<serde_json::Value>(&tc.arguments)
+            .unwrap_or(serde_json::Value::Null);
+        let _ = ctx.events_tx.send(AgentEvent::ToolExecutionStart {
+            tool_call_id: tc.id.clone(),
+            tool_name: tc.name.clone(),
+            args: args.clone(),
+        });
+        let result = ToolResult::error("tool call arguments truncated by length limit");
+        let _ = ctx.events_tx.send(AgentEvent::ToolExecutionEnd {
+            tool_call_id: tc.id.clone(),
+            tool_name: tc.name.clone(),
+            result: result.clone(),
+            is_error: true,
+        });
+        messages.push(ToolResultMessage {
+            tool_call_id: tc.id.clone(),
+            tool_name: tc.name.clone(),
+            is_error: true,
+            content: result.content,
+            details: None,
+            timestamp: 0,
+        });
+    }
+    messages
+}
+
 /// 执行一批工具调用，返回按原顺序排列的 `ToolResultMessage`。
+///
+/// Task 040：`stop_reason == Length` 且 `tool_calls` 非空时走截断保护
+/// （`synthesize_truncated_results`），不执行任何工具。
 pub(crate) async fn execute_tool_calls(
     ctx: &RunContext<'_>,
     tool_calls: &[ToolCall],
+    stop_reason: Option<StopReason>,
     signal: &CancellationToken,
 ) -> Vec<ToolResultMessage> {
+    if stop_reason == Some(StopReason::Length) && !tool_calls.is_empty() {
+        return synthesize_truncated_results(ctx, tool_calls).await;
+    }
+
     let mut prepared: Vec<PreparedCall> = Vec::new();
     for tc in tool_calls {
         prepared.push(prepare_call(ctx, tc).await);
