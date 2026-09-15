@@ -1,6 +1,6 @@
 # guigu 用户指南（中文）
 
-> 状态：v0.1.0
+> 状态：v0.2.0
 > 本文档是 guigu 的中文用户文档，覆盖安装、快速开始、核心抽象与 **Provider 配置**。
 > 架构细节见 [docs/architecture.md](architecture.md)，任务历史见 [docs/TASK_BOARD.md](TASK_BOARD.md)。
 
@@ -28,7 +28,7 @@ guigu 是一个轻量级、Rust 原生的 AI Agent 运行时。借鉴 [pi](https
 
 ```toml
 [dependencies]
-guigu = "0.1.0"
+guigu = "0.2.0"
 ```
 
 ### feature flags
@@ -36,13 +36,16 @@ guigu = "0.1.0"
 | Feature | 默认 | 说明 |
 |---------|------|------|
 | `providers-http` | ✅ | OpenAI/Anthropic 适配器（`reqwest`，rustls TLS） |
-| `acp-sse` | — | ACP 的 SSE/HTTP 传输（预留存根，见 roadmap） |
+| `config` | ✅ | TOML 配置 + 自定义模型 |
+| `schema` | ✅ | schemars 强类型工具参数 schema |
+| `tui` | — | 全屏 TUI（`ratatui` + `crossterm`） |
+| `acp-sse` | — | ACP 的 SSE/HTTP 远程多 client（`axum` + `tokio-stream`） |
 
 关闭默认 feature 可得到**不含 `reqwest` 的纯核心库**：
 
 ```toml
 [dependencies]
-guigu = { version = "0.1.0", default-features = false }
+guigu = { version = "0.2.0", default-features = false }
 ```
 
 > 注意：`ModelProvider` trait 定义在核心（`core/provider.rs`），**始终可用、不受 `providers-http` 门控**。关闭默认 feature 后，你依然可以自行实现 `ModelProvider` 接入任意后端（见 §5.2）。
