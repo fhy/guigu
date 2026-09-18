@@ -94,3 +94,9 @@
 ## 维护巡检（v0.1.0 全量回归）
 
 - 维护巡检闭环（2026-09-12，reviewer 主导 / Architect 归档）：维护模式下对 src/ 全量回归巡检，历经 r1 打回 → r2 打回 → r3 PASS。r1 三处问题——① `src/tools/read.rs` offset/limit 按字节切片直接用于 String 切片，UTF-8 多字节字符处 panic（Critical）；② `src/remote/mod.rs` spawn_stdio 取 stdout 失败未 kill/wait 致子进程 zombie；③ `src/core/session.rs` head_committed Mutex 生产代码 unwrap 违反禁止 unwrap 约定。r2 一处——session tests 两处 `std::mem::replace` 返回值未使用（unused_must_use warning）。修复 commit 58a4cec + 6e4955b 已合并，四门禁全绿（check ✓ / clippy --all-targets -D warnings ✓ / test 373 库 + 18 binary + 集成 ✓ / fmt ✓）。review 文件 docs/reviews/maintenance-review-r1/r2/r3.md 已落库。维护巡检闭环，无后续阻塞项。
+
+## 十二期（040-043）运行时正确性修复
+
+> 定稿（2026-09-13，Architect，依据维护审查高优先级问题 #1~#4）：040 输出截断保护 + 建流取消/超时；041 压缩提交语义 + 拓扑安全截断；042 ProviderError 重试分类 + Retry-After；043 上下文预算精确化（实际 usage + 预留输出）。规格 docs/tasks/040~043 均已就绪。
+
+- 040 复核（2026-09-18，Architect，响应 PM「复核任务完成情况」）：实现已合并（1467561 + 5f753c6 修复）；reviewer 历经 r1 打回（Length 保护测试仅单 ToolCall、未覆盖 delta 路径、未断言事件序列）→ r2 审查通过（docs/reviews/040-review-r2.md，结论 PASS，审查提交 c723a51）：四门禁全绿（check ✓ / clippy --all-targets --all-features -D warnings ✓ / test --all-targets 0 失败、runtime_loop 16 项 ✓ / fmt ✓），无阻塞问题。Length 保护（tool_call 整批失败不执行 + 合成错误 ToolResult 入 transcript）、建流 select! 取消/超时（`ProviderError::Aborted`/`Timeout` 新增、`LoopConfig::request_timeout` 可配置）均已落地。故 040 由 [ ] 转 [x] 关闭。十二期（040~043）已完成 040，剩 041~043 待 PM 逐个「启动」，下一动作：启动 041（规格 v1.0 已就绪）

@@ -44,7 +44,7 @@
 - [x] 037 架构文档 stale 引用收尾（维护）
 - [x] 038 TASK_BOARD 归档 HISTORY（维护）
 - [x] 039 发布 v0.2.0（阶段 A 准备 + 阶段 B cargo publish + tag v0.2.0 完成）
-- [ ] 040 Runtime 正确性修复：tool_call 截断保护 + 建流取消/超时（十二期）
+- [x] 040 Runtime 正确性修复：tool_call 截断保护 + 建流取消/超时（十二期）
 - [ ] 041 上下文安全：压缩提交语义 + 拓扑安全截断（十二期）
 - [ ] 042 ProviderError 重试分类 + Retry-After（十二期）
 - [ ] 043 上下文预算精确化（实际 usage + 预留输出）（十二期）
