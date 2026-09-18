@@ -295,6 +295,57 @@ fn multi_tool_call_turn(calls: &[(&str, &str, &str)]) -> Vec<AssistantEvent> {
     events
 }
 
+/// 多工具调用 turn（指定 `stop_reason`）：每个 toolCall 的 Start/End 事件 +
+/// 末尾**单个** `Done`（message 含全部 toolCall）。`delta_ids` 中的 toolCall 经
+/// `ToolCallStart`（空参数）+ `ToolCallDelta`（累积完整参数）+ `ToolCallEnd` 形成，
+/// 其余用 `ToolCallStart`（完整参数）+ `ToolCallEnd`。用于 Task 040 Length 保护
+/// 测试覆盖 delta 累积路径与逐调用生命周期事件。
+fn multi_tool_call_turn_with_stop(
+    calls: &[(&str, &str, &str)],
+    delta_ids: &[&str],
+    stop: StopReason,
+) -> Vec<AssistantEvent> {
+    let mut events = Vec::new();
+    let mut content = Vec::new();
+    for (id, name, args) in calls {
+        if delta_ids.contains(id) {
+            // delta 路径：Start（空参数）→ Delta（累积完整参数）→ End。
+            events.push(AssistantEvent::ToolCallStart {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: String::new(),
+            });
+            events.push(AssistantEvent::ToolCallDelta {
+                id: id.to_string(),
+                arguments_delta: args.to_string(),
+            });
+            events.push(AssistantEvent::ToolCallEnd { id: id.to_string() });
+        } else {
+            events.push(AssistantEvent::ToolCallStart {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: args.to_string(),
+            });
+            events.push(AssistantEvent::ToolCallEnd { id: id.to_string() });
+        }
+        content.push(AssistantContent::ToolCall(ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: args.to_string(),
+        }));
+    }
+    let message = AssistantMessage {
+        content,
+        model: None,
+        usage: None,
+        stop_reason: Some(stop),
+        error_message: None,
+        timestamp: 0,
+    };
+    events.push(AssistantEvent::Done { message });
+    events
+}
+
 fn make_config() -> AgentConfig {
     AgentConfig {
         system_prompt: "test".to_string(),
@@ -754,11 +805,19 @@ async fn test_context_budget_truncation() {
 // ---------- Task 040：Length 截断保护 + 建流取消/超时 ----------
 
 /// Length 保护：stop_reason == Length 且含 ToolCall → 不执行任何工具，
-/// 每个 tool_call 产出合成错误 ToolResult（is_error: true）入 transcript。
+/// 每个 tool_call 按输入顺序产出 `ToolExecutionStart` → `ToolExecutionEnd{is_error:true}`
+/// 生命周期事件，合成错误 ToolResult（is_error: true）入 transcript。
+/// 覆盖：≥2 个 ToolCall，其中 c1 经 Start+Delta+End 累积参数（delta 路径），
+/// c2 直接给完整参数；断言事件序列、逐调用 is_error、双合成结果入 transcript、
+/// 工具执行计数保持 0。
 #[tokio::test]
 async fn test_length_truncation_protects_tool_calls() {
     let provider = FakeProvider::new(vec![
-        tool_call_turn_with_stop("c1", "seq", "{}", StopReason::Length),
+        multi_tool_call_turn_with_stop(
+            &[("c1", "seq", "{\"a\":1}"), ("c2", "seq", "{\"b\":2}")],
+            &["c1"],
+            StopReason::Length,
+        ),
         text_turn("done"),
     ]);
     let counter = Arc::new(AtomicUsize::new(0));
@@ -770,33 +829,78 @@ async fn test_length_truncation_protects_tool_calls() {
         make_config(),
         make_runtime(provider.clone(), tools, ToolExecutionMode::Sequential, 8192),
     );
+    let mut rx = handle.subscribe();
     handle
         .prompt(vec![user_msg("hi")])
         .await
         .expect("prompt should succeed");
+    // 收集事件直到 AgentEnd（含），用于断言逐调用生命周期事件序列。
+    let events = collect_until_agent_end(&mut rx).await;
     handle.wait_for_idle().await.expect("should settle");
 
+    // 1. 无任何工具被执行（Length 截断保护）。
     assert_eq!(
         counter.load(Ordering::SeqCst),
         0,
         "no tool should be executed on Length truncation"
     );
-    let snapshot = handle.snapshot();
-    // user + assistant(toolcall, Length) + toolresult(synthesized error) + assistant(text)
-    assert_eq!(snapshot.messages.len(), 4, "expected 4 messages");
-    let Message::ToolResult(tr) = snapshot.messages[2].as_ref() else {
-        panic!("third message should be ToolResult");
-    };
-    assert!(tr.is_error, "synthesized tool result should be an error");
-    let text = tr.content.iter().find_map(|c| match c {
-        guigu::core::message::ToolResultContent::Text { text } => Some(text.clone()),
-        _ => None,
-    });
+
+    // 2. 每个 tool_call 按输入顺序产出 Start → End(is_error=true)。
+    let tool_events: Vec<(String, bool)> = events
+        .iter()
+        .filter_map(|e| match e {
+            guigu::core::event::AgentEvent::ToolExecutionStart { tool_call_id, .. } => {
+                Some((tool_call_id.clone(), false))
+            }
+            guigu::core::event::AgentEvent::ToolExecutionEnd {
+                tool_call_id,
+                is_error,
+                ..
+            } => Some((tool_call_id.clone(), *is_error)),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        text.as_deref(),
-        Some("tool call arguments truncated by length limit"),
-        "synthesized tool result should carry the truncation message"
+        tool_events,
+        vec![
+            ("c1".to_string(), false), // Start c1
+            ("c1".to_string(), true),  // End c1（is_error）
+            ("c2".to_string(), false), // Start c2
+            ("c2".to_string(), true),  // End c2（is_error）
+        ],
+        "each tool call should emit Start then End(is_error=true) in input order"
     );
+
+    // 3. 两个合成 ToolResult 均入 transcript，is_error 且携带截断消息，顺序 c1→c2。
+    let snapshot = handle.snapshot();
+    // user + assistant(toolcall, Length) + toolresult(c1) + toolresult(c2) + assistant(text)
+    assert_eq!(snapshot.messages.len(), 5, "expected 5 messages");
+    let tool_results: Vec<&guigu::core::message::ToolResultMessage> = snapshot
+        .messages
+        .iter()
+        .filter_map(|m| match m.as_ref() {
+            Message::ToolResult(tr) => Some(tr),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tool_results.len(), 2, "two synthesized tool results");
+    assert_eq!(tool_results[0].tool_call_id, "c1", "first result is c1");
+    assert_eq!(tool_results[1].tool_call_id, "c2", "second result is c2");
+    for (i, tr) in tool_results.iter().enumerate() {
+        assert!(
+            tr.is_error,
+            "synthesized tool result {i} should be an error"
+        );
+        let text = tr.content.iter().find_map(|c| match c {
+            guigu::core::message::ToolResultContent::Text { text } => Some(text.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            text.as_deref(),
+            Some("tool call arguments truncated by length limit"),
+            "synthesized tool result {i} should carry the truncation message"
+        );
+    }
 }
 
 /// Length 保护负例：stop_reason == Completed 且含 ToolCall → 正常执行工具（行为不变）。
@@ -987,6 +1091,35 @@ async fn test_stream_establishment_timeout() {
         "timeout (retries exhausted) should produce Error"
     );
     assert!(a.error_message.is_some(), "should carry an error message");
+}
+
+/// 从 broadcast 接收事件直到 `AgentEnd`（含），带 5s 超时兜底。
+/// 用于断言逐调用生命周期事件的完整序列（Start/End 顺序 + is_error）。
+async fn collect_until_agent_end(
+    rx: &mut tokio::sync::broadcast::Receiver<guigu::core::event::AgentEvent>,
+) -> Vec<guigu::core::event::AgentEvent> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut events = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            panic!("collect_until_agent_end: timeout before AgentEnd");
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(event)) => {
+                let is_end = matches!(event, guigu::core::event::AgentEvent::AgentEnd { .. });
+                events.push(event);
+                if is_end {
+                    return events;
+                }
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                panic!("collect_until_agent_end: event channel closed before AgentEnd");
+            }
+            Err(_) => panic!("collect_until_agent_end: timeout before AgentEnd"),
+        }
+    }
 }
 
 /// 从 broadcast 接收事件直到匹配 predicate，带 5s 超时兜底。
