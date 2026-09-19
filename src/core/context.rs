@@ -251,7 +251,8 @@ pub fn truncate_to_budget(messages: &[Arc<Message>], max_tokens: usize) -> Vec<A
     }
     // 找最小的边界，使剩余消息满足预算。
     for &boundary in &boundaries {
-        // 防御：不得切断 tool call/result 成组。
+        // 防御：不得切断 tool call/result 成组（结构性不可达，见
+        // `is_tool_call_result_split` 文档；保留以应对未来切点构造变化）。
         if boundary > 0 && is_tool_call_result_split(&messages[boundary - 1], &messages[boundary]) {
             continue;
         }
@@ -266,6 +267,14 @@ pub fn truncate_to_budget(messages: &[Arc<Message>], max_tokens: usize) -> Vec<A
 
 /// 判断切点是否切断 tool call/result 成组（切点前一条是含 `ToolCall` 的
 /// `Assistant` 且切点后是 `ToolResult`）。
+///
+/// **结构性不可达（防御性保留）**：`truncate_to_budget` 的 `boundaries` 仅含
+/// `User` 索引（及首条非 `User` 时防御性插入的 `0`）。对任意 `boundary > 0`，
+/// `messages[boundary]` 必为 `User`，故 `next_is_tool_result` 恒为 false；
+/// `boundary == 0` 又被调用处的 `boundary > 0` 守卫跳过。因此本检查恒为 false、
+/// `continue` 永不触发——拓扑安全由「切点只落 `User` 边界」结构性保证。保留此
+/// 防御以应对未来 `boundaries` 构造方式变化（如引入非 `User` 切点）时不静默
+/// 破坏 tool call/result 成组不变式。
 fn is_tool_call_result_split(prev: &Arc<Message>, next: &Arc<Message>) -> bool {
     let prev_has_tool_call = matches!(prev.as_ref(), Message::Assistant(a)
         if a.content.iter().any(|c| matches!(c, AssistantContent::ToolCall(_))));

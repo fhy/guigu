@@ -2,7 +2,7 @@
 //!
 //! **职责边界**：`Compactor` 只负责「给一批消息 → 产出一条摘要」。哪些消息该
 //! 压缩、保留多少、如何替换 transcript，属于 context/runtime 的编排职责
-//! （见 `context::prepare_context`），不放入 `Compactor`，保证可独立单测。
+//! （见 `context::plan_context`），不放入 `Compactor`，保证可独立单测。
 //!
 //! `LlmCompactor` 持有 `ModelProvider`（003 定稿 trait），用真实 LLM 生成摘要；
 //! 代码只依赖 trait，不依赖具体 adapter，测试用 fake provider 驱动、不依赖网络。

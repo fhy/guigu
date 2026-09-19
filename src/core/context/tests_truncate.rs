@@ -1,7 +1,7 @@
 //! `context` 模块单元测试（续）：`truncate_to_budget` 拓扑安全截断 +
 //! `keep_recent` turn 粒度。
 
-use super::tests::{FakeCompactor, assistant_text, assistant_tool_call, tool_result, user_msg};
+use super::tests::{FakeCompactor, assistant_tool_call, tool_result, user_msg};
 use super::*;
 
 // ---------- truncate_to_budget ----------
@@ -73,17 +73,52 @@ fn test_truncate_keeps_last_turn_when_oversized() {
     assert_eq!(out.len(), 1, "超窗单条也应保留最近一条");
 }
 
-/// 防御：首条非 User（不应发生），仍以首条为切点。
+/// 防御：首条非 User（不应发生），仍以首条为切点，且不切断 tool call/result 成组。
+///
+/// 构造畸形 transcript（首条为 `Assistant(ToolCall)`，无前置 `User`），含完整
+/// tool call/result 成组。断言截断后请求不以孤立 `ToolResult` 开头、成组保留。
 #[test]
 fn test_truncate_defensive_first_not_user() {
-    // 首条是 Assistant（不应发生），防御性处理。
-    let a0 = assistant_text(&"x".repeat(400));
-    let u1 = user_msg(&format!("u1{}", "x".repeat(400)));
-    let u2 = user_msg(&format!("u2{}", "x".repeat(400)));
-    let msgs = vec![a0, u1, u2];
-    let out = truncate_to_budget(&msgs, 250);
+    // 畸形 transcript（首条非 User，不应发生）：
+    // [Assistant(ToolCall c0), ToolResult c0, User, Assistant(ToolCall c1), ToolResult c1, User]
+    // User 消息 1002 字节 ≈ 251 token；tool call/result 较小（~3 / ~103）。
+    let a0 = assistant_tool_call("c0", "tool");
+    let t0 = tool_result("c0", "tool", &"y".repeat(400));
+    let u0 = user_msg(&format!("u0{}", "x".repeat(1000)));
+    let a1 = assistant_tool_call("c1", "tool");
+    let t1 = tool_result("c1", "tool", &"y".repeat(400));
+    let u1 = user_msg(&format!("u1{}", "x".repeat(1000)));
+    let msgs = vec![a0, t0, u0, a1, t1, u1];
+
+    // 预算 650：整体（~714）超预算，但 messages[2..]（~608）满足。
+    let out = truncate_to_budget(&msgs, 650);
+
     // 不应产出空列表。
     assert!(!out.is_empty(), "不应产出空列表");
+    // 切点落在 User 边界：不以孤立 ToolResult 开头。
+    assert!(
+        !matches!(out.first().unwrap().as_ref(), Message::ToolResult(_)),
+        "截断后不应以孤立 ToolResult 开头"
+    );
+    assert!(
+        matches!(out.first().unwrap().as_ref(), Message::User(_)),
+        "切点应落在 User 边界"
+    );
+    // tool call/result 成组保留：c1 的 Assistant(ToolCall) 与 ToolResult 相邻。
+    assert_eq!(
+        out.len(),
+        4,
+        "应保留 [User, Assistant(c1), ToolResult(c1), User]"
+    );
+    assert!(
+        matches!(out[1].as_ref(), Message::Assistant(a)
+            if a.content.iter().any(|c| matches!(c, AssistantContent::ToolCall(_)))),
+        "第二条应为 Assistant(ToolCall c1)"
+    );
+    assert!(
+        matches!(out[2].as_ref(), Message::ToolResult(_)),
+        "第三条应为 ToolResult c1（与 c1 成组）"
+    );
     // 最近一条必须保留。
     assert_eq!(out.last().unwrap().as_ref(), msgs.last().unwrap().as_ref());
 }

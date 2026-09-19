@@ -12,6 +12,7 @@
 //! 模块拆分：`turn`（流消费 + 重试）、`tools`（工具编排）、`step`（turn 收尾）。
 
 mod commands;
+mod context_prep;
 mod step;
 mod tools;
 mod turn;
@@ -28,13 +29,10 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent::{AgentCommand, AgentSnapshot};
-use crate::core::compactor::{CompactionError, Compactor};
-use crate::core::context::{CompactionPolicy, ContextBudget, default_convert_to_llm, plan_context};
+use crate::core::compactor::Compactor;
+use crate::core::context::{CompactionPolicy, default_convert_to_llm};
 use crate::core::event::AgentEvent;
-use crate::core::message::{
-    AssistantMessage, Message, StopReason, ThinkingLevel, ToolCall, ToolResultMessage, UserContent,
-    UserMessage,
-};
+use crate::core::message::{AssistantMessage, Message, ThinkingLevel, ToolCall, ToolResultMessage};
 use crate::core::provider::{Context, Model, ModelProvider, ProviderRequest, ToolSpec};
 use crate::core::tool::{Tool, ToolResult};
 use crate::plugin::hooks::LifecycleHooks;
@@ -172,17 +170,26 @@ fn tool_specs(tools: &[Arc<dyn Tool>]) -> Vec<ToolSpec> {
         .collect()
 }
 
-/// 构建本轮 LLM 消息投影（`Arc<Message>`）：transform_context 钩子（或默认预算截断）。
-///
-/// 仅 `transform_context` 钩子消耗所有权时才 clone transcript；默认预算路径
-/// 借用 `&[Arc<Message>]`，避免全量浅拷贝。
-fn build_llm_messages_arc(ctx: &RunContext, signal: &CancellationToken) -> Vec<Arc<Message>> {
-    if let Some(hook) = &ctx.config.transform_context {
-        hook(ctx.transcript.clone(), signal.clone())
-    } else {
-        let budget = ContextBudget::new(ctx.config.model.context_window);
-        budget.truncate(ctx.transcript.as_slice())
-    }
+/// assistant 消息入 transcript + 更新 snapshot，返回 TurnEnd/收尾用的
+/// `Arc<AssistantMessage>`。
+fn push_assistant_message(
+    ctx: &mut RunContext<'_>,
+    turn: &turn::TurnResult,
+) -> Arc<AssistantMessage> {
+    let assistant_msg = turn.assistant_message.clone();
+    let error_message = assistant_msg.error_message.clone();
+    let assistant_arc = Arc::new(Message::Assistant(assistant_msg.clone()));
+    let assistant_msg_arc = Arc::new(assistant_msg);
+    ctx.transcript.push(assistant_arc);
+    update_snapshot(
+        ctx.snapshot_tx,
+        ctx.transcript,
+        false,
+        None,
+        &HashSet::new(),
+        error_message,
+    );
+    assistant_msg_arc
 }
 
 /// 构建本轮 provider 请求（模型 + 上下文 + 工具 + 取消信号）。
@@ -230,70 +237,14 @@ pub(crate) async fn run_agent_loop(ctx: &mut RunContext<'_>, initial: Vec<Messag
 
         let _ = ctx.events_tx.send(AgentEvent::TurnStart);
 
-        // 二期：每轮请求前做预算检查 + 摘要压缩（compactor 启用时）。
-        // 提交纪律（Task 041）：仅压缩成功（commit: Some）才提交 transcript/session；
-        // 取消（Err(Cancelled)）终止 run 产出 Aborted，transcript 原样；
-        // 其他失败降级为临时截断，transcript 不写回。
-        let request_messages = if let Some(compactor) = &ctx.config.compactor {
-            match plan_context(
-                ctx.transcript.as_slice(),
-                &ctx.config.compaction,
-                compactor.as_ref(),
-                signal.clone(),
-            )
-            .await
-            {
-                Err(CompactionError::Cancelled) => {
-                    // 取消：停止循环，产出 Aborted 终态，transcript 不变、不写 session。
-                    let _ = ctx.events_tx.send(AgentEvent::TurnEnd {
-                        message: Arc::new(AssistantMessage {
-                            content: Vec::new(),
-                            model: None,
-                            usage: None,
-                            stop_reason: Some(StopReason::Aborted),
-                            error_message: None,
-                            timestamp: 0,
-                        }),
-                        tool_results: Vec::new(),
-                    });
-                    break;
-                }
-                Err(_other) => {
-                    // 不应发生（`plan_context` 内部已处理其他错误，降级为临时截断）。
-                    // 防御性处理：降级为临时截断（不改写 transcript）。
-                    let budget = ContextBudget::new(ctx.config.model.context_window);
-                    budget.truncate(ctx.transcript.as_slice())
-                }
-                Ok(prepared) => {
-                    if let Some(commit) = prepared.commit {
-                        // 提交：用 [User(summary)] 替换 transcript[0..keep_from]，持久化到 session。
-                        let summary_msg = Arc::new(Message::User(UserMessage {
-                            content: vec![UserContent::Text {
-                                text: commit.summary,
-                            }],
-                            timestamp: 0,
-                        }));
-                        ctx.transcript.drain(0..commit.keep_from);
-                        ctx.transcript.insert(0, summary_msg.clone());
-                        // 发 MessageEnd（持久化到 session JSONL）。
-                        let _ = ctx.events_tx.send(AgentEvent::MessageEnd {
-                            message: summary_msg,
-                        });
-                        update_snapshot(
-                            ctx.snapshot_tx,
-                            ctx.transcript,
-                            false,
-                            None,
-                            &HashSet::new(),
-                            None,
-                        );
-                    }
-                    prepared.request_messages
-                }
+        // 每轮请求前的上下文准备（Task 041 提交纪律 + 一期最终投影）。
+        // 取消（Aborted）终止 run，transcript 原样；否则得到本轮请求消息。
+        let request_messages = match context_prep::prepare_request_messages(ctx, &signal).await {
+            context_prep::PreparedRequest::Aborted => {
+                context_prep::send_aborted_turn_end(ctx);
+                break;
             }
-        } else {
-            // 无 compactor：默认预算截断（或 transform_context 钩子）。
-            build_llm_messages_arc(ctx, &signal)
+            context_prep::PreparedRequest::Messages(msgs) => msgs,
         };
 
         // 构建本轮 provider 请求（用 request_messages）。
@@ -309,19 +260,8 @@ pub(crate) async fn run_agent_loop(ctx: &mut RunContext<'_>, initial: Vec<Messag
         )
         .await;
 
-        // assistant 消息入 transcript；TurnEnd 事件需 `Arc<AssistantMessage>`。
-        let assistant_msg = turn.assistant_message.clone();
-        let assistant_arc = Arc::new(Message::Assistant(assistant_msg.clone()));
-        let assistant_msg_arc = Arc::new(assistant_msg);
-        ctx.transcript.push(assistant_arc.clone());
-        update_snapshot(
-            ctx.snapshot_tx,
-            ctx.transcript,
-            false,
-            None,
-            &HashSet::new(),
-            turn.assistant_message.error_message.clone(),
-        );
+        // assistant 消息入 transcript + 更新 snapshot。
+        let assistant_msg_arc = push_assistant_message(ctx, &turn);
 
         // 取消：产出 stop_reason: Aborted 的 TurnEnd 并退出。
         if turn.aborted {

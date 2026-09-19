@@ -22,6 +22,7 @@ use guigu::core::provider::{
     AssistantEvent, AssistantStream, ModelProvider, ProviderError, ProviderRequest,
 };
 use guigu::core::{Agent, AgentHandle, AgentRuntime, CompactionPolicy, LoopConfig, Model};
+use tokio_util::sync::CancellationToken;
 
 // ---------- Fake compactor ----------
 
@@ -134,11 +135,13 @@ fn user_msg(text: &str) -> Message {
     })
 }
 
-/// 构造启用 compactor 的 runtime（测试用短退避、大窗口避免一期截断干扰）。
+/// 构造启用 compactor 的 runtime（测试用短退避；`context_window` 可配，
+/// 默认大窗口避免一期截断干扰）。
 fn make_runtime_with_compactor(
     provider: Arc<dyn ModelProvider>,
     compactor: Arc<dyn Compactor>,
     policy: CompactionPolicy,
+    context_window: u32,
 ) -> AgentRuntime {
     AgentRuntime {
         provider,
@@ -146,7 +149,7 @@ fn make_runtime_with_compactor(
         loop_config: LoopConfig {
             model: Model {
                 id: "test-model".to_string(),
-                context_window: 8192,
+                context_window,
             },
             compactor: Some(compactor),
             compaction: policy,
@@ -170,7 +173,7 @@ async fn test_compaction_triggers_and_injects_summary() {
     };
     let handle = AgentHandle::spawn(
         make_config(),
-        make_runtime_with_compactor(provider.clone(), compactor, policy),
+        make_runtime_with_compactor(provider.clone(), compactor, policy, 8192),
     );
 
     // 3 条大消息（每条 ~101 token，共 ~303 > 200）。
@@ -224,7 +227,7 @@ async fn test_compaction_failure_degrades_to_truncation() {
     };
     let handle = AgentHandle::spawn(
         make_config(),
-        make_runtime_with_compactor(provider.clone(), compactor, policy),
+        make_runtime_with_compactor(provider.clone(), compactor, policy, 8192),
     );
 
     let m0 = user_msg(&format!("m0{}", "x".repeat(400)));
@@ -273,7 +276,7 @@ async fn test_compaction_cancelled_aborts() {
     };
     let handle = AgentHandle::spawn(
         make_config(),
-        make_runtime_with_compactor(provider.clone(), compactor, policy),
+        make_runtime_with_compactor(provider.clone(), compactor, policy, 8192),
     );
 
     let m0 = user_msg(&format!("m0{}", "x".repeat(400)));
@@ -313,7 +316,7 @@ async fn test_within_budget_no_compaction() {
     };
     let handle = AgentHandle::spawn(
         make_config(),
-        make_runtime_with_compactor(provider.clone(), compactor, policy),
+        make_runtime_with_compactor(provider.clone(), compactor, policy, 8192),
     );
 
     let m0 = user_msg("hello");
@@ -344,7 +347,7 @@ async fn test_compaction_persistent_no_recompact() {
     };
     let handle = AgentHandle::spawn(
         make_config(),
-        make_runtime_with_compactor(provider.clone(), compactor, policy),
+        make_runtime_with_compactor(provider.clone(), compactor, policy, 8192),
     );
 
     // 第一次 prompt：3 条大消息（超预算）→ 压缩触发。
@@ -392,4 +395,87 @@ async fn test_compaction_persistent_no_recompact() {
             })
     });
     assert!(!m0_restored, "m0 should not be restored");
+}
+
+/// compactor 启用时仍受 `context_window` 硬上限：构造「未超 `budget_tokens` 但超
+/// `context_window`」的 transcript，断言最终请求不超 `context_window`（最终投影
+/// 恒定生效，不因 compactor 开启而绕过）。
+#[tokio::test]
+async fn test_compactor_respects_context_window() {
+    let provider = RecordingProvider::new(text_turn("ok"));
+    let fake = FakeCompactor::ok("SUMMARY");
+    let compactor: Arc<dyn Compactor> = fake.clone();
+    // budget_tokens 极大（默认几乎不触发压缩），但 context_window 小（250）。
+    let policy = CompactionPolicy {
+        budget_tokens: usize::MAX,
+        keep_recent: 1,
+    };
+    let handle = AgentHandle::spawn(
+        make_config(),
+        make_runtime_with_compactor(provider.clone(), compactor, policy, 250),
+    );
+
+    // 5 条大消息（每条 ~101 token，共 ~505 > 250 context_window，但 < usize::MAX budget）。
+    let msgs: Vec<Message> = (0..5)
+        .map(|i| user_msg(&format!("m{i}{}", "x".repeat(400))))
+        .collect();
+    handle.prompt(msgs).await.expect("prompt should succeed");
+    handle.wait_for_idle().await.expect("should settle");
+
+    // compactor 未被调用（未超 budget_tokens）。
+    assert_eq!(fake.call_count(), 0, "within budget should not compact");
+    // 最终请求被 context_window 截断（< 5 条）。
+    let msgs = provider.last_messages();
+    assert!(
+        msgs.len() < 5,
+        "context_window should truncate the request (got {} messages)",
+        msgs.len()
+    );
+}
+
+/// compactor 启用时 `transform_context` 钩子仍生效：钩子作为最终投影作用于
+/// compactor 分支产出的 `request_messages`（断言钩子输出为最终请求）。
+#[tokio::test]
+async fn test_compactor_applies_transform_context_hook() {
+    let provider = RecordingProvider::new(text_turn("ok"));
+    let fake = FakeCompactor::ok("SUMMARY");
+    let compactor: Arc<dyn Compactor> = fake.clone();
+    let policy = CompactionPolicy {
+        budget_tokens: 200,
+        keep_recent: 1,
+    };
+    let mut runtime = make_runtime_with_compactor(provider.clone(), compactor, policy, 8192);
+    // 设置 transform_context 钩子：在消息前注入一条标记消息（最终权威投影）。
+    runtime.loop_config.transform_context = Some(Box::new(
+        |msgs: Vec<Arc<Message>>, _signal: CancellationToken| {
+            let mut out = Vec::with_capacity(msgs.len() + 1);
+            out.push(Arc::new(Message::User(UserMessage {
+                content: vec![UserContent::Text {
+                    text: "HOOK".to_string(),
+                }],
+                timestamp: 0,
+            })));
+            out.extend(msgs);
+            out
+        },
+    ));
+    let handle = AgentHandle::spawn(make_config(), runtime);
+
+    let m0 = user_msg(&format!("m0{}", "x".repeat(400)));
+    let m1 = user_msg(&format!("m1{}", "x".repeat(400)));
+    let m2 = user_msg(&format!("m2{}", "x".repeat(400)));
+    handle
+        .prompt(vec![m0, m1, m2.clone()])
+        .await
+        .expect("prompt should succeed");
+    handle.wait_for_idle().await.expect("should settle");
+
+    // compactor 被调用一次（超预算）。
+    assert_eq!(fake.call_count(), 1, "compactor should be called once");
+    // 钩子作为最终投影：provider 收到的消息以 HOOK 开头，后跟 [摘要, m2]。
+    let msgs = provider.last_messages();
+    assert_eq!(msgs.len(), 3, "hook marker + summary + kept message");
+    assert_eq!(msgs[0], user_msg("HOOK"), "first should be the hook marker");
+    assert_eq!(msgs[1], user_msg("SUMMARY"), "second should be the summary");
+    assert_eq!(msgs[2], m2, "third should be the kept recent message");
 }

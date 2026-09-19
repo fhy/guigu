@@ -14,19 +14,6 @@ pub(crate) fn user_msg(text: &str) -> Arc<Message> {
     }))
 }
 
-pub(crate) fn assistant_text(text: &str) -> Arc<Message> {
-    Arc::new(Message::Assistant(AssistantMessage {
-        content: vec![AssistantContent::Text {
-            text: text.to_string(),
-        }],
-        model: None,
-        usage: None,
-        stop_reason: Some(StopReason::Completed),
-        error_message: None,
-        timestamp: 0,
-    }))
-}
-
 pub(crate) fn assistant_tool_call(id: &str, name: &str) -> Arc<Message> {
     Arc::new(Message::Assistant(AssistantMessage {
         content: vec![AssistantContent::ToolCall(ToolCall {
