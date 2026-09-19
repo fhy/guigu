@@ -19,7 +19,10 @@ pub use compactor::{
     CompactionError, CompactionRequest, CompactionResult, Compactor, LlmCompactor,
     format_messages_for_summary,
 };
-pub use context::{CompactionPolicy, ContextBudget, default_convert_to_llm, prepare_context};
+pub use context::{
+    CompactionCommit, CompactionPolicy, ContextBudget, PreparedContext, default_convert_to_llm,
+    plan_context, truncate_to_budget,
+};
 // Task 028：跨进程文件锁原语。
 pub use file_lock::{FileLock, FileLockError, FileLockGuard};
 pub use provider::{

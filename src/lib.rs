@@ -30,7 +30,10 @@ pub use config::{GuiguConfig, ModelConfig, Protocol, ProviderConfigError};
 pub use core::{
     agent::*,
     compactor::*,
-    context::{CompactionPolicy, ContextBudget, default_convert_to_llm, prepare_context},
+    context::{
+        CompactionCommit, CompactionPolicy, ContextBudget, PreparedContext, default_convert_to_llm,
+        plan_context, truncate_to_budget,
+    },
     event::*,
     // Task 028：跨进程文件锁原语（fs2 flock/LockFileEx，崩溃自释放）。
     file_lock::{FileLock, FileLockError, FileLockGuard},

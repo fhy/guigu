@@ -25,10 +25,11 @@ use guigu::core::{Agent, AgentHandle, AgentRuntime, CompactionPolicy, LoopConfig
 
 // ---------- Fake compactor ----------
 
-/// 脚本化 fake compactor：记录被压缩的消息，返回固定摘要或失败。
+/// 脚本化 fake compactor：记录被压缩的消息，返回固定摘要、失败或取消。
 struct FakeCompactor {
     summary: String,
     fail: bool,
+    cancel: bool,
     calls: Mutex<Vec<Vec<Arc<Message>>>>,
 }
 
@@ -37,6 +38,7 @@ impl FakeCompactor {
         Arc::new(FakeCompactor {
             summary: summary.to_string(),
             fail: false,
+            cancel: false,
             calls: Mutex::new(Vec::new()),
         })
     }
@@ -44,6 +46,15 @@ impl FakeCompactor {
         Arc::new(FakeCompactor {
             summary: String::new(),
             fail: true,
+            cancel: false,
+            calls: Mutex::new(Vec::new()),
+        })
+    }
+    fn cancelling() -> Arc<Self> {
+        Arc::new(FakeCompactor {
+            summary: String::new(),
+            fail: false,
+            cancel: true,
             calls: Mutex::new(Vec::new()),
         })
     }
@@ -64,7 +75,9 @@ impl FakeCompactor {
 impl Compactor for FakeCompactor {
     async fn compact(&self, req: CompactionRequest) -> Result<CompactionResult, CompactionError> {
         self.calls.lock().expect("calls mutex").push(req.messages);
-        if self.fail {
+        if self.cancel {
+            Err(CompactionError::Cancelled)
+        } else if self.fail {
             Err(CompactionError::Provider(ProviderError::Request(
                 "simulated compaction failure".to_string(),
             )))
@@ -199,7 +212,7 @@ async fn test_compaction_triggers_and_injects_summary() {
     );
 }
 
-/// 压缩失败 → 降级保守截断（仅保留最近 keep_recent 条），agent 仍正常运行。
+/// 压缩失败 → 降级临时截断（仅本次请求），transcript 不写回（完整保留）。
 #[tokio::test]
 async fn test_compaction_failure_degrades_to_truncation() {
     let provider = RecordingProvider::new(text_turn("ok"));
@@ -217,6 +230,8 @@ async fn test_compaction_failure_degrades_to_truncation() {
     let m0 = user_msg(&format!("m0{}", "x".repeat(400)));
     let m1 = user_msg(&format!("m1{}", "x".repeat(400)));
     let m2 = user_msg(&format!("m2{}", "x".repeat(400)));
+    let m0_arc = Arc::new(m0.clone());
+    let m1_arc = Arc::new(m1.clone());
     let m2_arc = Arc::new(m2.clone());
     handle
         .prompt(vec![m0, m1, m2.clone()])
@@ -229,19 +244,61 @@ async fn test_compaction_failure_degrades_to_truncation() {
 
     // compactor 被尝试一次（失败）。
     assert_eq!(fake.call_count(), 1, "compactor should be attempted once");
-    // provider 收到降级截断后的 transcript：仅 [m2]。
+    // provider 收到临时截断投影：仅 [m2]（本次请求）。
     let msgs = provider.last_messages();
-    assert_eq!(msgs.len(), 1, "degraded to keep_recent only");
+    assert_eq!(msgs.len(), 1, "degraded to temporary truncation");
     assert_eq!(msgs[0], m2, "should keep the most recent message");
 
-    // agent 正常产出 assistant 消息（未阻断）。
+    // transcript 不写回：完整保留所有消息 + assistant。
     let snapshot = handle.snapshot();
-    assert_eq!(snapshot.messages.len(), 2, "kept + assistant");
-    assert_eq!(snapshot.messages[0], m2_arc);
+    assert_eq!(snapshot.messages.len(), 4, "all messages + assistant");
+    assert_eq!(snapshot.messages[0], m0_arc, "m0 should be retained");
+    assert_eq!(snapshot.messages[1], m1_arc, "m1 should be retained");
+    assert_eq!(snapshot.messages[2], m2_arc, "m2 should be retained");
     assert!(
-        matches!(snapshot.messages[1].as_ref(), Message::Assistant(_)),
+        matches!(snapshot.messages[3].as_ref(), Message::Assistant(_)),
         "assistant should still be produced"
     );
+}
+
+/// 压缩取消 → run 产出 Aborted，transcript/session 原样（旧消息仍在，未丢）。
+#[tokio::test]
+async fn test_compaction_cancelled_aborts() {
+    let provider = RecordingProvider::new(text_turn("ok"));
+    let fake = FakeCompactor::cancelling();
+    let compactor: Arc<dyn Compactor> = fake.clone();
+    let policy = CompactionPolicy {
+        budget_tokens: 200,
+        keep_recent: 1,
+    };
+    let handle = AgentHandle::spawn(
+        make_config(),
+        make_runtime_with_compactor(provider.clone(), compactor, policy),
+    );
+
+    let m0 = user_msg(&format!("m0{}", "x".repeat(400)));
+    let m1 = user_msg(&format!("m1{}", "x".repeat(400)));
+    let m2 = user_msg(&format!("m2{}", "x".repeat(400)));
+    let m0_arc = Arc::new(m0.clone());
+    let m1_arc = Arc::new(m1.clone());
+    let m2_arc = Arc::new(m2.clone());
+    handle
+        .prompt(vec![m0, m1, m2.clone()])
+        .await
+        .expect("prompt should succeed");
+    handle.wait_for_idle().await.expect("agent should settle");
+
+    // compactor 被尝试一次（取消）。
+    assert_eq!(fake.call_count(), 1, "compactor should be attempted once");
+    // provider 未被调用（run 在 provider 调用前被取消）。
+    assert_eq!(provider.call_count(), 0, "provider should not be called");
+
+    // transcript 原样：完整保留所有消息（未丢）。
+    let snapshot = handle.snapshot();
+    assert_eq!(snapshot.messages.len(), 3, "all messages retained");
+    assert_eq!(snapshot.messages[0], m0_arc, "m0 should be retained");
+    assert_eq!(snapshot.messages[1], m1_arc, "m1 should be retained");
+    assert_eq!(snapshot.messages[2], m2_arc, "m2 should be retained");
 }
 
 /// 未超预算 → 不压缩，transcript 原样。
