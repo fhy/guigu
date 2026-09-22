@@ -30,6 +30,7 @@ estimate_total  = 有 usage 基线 ? 基线 + 新增消息增量估算          
 - `protocol_wrapper_tokens`：常量，覆盖 provider 请求体骨架 + 消息 role/type 包装的固定 token 开销。
 - 触发条件统一为 `estimate_total > available_input`；`estimate`/`fits`/`truncate` 三者共用同一 `estimate_total` 口径。
 - **关键**：usage 基线（provider 的 `prompt_tokens`/`input_tokens`）本就是**总输入**测量，已含 system+tools+protocol。基线路径**不再二次扣减 `fixed_overhead`**；`fixed_overhead` 仅在「无 usage 回退」路径叠加，用于从正文估算重构总输入。
+- **实现要点（入口函数签名）**：`estimate_total(messages, fixed_overhead)` 把 `fixed_overhead` 作为参数传入——usage 分支返回 `基线 + 增量`（不叠加），回退分支返回 `fixed_overhead + 全量正文`。`truncate_to_budget` 内部估算**必须**采用同一口径（`ContextBudget::truncate` 传入 `self.fixed_overhead`）；否则 fallback 路径下 `fits`（`fixed_overhead + 正文`）与 `truncate`（仅正文）口径分裂，违反「`estimate`/`fits`/`truncate` 三者共用同一 `estimate_total` 口径」（AC 第 3 条）。
 
 ### 2. 消息 token 估算：实际 usage 优先
 
@@ -56,6 +57,7 @@ pub struct CompactionPolicy {
 
 - `Default` 保守：`reserve_output_tokens` 与 `protocol_wrapper_tokens` 取合理默认，保证等价「几乎不压缩」。
 - `budget_tokens` 语义：保持 041「压缩触发软阈值、与 `context_window` 正交」不变；比较对象由「正文估算」改为 `estimate_total`（预计总输入），触发更精确。**不再**套用「总窗口 = `budget_tokens + reserve_output_tokens + fixed_overhead`」的拆分式定义。
+- `budget_tokens` 在 `plan_context` 中的比较对象为 `estimate_total(transcript, 0)`（usage 基线感知，**不**叠加 system/tools 固定开销）。理由：`budget_tokens` 是 041 正交的压缩软阈值；system/tools 固定开销属 `context_window` 硬上限口径，由最终投影的 `ContextBudget`（`with_overhead` + `truncate`）统一承担。usage 路径下基线天然含 system+tools，故与硬上限口径一致；fallback（无 usage，仅首轮空历史）不叠加固定开销，不影响压缩触发正确性。
 
 ### 4. 与 041 的边界
 
@@ -84,5 +86,6 @@ pub struct CompactionPolicy {
 
 ## 修订记录
 
+- v1.2（2026-09-22，Architect，依据 Review R2 规格契约冲突定稿收敛方向）：维持 v1.1 口径，明确「按规格修正代码」而非保留保守二次扣减。补充两点实现口径：① `estimate_total` 需以 `fixed_overhead` 为参数，`truncate_to_budget` 内部估算须同口径（`truncate` 传入 `self.fixed_overhead`），确保 `fits`/`truncate` 不因 fallback 路径口径分裂而互相矛盾；② `budget_tokens`（压缩软阈值）在 `plan_context` 中比较 `estimate_total(transcript, 0)`，不叠加 system/tools 固定开销（该开销属硬上限口径，由最终投影 `ContextBudget` 承担）。
 - v1.1（2026-09-22，Architect，依据 Review R1 设计疑问定稿）：① 修正预算口径为「预计总输入 token」——`available_input = context_window - reserve_output`，`estimate`/`fits`/`truncate` 统一复用 `estimate_total`；`fixed_overhead` 仅在无 usage 回退路径叠加，**usage 基线路径不再二次扣减**（基线已含 system+tools+protocol）。② `budget_tokens` 语义回退为 041 原义（压缩触发软阈值、与 `context_window` 正交），比较对象改为 `estimate_total`，放弃「总窗口 = budget_tokens + reserve + fixed_overhead」拆分式定义。
 - v1.0（2026-09-13，Architect）：初稿。依据维护审查次要项 #1：预算改为 `context_window - reserve_output_tokens` 再扣固定开销（system/tools/protocol）；消息估算优先用最后一条 `AssistantMessage.usage.input` 作基线 + 新增消息增量估算，无 usage 回退 `chars/4`；`CompactionPolicy` 增两字段（additive）。
