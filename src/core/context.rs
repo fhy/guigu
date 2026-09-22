@@ -62,7 +62,7 @@ pub fn estimate_message_tokens(msg: &Message) -> u32 {
 }
 
 /// 粗估消息列表的总 token 数（u64 累加，避免 u32 求和溢出）。
-fn estimate_total(messages: &[Arc<Message>]) -> u64 {
+fn estimate_total(messages: &[Arc<Message>], fixed_overhead: u32) -> u64 {
     let last_usage = messages
         .iter()
         .enumerate()
@@ -79,10 +79,13 @@ fn estimate_total(messages: &[Arc<Message>]) -> u64 {
                     .map(|m| estimate_message_tokens(m) as u64)
                     .sum::<u64>()
         }
-        None => messages
-            .iter()
-            .map(|m| estimate_message_tokens(m) as u64)
-            .sum(),
+        None => {
+            u64::from(fixed_overhead)
+                + messages
+                    .iter()
+                    .map(|m| estimate_message_tokens(m) as u64)
+                    .sum::<u64>()
+        }
     }
 }
 
@@ -129,7 +132,7 @@ impl ContextBudget {
 
     /// 粗估消息列表的总 token 数，优先使用最近一次 provider usage 基线。
     pub fn estimate(&self, messages: &[Arc<Message>]) -> u32 {
-        estimate_total(messages).min(u32::MAX as u64) as u32
+        estimate_total(messages, self.fixed_overhead).min(u32::MAX as u64) as u32
     }
 
     /// 消息列表是否在扣除固定开销和输出预留后的预算内。
@@ -141,14 +144,13 @@ impl ContextBudget {
     ///
     /// 委托 `truncate_to_budget`（拓扑安全，turn/user boundary 粒度）。
     pub fn truncate(&self, messages: &[Arc<Message>]) -> Vec<Arc<Message>> {
-        truncate_to_budget(messages, self.available() as usize)
+        truncate_to_budget_with_overhead(messages, self.available() as usize, self.fixed_overhead)
     }
 
     /// 返回可用于消息正文的 token 数。
     pub fn available(&self) -> u32 {
         self.context_window
             .saturating_sub(self.reserve_output_tokens)
-            .saturating_sub(self.fixed_overhead)
     }
 }
 
@@ -228,7 +230,7 @@ pub async fn plan_context(
     signal: CancellationToken,
 ) -> Result<PreparedContext, CompactionError> {
     // 粗估总 token（u64 累加，避免 u32 求和溢出与 usize→u32 回绕）。
-    if estimate_total(transcript) <= policy.budget_tokens as u64 {
+    if estimate_total(transcript, 0) <= policy.budget_tokens as u64 {
         return Ok(PreparedContext {
             request_messages: transcript.to_vec(),
             commit: None,
@@ -290,7 +292,15 @@ pub async fn plan_context(
 ///    但不得切断 tool call/result 成组（即切点前一条不得是含 `ToolCall` 的
 ///    `Assistant` 且切点后是 `ToolResult`）。
 pub fn truncate_to_budget(messages: &[Arc<Message>], max_tokens: usize) -> Vec<Arc<Message>> {
-    if estimate_total(messages) <= max_tokens as u64 {
+    truncate_to_budget_with_overhead(messages, max_tokens, 0)
+}
+
+fn truncate_to_budget_with_overhead(
+    messages: &[Arc<Message>],
+    max_tokens: usize,
+    fixed_overhead: u32,
+) -> Vec<Arc<Message>> {
+    if estimate_total(messages, fixed_overhead) <= max_tokens as u64 {
         return messages.to_vec();
     }
     let len = messages.len();
@@ -316,7 +326,7 @@ pub fn truncate_to_budget(messages: &[Arc<Message>], max_tokens: usize) -> Vec<A
         if boundary > 0 && is_tool_call_result_split(&messages[boundary - 1], &messages[boundary]) {
             continue;
         }
-        if estimate_total(&messages[boundary..]) <= max_tokens as u64 {
+        if estimate_total(&messages[boundary..], fixed_overhead) <= max_tokens as u64 {
             return messages[boundary..].to_vec();
         }
     }

@@ -165,7 +165,7 @@ fn test_budget_truncate_keeps_last_when_all_oversized() {
 #[test]
 fn test_budget_includes_reserve_and_fixed_overhead() {
     let budget = ContextBudget::with_overhead(100, "1234", "1234", 10, 20);
-    assert_eq!(budget.available(), 66);
+    assert_eq!(budget.available(), 90);
     assert!(!budget.fits(&[user_msg(&"x".repeat(280))]));
 }
 
@@ -195,13 +195,47 @@ fn test_usage_baseline_is_preferred_for_compaction_budget() {
         reserve_output_tokens: 0,
         protocol_wrapper_tokens: 0,
     };
-    assert!(estimate_total(&transcript) > policy.budget_tokens as u64);
+    assert!(estimate_total(&transcript, 0) > policy.budget_tokens as u64);
     let budget = ContextBudget::new(110);
     assert_eq!(
         budget.estimate(&transcript),
-        estimate_total(&transcript) as u32
+        estimate_total(&transcript, 0) as u32
     );
     assert!(!budget.fits(&transcript));
+}
+
+#[test]
+fn test_usage_baseline_does_not_double_deduct_overhead() {
+    let assistant = Arc::new(Message::Assistant(AssistantMessage {
+        content: vec![AssistantContent::Text {
+            text: "tiny".into(),
+        }],
+        model: None,
+        usage: Some(crate::core::message::Usage {
+            input: 90,
+            output: 1,
+            cache_read: 0,
+            cache_write: 0,
+            total_tokens: 91,
+            cost: 0.0,
+        }),
+        stop_reason: Some(StopReason::Completed),
+        error_message: None,
+        timestamp: 0,
+    }));
+    let budget = ContextBudget::with_overhead(100, "x".repeat(40).as_str(), "", 0, 0);
+    let transcript = vec![assistant];
+    assert_eq!(budget.available(), 100);
+    assert!(budget.fits(&transcript));
+}
+
+#[test]
+fn test_fallback_estimate_includes_fixed_overhead() {
+    let budget = ContextBudget::with_overhead(100, "x".repeat(40).as_str(), "", 0, 0);
+    let transcript = vec![user_msg("x".repeat(400).as_str())];
+    assert_eq!(budget.available(), 100);
+    assert!(!budget.fits(&transcript));
+    assert!(budget.estimate(&[]) >= budget.fixed_overhead);
 }
 
 // ---------- default_convert_to_llm ----------
