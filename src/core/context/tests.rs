@@ -230,6 +230,32 @@ fn test_usage_baseline_does_not_double_deduct_overhead() {
 }
 
 #[test]
+fn test_fits_true_truncate_preserves_usage_baseline_transcript() {
+    let assistant = Arc::new(Message::Assistant(AssistantMessage {
+        content: vec![AssistantContent::Text {
+            text: "tiny".into(),
+        }],
+        model: None,
+        usage: Some(crate::core::message::Usage {
+            input: 90,
+            output: 1,
+            cache_read: 0,
+            cache_write: 0,
+            total_tokens: 91,
+            cost: 0.0,
+        }),
+        stop_reason: Some(StopReason::Completed),
+        error_message: None,
+        timestamp: 0,
+    }));
+    let transcript = vec![assistant, user_msg("follow-up")];
+    let budget = ContextBudget::with_overhead(100, "x".repeat(40).as_str(), "", 0, 0);
+
+    assert!(budget.fits(&transcript));
+    assert_eq!(budget.truncate(&transcript), transcript);
+}
+
+#[test]
 fn test_fallback_estimate_includes_fixed_overhead() {
     let budget = ContextBudget::with_overhead(100, "x".repeat(40).as_str(), "", 0, 0);
     let transcript = vec![user_msg("x".repeat(400).as_str())];
