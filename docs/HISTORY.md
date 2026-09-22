@@ -126,3 +126,9 @@
 ## 十五期（048）测试 helper 收尾
 
 > 立项（2026-09-22，Architect，依据 047-review-r1 非阻塞建议 1/2）：补回 `tests/common` 拆分后丢失的 `///` 文档注释（provider/tools/fixtures 逐条对应 parent 版本）+ 清理 `tests/common/mod.rs` 冗余 std/guigu 类型 re-export（仅保留测试确实依赖的）+ 复核 `#![allow(unused_imports)]`（以 clippy 为准移除或保留）。纯测试、零产品行为变化。规格 docs/tasks/048-tests-common-doc-reexport.md 已就绪。
+
+- 048 复核（2026-09-22，Architect，响应 PM「复核任务完成情况」）：实现已合并（00b6a41 初版 + 1e6c51c 修复）；reviewer 历经 r1 打回（re-export 清理 + allow 复核未满足、docs 部分补回）→ r2 审查通过（docs/reviews/048-review-r2.md，结论 PASS，审查提交 2afc711）：四门禁全绿（check ✓ / clippy --all-targets --all-features -D warnings 0 warning ✓ / test --all-targets 全绿、runtime_loop 4 crate 21 项 ✓ / fmt ✓），无阻塞问题。closure matrix M1–M6 全部核验（helper `///` 补回 / 注释逐条对应 / 冗余 re-export 清理 / allow 复核实证 / 断言 577=577 未弱化 / 零 src 变更）；`guigu::Agent` 移除后 trait method 调用需 trait 在作用域，修复补 `use guigu::Agent;` 必要且正确；`#![allow(unused_imports)]` 经独立 worktree 实证确需保留（tests/common 为私有模块、各 crate 消费子集），非掩盖告警。故 048 由 [~] 转 [x] 关闭。r2 一条残留 [Info]（`tests/common/provider.rs:88` HangingProvider struct `///` 与 parent 两行版不一致，非 047 合并丢失项、无 AC 支撑）留待 049。**十五期（048）至此闭环**。
+
+## 十六期（049）文档注释残留收尾
+
+> 立项（2026-09-22，Architect，依据 044 r1 / 045 r1 / 048 r2 三条非阻塞文档注释残留）：合并清理三处文档注释——① 044 r1 `src/adapters/retry_after.rs:3` 补 `///`（支持格式 + `None` 语义）；② 045 r1 `with_overhead` 连续摘要句语义重叠合并；③ 048 r2 `tests/common/provider.rs:88` HangingProvider struct `///` 对齐 parent 两行版原文。纯文档注释、零行为变化。规格 docs/tasks/049-doc-comment-residue.md 已就绪，待 PM 启动。
