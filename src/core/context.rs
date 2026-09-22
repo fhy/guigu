@@ -61,7 +61,8 @@ pub fn estimate_message_tokens(msg: &Message) -> u32 {
     }
 }
 
-/// 粗估消息列表的总 token 数（u64 累加，避免 u32 求和溢出）。
+/// 粗估预计发往 provider 的总输入 token 数（u64 累加，避免 u32 求和溢出）。
+/// 有 usage 基线时固定开销已包含在基线中；无 usage 时由 `fixed_overhead` 补齐。
 fn estimate_total(messages: &[Arc<Message>], fixed_overhead: u32) -> u64 {
     let last_usage = messages
         .iter()
@@ -135,7 +136,7 @@ impl ContextBudget {
         estimate_total(messages, self.fixed_overhead).min(u32::MAX as u64) as u32
     }
 
-    /// 消息列表是否在扣除固定开销和输出预留后的预算内。
+    /// 消息列表是否在输入可用预算内；无 usage 基线时估算包含固定开销。
     pub fn fits(&self, messages: &[Arc<Message>]) -> bool {
         self.estimate(messages) <= self.available()
     }
@@ -160,7 +161,7 @@ impl ContextBudget {
 /// 与一期行为兼容。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactionPolicy {
-    /// 消息正文可用 token 预算；总窗口还包括输出预留和固定请求开销。
+    /// 压缩触发软阈值，比较预计总输入 token（与 context window 正交）。
     pub budget_tokens: usize,
     /// 保留最近完整 turn 数（不压缩）。
     ///
@@ -285,7 +286,7 @@ pub async fn plan_context(
 
 /// 拓扑安全截断：按 turn/user boundary 丢弃整 turn，保证 tool call/result 成组。
 ///
-/// 1. `estimate_total(messages) <= max_tokens` → 原样返回。
+/// 1. `estimate_total(messages, fixed_overhead) <= max_tokens` → 原样返回。
 /// 2. 否则从头部整 turn 丢弃（切点推进到下一条 `User` 边界），直到满足预算。
 /// 3. 若丢弃到只剩最后一个 turn 仍超预算 → 至少保留最后 1 个 turn，不产出空列表。
 /// 4. 防御：若 `messages[0]` 非 `User`（不应发生），仍以首条为切点，
