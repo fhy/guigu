@@ -29,7 +29,7 @@ Add `guigu` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-guigu = "0.2.0"
+guigu = "0.3.0"
 ```
 
 ### Feature flags
@@ -46,7 +46,7 @@ Disable default features to get a pure core library with no `reqwest` dependency
 
 ```toml
 [dependencies]
-guigu = { version = "0.2.0", default-features = false }
+guigu = { version = "0.3.0", default-features = false }
 ```
 
 ## Quick start

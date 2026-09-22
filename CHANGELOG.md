@@ -2,6 +2,34 @@
 
 All notable changes to guigu are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-22
+
+Publishes the correctness, robustness, and code hygiene improvements delivered in phases 12–16 (040–049).
+
+### Runtime correctness
+
+- Protects `tool_call` transcript integrity: oversized batches fail as a whole without execution and receive synthetic error `ToolResult` entries.
+- Adds cancellation and timeout handling for provider streams with `ProviderError::Aborted` / `Timeout` and configurable `LoopConfig::request_timeout`.
+
+### Context safety
+
+- Separates context request projection from transcript mutation through `PreparedContext` and an explicit commit step; failed or cancelled requests leave the authoritative transcript unchanged.
+- Truncates at turn/user boundaries so context preparation never creates orphaned `ToolResult` messages.
+
+### Retry and rate limiting
+
+- Classifies provider failures as transient, permanent, or rate-limited for retry decisions.
+- Parses both seconds and HTTP-date forms of `Retry-After`.
+
+### Precise context budgeting
+
+- Applies the `context_window - reserve_output_tokens` budget before fixed protocol overhead.
+- Uses the latest transcript `AssistantMessage.usage.input` as the estimation baseline with incremental character-based accounting, falling back to full estimation when usage is unavailable.
+
+### Code hygiene
+
+- Consolidates retry-after adapters, aligns context-budget API documentation, splits runtime-loop tests, deduplicates test helpers, removes redundant re-exports, and completes documentation cleanup.
+
 ## [0.2.0] - 2026-09-13
 
 Adds the incremental capabilities delivered since v0.1.0 (phases 9–11) to crates.io. All changes are additive — no breaking changes to the public trait contracts.
