@@ -7,14 +7,11 @@ mod provider;
 mod tools;
 
 pub use fixtures::*;
-pub use guigu::Agent;
-pub use guigu::core::agent::AgentHandle;
 pub use guigu::core::message::{AssistantContent, AssistantMessage, Message, StopReason};
-pub use guigu::core::provider::{AssistantEvent, ProviderError};
-pub use guigu::core::tool::{ResourceScope, Tool};
-pub use guigu::core::{AgentRuntime, LoopConfig, Model, ToolExecutionMode};
+pub use guigu::core::provider::AssistantEvent;
+pub use guigu::core::tool::ResourceScope;
+pub use guigu::core::{AgentRuntime, LoopConfig, Model};
 pub use provider::*;
-pub use std::sync::Arc;
 pub use std::sync::atomic::{AtomicUsize, Ordering};
 pub use std::time::Duration;
 pub use tokio::sync::oneshot;

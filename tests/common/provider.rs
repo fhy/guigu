@@ -56,9 +56,11 @@ impl ModelProvider for FakeProvider {
     async fn stream(&self, request: ProviderRequest) -> Result<AssistantStream, ProviderError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         let rx = self.gate.lock().expect("gate mutex").take();
+        // gate：首次调用前等待（确定性注入命令）。
         if let Some(rx) = rx {
             let _ = rx.await;
         }
+        // 模拟建立失败。
         let remaining = self.fail_next.load(Ordering::SeqCst);
         if remaining > 0 {
             self.fail_next.fetch_sub(1, Ordering::SeqCst);
@@ -96,6 +98,7 @@ impl HangingProvider {
 impl ModelProvider for HangingProvider {
     async fn stream(&self, _request: ProviderRequest) -> Result<AssistantStream, ProviderError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
+        // 挂起：永不返回（runtime 的 `select!` 应抢先取消/超时）。
         futures::future::pending::<()>().await;
         Err(ProviderError::Request("unreachable".to_string()))
     }

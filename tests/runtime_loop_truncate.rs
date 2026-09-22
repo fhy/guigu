@@ -1,6 +1,7 @@
 //! Runtime loop 场景测试。
 mod common;
 use common::*;
+use guigu::Agent;
 use guigu::core::message::{Message, StopReason};
 use guigu::core::tool::Tool;
 use guigu::core::{AgentHandle, ToolExecutionMode};

@@ -64,12 +64,17 @@ pub fn tool_call_turn_with_stop(
     ]
 }
 
-/// 多工具调用 turn：所有 toolCall 的 Start/End 事件 + 末尾单个 `Done`。
+/// 多工具调用 turn：所有 toolCall 的 Start/End 事件 + 末尾**单个** `Done`
+/// （message 含全部 toolCall）。真实 provider 一个 turn 只发一个 `Done`。
 pub fn multi_tool_call_turn(calls: &[(&str, &str, &str)]) -> Vec<AssistantEvent> {
     multi_tool_call_turn_with_stop(calls, &[], StopReason::Completed)
 }
 
-/// 多工具调用 turn（指定 `stop_reason`）：支持指定调用走 delta 累积路径。
+/// 多工具调用 turn（指定 `stop_reason`）：每个 toolCall 的 Start/End 事件 +
+/// 末尾**单个** `Done`（message 含全部 toolCall）。`delta_ids` 中的 toolCall 经
+/// `ToolCallStart`（空参数）+ `ToolCallDelta`（累积完整参数）+ `ToolCallEnd` 形成，
+/// 其余用 `ToolCallStart`（完整参数）+ `ToolCallEnd`。用于 Task 040 Length 保护
+/// 测试覆盖 delta 累积路径与逐调用生命周期事件。
 pub fn multi_tool_call_turn_with_stop(
     calls: &[(&str, &str, &str)],
     delta_ids: &[&str],

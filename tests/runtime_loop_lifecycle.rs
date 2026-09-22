@@ -1,6 +1,7 @@
 //! Runtime loop 场景测试。
 mod common;
 use common::*;
+use guigu::Agent;
 use guigu::core::{AgentHandle, ToolExecutionMode};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
