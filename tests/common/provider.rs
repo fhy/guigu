@@ -85,7 +85,8 @@ impl ModelProvider for FakeProvider {
     }
 }
 
-/// 永不结束的 provider：用于建流取消测试。
+/// 挂起 provider：`stream()` 永不返回（`pending()` future），用于验证建流阶段
+/// 的取消/超时（Task 040）。runtime 的 `select!` 应在 provider 返回前抢先取消。
 pub struct HangingProvider {
     pub call_count: AtomicUsize,
 }

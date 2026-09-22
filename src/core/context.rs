@@ -112,9 +112,7 @@ impl ContextBudget {
         }
     }
 
-    /// 创建包含固定请求开销和输出预留空间的预算。
-    ///
-    /// 构造带固定开销的上下文预算。
+    /// 构造包含固定请求开销和输出预留空间的上下文预算。
     ///
     /// `fixed_overhead` 仅叠加进无 usage 基线的估算路径；
     /// `protocol_wrapper_tokens` 覆盖请求信封及 role/type 包装。
