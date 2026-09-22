@@ -1,7 +1,10 @@
 //! Runtime loop 场景测试。
-#![allow(dead_code)]
-include!("common/runtime_loop_provider.rs");
-include!("common/runtime_loop_fixtures.rs");
+mod common;
+use common::*;
+use guigu::core::message::{Message, StopReason};
+use guigu::core::tool::Tool;
+use guigu::core::{AgentHandle, ToolExecutionMode};
+use std::sync::Arc;
 
 /// 上下文预算超限触发截断：长 transcript + 小窗口 → provider 收到的上下文被截断。
 #[tokio::test]

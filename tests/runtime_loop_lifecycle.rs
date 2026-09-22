@@ -1,7 +1,9 @@
 //! Runtime loop 场景测试。
-#![allow(dead_code)]
-include!("common/runtime_loop_provider.rs");
-include!("common/runtime_loop_fixtures.rs");
+mod common;
+use common::*;
+use guigu::core::{AgentHandle, ToolExecutionMode};
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 /// 建流取消：provider 的 stream() 挂起（pending future）后取消 run signal。
 #[tokio::test]

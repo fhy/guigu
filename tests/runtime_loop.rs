@@ -1,8 +1,13 @@
 //! Runtime loop 场景测试。
-#![allow(dead_code)]
-include!("common/runtime_loop_provider.rs");
-include!("common/runtime_loop_fixtures.rs");
+mod common;
+use common::*;
+use guigu::core::message::Message;
+use guigu::core::tool::Tool;
+use guigu::core::{AgentHandle, ToolExecutionMode};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// 纯文本一轮结束：无 toolCall → 单 turn 后退出。
 #[tokio::test]
 async fn test_pure_text_single_turn() {
     let provider = FakeProvider::new(vec![text_turn("hello")]);

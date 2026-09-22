@@ -1,7 +1,9 @@
 //! Runtime loop 场景测试。
-#![allow(dead_code)]
-include!("common/runtime_loop_provider.rs");
-include!("common/runtime_loop_fixtures.rs");
+mod common;
+use common::*;
+use guigu::core::message::Message;
+use guigu::core::provider::ProviderError;
+use guigu::core::{AgentHandle, ToolExecutionMode};
 
 /// provider 失败重试：前 2 次建立失败 → 第 3 次成功，call_count == 3。
 #[tokio::test]
