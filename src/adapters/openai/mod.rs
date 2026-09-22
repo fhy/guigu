@@ -5,12 +5,11 @@
 mod events;
 mod request;
 
+use crate::core::provider::{AssistantStream, ModelProvider, ProviderError, ProviderRequest};
 use async_trait::async_trait;
 use futures::StreamExt;
-use std::time::Duration;
 
-use crate::core::provider::{AssistantStream, ModelProvider, ProviderError, ProviderRequest};
-
+use super::retry_after::parse_retry_after;
 use super::stream::build_stream;
 
 pub use request::DEFAULT_BASE_URL;
@@ -90,13 +89,4 @@ impl ModelProvider for OpenAiProvider {
             events::map_event,
         ))
     }
-}
-
-fn parse_retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<Duration> {
-    let raw = value?.to_str().ok()?.trim();
-    if let Ok(seconds) = raw.parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
-    }
-    let date = httpdate::parse_http_date(raw).ok()?;
-    date.duration_since(std::time::SystemTime::now()).ok()
 }

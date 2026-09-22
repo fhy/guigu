@@ -17,7 +17,7 @@ use crate::core::message::{
     AssistantContent, AssistantMessage, Message, ModelId, StopReason, ToolCall,
 };
 use crate::core::provider::{
-    AssistantEvent, AssistantStream, ModelProvider, ProviderError, ProviderRequest,
+    AssistantEvent, AssistantStream, ModelProvider, ProviderError, ProviderRequest, RetryClass,
 };
 
 use super::{LoopConfig, drain_commands, stop_reason_for_error};
@@ -59,10 +59,7 @@ async fn stream_with_retry(
             Ok(stream) => return Ok(stream),
             Err(e) => {
                 // Aborted（含 provider 自身返回）不重试，立即传播 abort 终态。
-                if matches!(
-                    e.retry_class(),
-                    crate::core::provider::RetryClass::Permanent
-                ) {
+                if matches!(e.retry_class(), RetryClass::Permanent) {
                     return Err(e);
                 }
                 if signal.is_cancelled() {
