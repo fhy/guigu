@@ -52,4 +52,4 @@
 - [x] 045 上下文预算 API 文档/注释校准（十三期）
 - [x] 046 runtime_loop 测试拆分 + 预算口径 M4 补强（十三期）
 - [x] 047 tests/common helper 去重 + runtime_loop 切 mod common（十四期）
-- [ ] 048 tests/common 文档注释补回 + 冗余 re-export 清理（十五期）
+- [~] 048 tests/common 文档注释补回 + 冗余 re-export 清理（十五期）
