@@ -63,21 +63,61 @@ pub fn estimate_message_tokens(msg: &Message) -> u32 {
 
 /// 粗估消息列表的总 token 数（u64 累加，避免 u32 求和溢出）。
 fn estimate_total(messages: &[Arc<Message>]) -> u64 {
-    messages
+    let last_usage = messages
         .iter()
-        .map(|m| estimate_message_tokens(m) as u64)
-        .sum()
+        .enumerate()
+        .rev()
+        .find_map(|(i, m)| match m.as_ref() {
+            Message::Assistant(a) => a.usage.as_ref().map(|usage| (i, usage.input)),
+            _ => None,
+        });
+    match last_usage {
+        Some((index, input)) => {
+            input
+                + messages[index + 1..]
+                    .iter()
+                    .map(|m| estimate_message_tokens(m) as u64)
+                    .sum::<u64>()
+        }
+        None => messages
+            .iter()
+            .map(|m| estimate_message_tokens(m) as u64)
+            .sum(),
+    }
 }
 
 /// 上下文预算：按模型 `context_window` 判断与裁剪。
 #[derive(Debug, Clone, Copy)]
 pub struct ContextBudget {
     pub context_window: u32,
+    pub fixed_overhead: u32,
+    pub reserve_output_tokens: u32,
 }
 
 impl ContextBudget {
     pub fn new(context_window: u32) -> Self {
-        ContextBudget { context_window }
+        ContextBudget {
+            context_window,
+            fixed_overhead: 0,
+            reserve_output_tokens: 0,
+        }
+    }
+
+    pub fn with_overhead(
+        context_window: u32,
+        system_prompt: &str,
+        tool_schemas: &str,
+        reserve_output_tokens: usize,
+        protocol_wrapper_tokens: usize,
+    ) -> Self {
+        let fixed_overhead = estimate_tokens(system_prompt)
+            .saturating_add(estimate_tokens(tool_schemas))
+            .saturating_add(protocol_wrapper_tokens.min(u32::MAX as usize) as u32);
+        ContextBudget {
+            context_window,
+            fixed_overhead,
+            reserve_output_tokens: reserve_output_tokens.min(u32::MAX as usize) as u32,
+        }
     }
 
     /// 粗估消息列表的总 token 数。
@@ -87,14 +127,20 @@ impl ContextBudget {
 
     /// 消息列表是否在预算内。
     pub fn fits(&self, messages: &[Arc<Message>]) -> bool {
-        self.estimate(messages) <= self.context_window
+        self.estimate(messages) <= self.available()
     }
 
     /// 保守截断：从最旧（前端）丢弃直到预算内，始终保留最近一条消息。
     ///
     /// 委托 `truncate_to_budget`（拓扑安全，turn/user boundary 粒度）。
     pub fn truncate(&self, messages: &[Arc<Message>]) -> Vec<Arc<Message>> {
-        truncate_to_budget(messages, self.context_window as usize)
+        truncate_to_budget(messages, self.available() as usize)
+    }
+
+    pub fn available(&self) -> u32 {
+        self.context_window
+            .saturating_sub(self.reserve_output_tokens)
+            .saturating_sub(self.fixed_overhead)
     }
 }
 
@@ -112,6 +158,8 @@ pub struct CompactionPolicy {
     /// 一个 turn = 一条 `User` 消息 + 其后的所有 `Assistant`/`ToolResult` 消息，
     /// 直到下一条 `User`（不含）。
     pub keep_recent: usize,
+    pub reserve_output_tokens: usize,
+    pub protocol_wrapper_tokens: usize,
 }
 
 impl Default for CompactionPolicy {
@@ -119,6 +167,8 @@ impl Default for CompactionPolicy {
         CompactionPolicy {
             budget_tokens: usize::MAX,
             keep_recent: 1,
+            reserve_output_tokens: 1024,
+            protocol_wrapper_tokens: 128,
         }
     }
 }

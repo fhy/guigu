@@ -170,6 +170,8 @@ async fn test_compaction_triggers_and_injects_summary() {
     let policy = CompactionPolicy {
         budget_tokens: 200,
         keep_recent: 1,
+        reserve_output_tokens: 0,
+        protocol_wrapper_tokens: 0,
     };
     let handle = AgentHandle::spawn(
         make_config(),
@@ -224,6 +226,8 @@ async fn test_compaction_failure_degrades_to_truncation() {
     let policy = CompactionPolicy {
         budget_tokens: 200,
         keep_recent: 1,
+        reserve_output_tokens: 0,
+        protocol_wrapper_tokens: 0,
     };
     let handle = AgentHandle::spawn(
         make_config(),
@@ -273,6 +277,8 @@ async fn test_compaction_cancelled_aborts() {
     let policy = CompactionPolicy {
         budget_tokens: 200,
         keep_recent: 1,
+        reserve_output_tokens: 0,
+        protocol_wrapper_tokens: 0,
     };
     let handle = AgentHandle::spawn(
         make_config(),
@@ -313,6 +319,8 @@ async fn test_within_budget_no_compaction() {
     let policy = CompactionPolicy {
         budget_tokens: 10_000,
         keep_recent: 1,
+        reserve_output_tokens: 0,
+        protocol_wrapper_tokens: 0,
     };
     let handle = AgentHandle::spawn(
         make_config(),
@@ -344,6 +352,8 @@ async fn test_compaction_persistent_no_recompact() {
     let policy = CompactionPolicy {
         budget_tokens: 200,
         keep_recent: 1,
+        reserve_output_tokens: 0,
+        protocol_wrapper_tokens: 0,
     };
     let handle = AgentHandle::spawn(
         make_config(),
@@ -409,6 +419,8 @@ async fn test_compactor_respects_context_window() {
     let policy = CompactionPolicy {
         budget_tokens: usize::MAX,
         keep_recent: 1,
+        reserve_output_tokens: 0,
+        protocol_wrapper_tokens: 0,
     };
     let handle = AgentHandle::spawn(
         make_config(),
@@ -443,6 +455,8 @@ async fn test_compactor_applies_transform_context_hook() {
     let policy = CompactionPolicy {
         budget_tokens: 200,
         keep_recent: 1,
+        reserve_output_tokens: 0,
+        protocol_wrapper_tokens: 0,
     };
     let mut runtime = make_runtime_with_compactor(provider.clone(), compactor, policy, 8192);
     // 设置 transform_context 钩子：在消息前注入一条标记消息（最终权威投影）。

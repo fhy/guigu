@@ -162,6 +162,42 @@ fn test_budget_truncate_keeps_last_when_all_oversized() {
     assert_eq!(truncated.len(), 1, "超窗单条也应保留最近一条");
 }
 
+#[test]
+fn test_budget_includes_reserve_and_fixed_overhead() {
+    let budget = ContextBudget::with_overhead(100, "1234", "1234", 10, 20);
+    assert_eq!(budget.available(), 66);
+    assert!(!budget.fits(&[user_msg(&"x".repeat(280))]));
+}
+
+#[test]
+fn test_usage_baseline_is_preferred_for_compaction_budget() {
+    let assistant = Arc::new(Message::Assistant(AssistantMessage {
+        content: vec![AssistantContent::Text {
+            text: "tiny".into(),
+        }],
+        model: None,
+        usage: Some(crate::core::message::Usage {
+            input: 100,
+            output: 1,
+            cache_read: 0,
+            cache_write: 0,
+            total_tokens: 101,
+            cost: 0.0,
+        }),
+        stop_reason: Some(StopReason::Completed),
+        error_message: None,
+        timestamp: 0,
+    }));
+    let transcript = vec![assistant, user_msg(&"x".repeat(40))];
+    let policy = CompactionPolicy {
+        budget_tokens: 110,
+        keep_recent: 1,
+        reserve_output_tokens: 0,
+        protocol_wrapper_tokens: 0,
+    };
+    assert!(estimate_total(&transcript) > policy.budget_tokens as u64);
+}
+
 // ---------- default_convert_to_llm ----------
 
 #[test]
@@ -181,6 +217,8 @@ async fn test_plan_context_within_budget_no_compaction() {
     let policy = CompactionPolicy {
         budget_tokens: 10_000,
         keep_recent: 1,
+        reserve_output_tokens: 0,
+        protocol_wrapper_tokens: 0,
     };
     let msgs = vec![user_msg("a"), user_msg("b")];
     let out = plan_context(&msgs, &policy, compactor.as_ref(), CancellationToken::new())
@@ -198,6 +236,8 @@ async fn test_plan_context_over_budget_compacts() {
     let policy = CompactionPolicy {
         budget_tokens: 200,
         keep_recent: 1,
+        reserve_output_tokens: 0,
+        protocol_wrapper_tokens: 0,
     };
     // 每条 400 字节 ≈ 101 token，3 条 ≈ 303 > 200。
     let m0 = user_msg(&format!("m0{}", "x".repeat(400)));
@@ -240,6 +280,8 @@ async fn test_plan_context_compaction_failure_degrades() {
     let policy = CompactionPolicy {
         budget_tokens: 200,
         keep_recent: 1,
+        reserve_output_tokens: 0,
+        protocol_wrapper_tokens: 0,
     };
     let m0 = user_msg(&format!("m0{}", "x".repeat(400)));
     let m1 = user_msg(&format!("m1{}", "x".repeat(400)));
@@ -268,6 +310,8 @@ async fn test_plan_context_cancelled_returns_error() {
     let policy = CompactionPolicy {
         budget_tokens: 200,
         keep_recent: 1,
+        reserve_output_tokens: 0,
+        protocol_wrapper_tokens: 0,
     };
     let m0 = user_msg(&format!("m0{}", "x".repeat(400)));
     let m1 = user_msg(&format!("m1{}", "x".repeat(400)));
@@ -293,6 +337,8 @@ async fn test_plan_context_too_few_turns_no_compaction() {
     let policy = CompactionPolicy {
         budget_tokens: 1,
         keep_recent: 2,
+        reserve_output_tokens: 0,
+        protocol_wrapper_tokens: 0,
     };
     let big = user_msg(&"x".repeat(400));
     let out = plan_context(
@@ -321,6 +367,8 @@ async fn test_plan_context_persistent_no_recompact() {
     let policy = CompactionPolicy {
         budget_tokens: 200,
         keep_recent: 1,
+        reserve_output_tokens: 0,
+        protocol_wrapper_tokens: 0,
     };
     // 第一次：3 条大消息（超预算）→ 压缩为 [摘要, m2]。
     let m0 = user_msg(&format!("m0{}", "x".repeat(400)));

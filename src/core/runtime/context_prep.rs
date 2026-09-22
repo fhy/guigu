@@ -37,7 +37,25 @@ fn apply_final_projection(
     if let Some(hook) = &ctx.config.transform_context {
         hook(request_messages.to_vec(), signal.clone())
     } else {
-        let budget = ContextBudget::new(ctx.config.model.context_window);
+        let tool_schemas = ctx
+            .tools
+            .iter()
+            .map(|tool| {
+                format!(
+                    "{}{}{:?}",
+                    tool.name(),
+                    tool.description(),
+                    tool.parameters()
+                )
+            })
+            .collect::<String>();
+        let budget = ContextBudget::with_overhead(
+            ctx.config.model.context_window,
+            ctx.system_prompt,
+            &tool_schemas,
+            ctx.config.compaction.reserve_output_tokens,
+            ctx.config.compaction.protocol_wrapper_tokens,
+        );
         budget.truncate(request_messages)
     }
 }

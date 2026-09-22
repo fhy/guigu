@@ -132,6 +132,8 @@ async fn test_keep_recent_turn_granularity() {
     let policy = CompactionPolicy {
         budget_tokens: 200,
         keep_recent: 2, // 保留最近 2 个完整 turn。
+        reserve_output_tokens: 0,
+        protocol_wrapper_tokens: 0,
     };
     // 构造 3 个 turn：
     // Turn 1: [User, Assistant(ToolCall), ToolResult]
