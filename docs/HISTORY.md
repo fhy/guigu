@@ -120,3 +120,9 @@
 ## 十四期（047）测试 helper 去重
 
 > 立项（2026-09-22，Architect，依据 046-review-r1 建议 1/2）：以 `tests/common/mod.rs` 为唯一 helper 源，合并 `runtime_loop_provider.rs`（FakeProvider 增强 `scripted_errors` + HangingProvider）与 `runtime_loop_fixtures.rs`（tool_call_turn_with_stop / multi_tool_call_turn* / tool_result_texts / collect_until_agent_end / wait_event 等特有 helper）进 `common/`，删除两个重复文件；4 个 `runtime_loop*.rs` 由 `include!` 切 `mod common;`；补回 `test_pure_text_single_turn` doc 注释。纯测试重组，零产品行为变化。规格 docs/tasks/047-tests-common-dedup.md 已就绪。
+
+- 047 复核（2026-09-22，Architect，响应 PM「复核任务完成情况」）：实现已合并（e9ce9ea，refactor）；reviewer r1 审查通过（docs/reviews/047-review-r1.md，结论 PASS，审查提交 9d1c8a0）：四门禁全绿（check ✓ / clippy --all-targets --all-features -D warnings 0 warning ✓ / test --all-targets 全绿、runtime_loop 4 crate 9+6+4+2=21 项 ✓ / fmt ✓），无阻塞问题。`tests/common/` 收敛为唯一 helper 源（provider.rs 含 `scripted_errors`/`with_errors`/`HangingProvider`、fixtures.rs 含全部 runtime_loop 特有 fixture）、两重复文件已删、4 个 runtime_loop 由 `include!` 切 `mod common;`、断言宏数 577=577 零行为变化、`test_pure_text_single_turn` doc 注释补回。故 047 由 [~] 转 [x] 关闭。r1 两条非阻塞建议（① 合并丢失旧 `///` 文档注释 ② mod.rs 冗余 std/guigu re-export + `allow(unused_imports)` 可能已无必要）留待 048。**十四期（047）至此闭环**。
+
+## 十五期（048）测试 helper 收尾
+
+> 立项（2026-09-22，Architect，依据 047-review-r1 非阻塞建议 1/2）：补回 `tests/common` 拆分后丢失的 `///` 文档注释（provider/tools/fixtures 逐条对应 parent 版本）+ 清理 `tests/common/mod.rs` 冗余 std/guigu 类型 re-export（仅保留测试确实依赖的）+ 复核 `#![allow(unused_imports)]`（以 clippy 为准移除或保留）。纯测试、零产品行为变化。规格 docs/tasks/048-tests-common-doc-reexport.md 已就绪。
