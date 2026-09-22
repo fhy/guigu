@@ -105,6 +105,83 @@ pub enum ProviderError {
     Build(String),
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{ProviderError, RetryClass};
+    use std::time::Duration;
+
+    #[test]
+    fn retry_class_mapping() {
+        let cases = [
+            (ProviderError::Network("n".into()), RetryClass::Transient),
+            (ProviderError::Request("r".into()), RetryClass::Transient),
+            (ProviderError::Timeout, RetryClass::Transient),
+            (ProviderError::Aborted, RetryClass::Permanent),
+            (ProviderError::Parse("p".into()), RetryClass::Permanent),
+            (ProviderError::Build("b".into()), RetryClass::Permanent),
+            (
+                ProviderError::HttpStatus {
+                    status: 400,
+                    body: "".into(),
+                    retry_after: None,
+                },
+                RetryClass::Permanent,
+            ),
+            (
+                ProviderError::HttpStatus {
+                    status: 401,
+                    body: "".into(),
+                    retry_after: None,
+                },
+                RetryClass::Permanent,
+            ),
+            (
+                ProviderError::HttpStatus {
+                    status: 429,
+                    body: "".into(),
+                    retry_after: Some(Duration::from_secs(5)),
+                },
+                RetryClass::RateLimited,
+            ),
+            (
+                ProviderError::HttpStatus {
+                    status: 500,
+                    body: "".into(),
+                    retry_after: None,
+                },
+                RetryClass::Transient,
+            ),
+            (
+                ProviderError::HttpStatus {
+                    status: 503,
+                    body: "".into(),
+                    retry_after: None,
+                },
+                RetryClass::Transient,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.retry_class(), expected);
+        }
+    }
+
+    #[test]
+    fn retry_after_only_applies_to_429() {
+        let limited = ProviderError::HttpStatus {
+            status: 429,
+            body: String::new(),
+            retry_after: Some(Duration::from_secs(5)),
+        };
+        assert_eq!(limited.retry_after(), Some(Duration::from_secs(5)));
+        let server_error = ProviderError::HttpStatus {
+            status: 500,
+            body: String::new(),
+            retry_after: Some(Duration::from_secs(5)),
+        };
+        assert_eq!(server_error.retry_after(), None);
+    }
+}
+
 impl ProviderError {
     /// 可判定重试类别（Task 042）。
     ///

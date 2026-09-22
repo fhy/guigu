@@ -289,9 +289,52 @@ async fn openai_http_401_returns_http_status_error() {
         Err(ProviderError::HttpStatus { status, body, .. }) => {
             assert_eq!(status, 401);
             assert_eq!(body, "invalid api key");
+            assert_eq!(
+                ProviderError::HttpStatus {
+                    status,
+                    body,
+                    retry_after: None
+                }
+                .retry_class(),
+                guigu::core::provider::RetryClass::Permanent
+            );
         }
         Err(other) => panic!("expected HttpStatus, got {other:?}"),
         Ok(_) => panic!("expected error, got stream"),
+    }
+}
+
+#[tokio::test]
+async fn openai_http_429_parses_retry_after() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "5")
+                .set_body_string("rate limited"),
+        )
+        .mount(&server)
+        .await;
+    let provider = OpenAiProvider::new(OpenAiConfig {
+        api_key: "test-key".into(),
+        base_url: Some(base_url(&server, "/v1")),
+    })
+    .expect("provider");
+    match provider
+        .stream(make_request(CancellationToken::new()))
+        .await
+    {
+        Err(ProviderError::HttpStatus {
+            status,
+            retry_after,
+            ..
+        }) => {
+            assert_eq!(status, 429);
+            assert_eq!(retry_after, Some(std::time::Duration::from_secs(5)));
+        }
+        Err(other) => panic!("expected rate limit error, got {other:?}"),
+        Ok(_) => panic!("expected rate limit error, got stream"),
     }
 }
 
