@@ -869,6 +869,80 @@ async fn test_rate_limited_retry_after_is_capped() {
     );
 }
 
+/// Retry-After 小于上限时应直接决定等待时长，而非退回指数延迟。
+#[tokio::test]
+async fn test_rate_limited_retry_after_is_used() {
+    let provider = FakeProvider::with_errors(
+        vec![text_turn("ok")],
+        vec![ProviderError::HttpStatus {
+            status: 429,
+            body: "rate limited".to_string(),
+            retry_after: Some(Duration::from_millis(20)),
+        }],
+    );
+    let mut runtime = make_runtime(
+        provider.clone(),
+        Vec::new(),
+        ToolExecutionMode::Sequential,
+        8192,
+    );
+    runtime.loop_config.retry_max_delay = Duration::from_secs(1);
+    let handle = AgentHandle::spawn(make_config(), runtime);
+    let started = tokio::time::Instant::now();
+    handle
+        .prompt(vec![user_msg("hi")])
+        .await
+        .expect("prompt should succeed");
+    handle.wait_for_idle().await.expect("should settle");
+
+    let elapsed = started.elapsed();
+    assert_eq!(provider.call_count(), 2);
+    assert!(
+        elapsed >= Duration::from_millis(15),
+        "retry-after was skipped: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "unexpected exponential delay: {elapsed:?}"
+    );
+}
+
+/// 429 缺少 Retry-After 时应回退到指数退避。
+#[tokio::test]
+async fn test_rate_limited_without_retry_after_uses_exponential_backoff() {
+    let provider = FakeProvider::with_errors(
+        vec![text_turn("ok")],
+        vec![ProviderError::HttpStatus {
+            status: 429,
+            body: "rate limited".to_string(),
+            retry_after: None,
+        }],
+    );
+    let mut runtime = make_runtime(
+        provider.clone(),
+        Vec::new(),
+        ToolExecutionMode::Sequential,
+        8192,
+    );
+    runtime.loop_config.retry_base_delay = Duration::from_millis(10);
+    runtime.loop_config.retry_max_delay = Duration::from_millis(50);
+    let handle = AgentHandle::spawn(make_config(), runtime);
+    let started = tokio::time::Instant::now();
+    handle
+        .prompt(vec![user_msg("hi")])
+        .await
+        .expect("prompt should succeed");
+    handle.wait_for_idle().await.expect("should settle");
+
+    let elapsed = started.elapsed();
+    assert_eq!(provider.call_count(), 2);
+    assert!(
+        elapsed >= Duration::from_millis(8),
+        "fallback backoff was skipped: {elapsed:?}"
+    );
+    assert!(elapsed < Duration::from_millis(100));
+}
+
 /// 退避等待期间取消应立即打断 sleep，而不是等待完整退避时长。
 #[tokio::test]
 async fn test_retry_backoff_can_be_cancelled() {
