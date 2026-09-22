@@ -14,6 +14,7 @@
 //! 同步点：一律以 `wait_for_idle` 为同步点；steering/followUp 用 provider
 //! gate（oneshot）确定性地在 run 进行中注入命令，不用 sleep 竞态。
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -42,6 +43,7 @@ struct FakeProvider {
     call_index: AtomicUsize,
     call_count: AtomicUsize,
     fail_next: AtomicUsize,
+    scripted_errors: Mutex<VecDeque<ProviderError>>,
     last_context_size: AtomicUsize,
     /// 首次 stream() 前等待的信号（用于确定性地在 run 进行中注入命令）。
     gate: Mutex<Option<oneshot::Receiver<()>>>,
@@ -63,6 +65,7 @@ impl FakeProvider {
             call_index: AtomicUsize::new(0),
             call_count: AtomicUsize::new(0),
             fail_next: AtomicUsize::new(fail_next),
+            scripted_errors: Mutex::new(VecDeque::new()),
             last_context_size: AtomicUsize::new(0),
             gate: Mutex::new(gate),
         })
@@ -74,6 +77,12 @@ impl FakeProvider {
 
     fn last_context_size(&self) -> usize {
         self.last_context_size.load(Ordering::SeqCst)
+    }
+
+    fn with_errors(turns: Vec<Vec<AssistantEvent>>, errors: Vec<ProviderError>) -> Arc<Self> {
+        let provider = Self::new(turns);
+        *provider.scripted_errors.lock().expect("error mutex") = errors.into();
+        provider
     }
 }
 
@@ -93,6 +102,14 @@ impl ModelProvider for FakeProvider {
             return Err(ProviderError::Request(
                 "simulated establishment failure".to_string(),
             ));
+        }
+        if let Some(error) = self
+            .scripted_errors
+            .lock()
+            .expect("error mutex")
+            .pop_front()
+        {
+            return Err(error);
         }
         self.last_context_size
             .store(request.context.messages.len(), Ordering::SeqCst);
@@ -773,6 +790,130 @@ async fn test_retry() {
         2,
         "run should complete after retries"
     );
+}
+
+/// 永久 provider 错误不应进入重试循环。
+#[tokio::test]
+async fn test_permanent_provider_error_is_not_retried() {
+    let provider = FakeProvider::with_errors(
+        vec![],
+        vec![ProviderError::HttpStatus {
+            status: 401,
+            body: "unauthorized".to_string(),
+            retry_after: None,
+        }],
+    );
+    let handle = AgentHandle::spawn(
+        make_config(),
+        make_runtime(
+            provider.clone(),
+            Vec::new(),
+            ToolExecutionMode::Sequential,
+            8192,
+        ),
+    );
+    handle
+        .prompt(vec![user_msg("hi")])
+        .await
+        .expect("prompt should succeed");
+    handle.wait_for_idle().await.expect("should settle");
+
+    assert_eq!(provider.call_count(), 1, "permanent errors must not retry");
+    let last = handle
+        .snapshot()
+        .messages
+        .last()
+        .cloned()
+        .expect("assistant message");
+    let Message::Assistant(message) = last.as_ref() else {
+        panic!("expected assistant error message");
+    };
+    assert_eq!(message.stop_reason, Some(StopReason::Error));
+}
+
+/// 429 的 Retry-After 应作为等待时间，并受 retry_max_delay 封顶。
+#[tokio::test]
+async fn test_rate_limited_retry_after_is_capped() {
+    let provider = FakeProvider::with_errors(
+        vec![text_turn("ok")],
+        vec![ProviderError::HttpStatus {
+            status: 429,
+            body: "rate limited".to_string(),
+            retry_after: Some(Duration::from_millis(80)),
+        }],
+    );
+    let mut runtime = make_runtime(
+        provider.clone(),
+        Vec::new(),
+        ToolExecutionMode::Sequential,
+        8192,
+    );
+    runtime.loop_config.retry_max_delay = Duration::from_millis(10);
+    let handle = AgentHandle::spawn(make_config(), runtime);
+    let started = tokio::time::Instant::now();
+    handle
+        .prompt(vec![user_msg("hi")])
+        .await
+        .expect("prompt should succeed");
+    handle.wait_for_idle().await.expect("should settle");
+    let elapsed = started.elapsed();
+
+    assert_eq!(provider.call_count(), 2, "rate limit should be retried");
+    assert!(
+        elapsed >= Duration::from_millis(8),
+        "retry should wait near cap: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(60),
+        "retry-after must be capped: {elapsed:?}"
+    );
+}
+
+/// 退避等待期间取消应立即打断 sleep，而不是等待完整退避时长。
+#[tokio::test]
+async fn test_retry_backoff_can_be_cancelled() {
+    let provider = FakeProvider::with_errors(
+        vec![],
+        vec![ProviderError::Request("temporary".to_string())],
+    );
+    let handle = AgentHandle::spawn(
+        make_config(),
+        make_runtime(
+            provider.clone(),
+            Vec::new(),
+            ToolExecutionMode::Sequential,
+            8192,
+        ),
+    );
+    handle
+        .prompt(vec![user_msg("hi")])
+        .await
+        .expect("prompt should succeed");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while provider.call_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("provider should be called");
+    let started = tokio::time::Instant::now();
+    handle
+        .clone()
+        .shutdown()
+        .await
+        .expect("shutdown should succeed");
+    assert!(started.elapsed() < Duration::from_millis(100));
+    assert_eq!(provider.call_count(), 1, "cancelled backoff must not retry");
+    let last = handle
+        .snapshot()
+        .messages
+        .last()
+        .cloned()
+        .expect("assistant message");
+    let Message::Assistant(message) = last.as_ref() else {
+        panic!("expected assistant abort message");
+    };
+    assert_eq!(message.stop_reason, Some(StopReason::Aborted));
 }
 
 /// 上下文预算超限触发截断：长 transcript + 小窗口 → provider 收到的上下文被截断。
