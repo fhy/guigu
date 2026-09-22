@@ -51,4 +51,4 @@
 - [x] 044 适配器 Retry-After 解析去重 + 代码卫生（十三期）
 - [x] 045 上下文预算 API 文档/注释校准（十三期）
 - [x] 046 runtime_loop 测试拆分 + 预算口径 M4 补强（十三期）
-- [ ] 047 tests/common helper 去重 + runtime_loop 切 mod common（十四期）
+- [~] 047 tests/common helper 去重 + runtime_loop 切 mod common（十四期）
