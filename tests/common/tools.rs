@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+/// 顺序记录工具：execute 时取一个递增序号写进结果（验证执行顺序）。
 pub struct SeqTool {
     pub name: String,
     pub counter: Arc<AtomicUsize>,
@@ -32,6 +33,7 @@ impl Tool for SeqTool {
     }
 }
 
+/// 并发跟踪工具：记录同时在飞的最大并发数（验证并行/独占）。
 pub struct ConcurrencyTool {
     pub name: String,
     pub scope: ResourceScope,

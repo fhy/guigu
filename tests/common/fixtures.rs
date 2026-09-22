@@ -9,6 +9,7 @@ use guigu::core::{AgentConfig, AgentRuntime, LoopConfig, Model, ToolExecutionMod
 use std::sync::Arc;
 use std::time::Duration;
 
+/// 纯文本 turn 脚本：[TextDelta, Done]。
 pub fn text_turn(text: &str) -> Vec<AssistantEvent> {
     let message = AssistantMessage {
         content: vec![AssistantContent::Text {
@@ -28,10 +29,12 @@ pub fn text_turn(text: &str) -> Vec<AssistantEvent> {
     ]
 }
 
+/// 工具调用 turn 脚本：[ToolCallStart, ToolCallEnd, Done]。
 pub fn tool_call_turn(id: &str, name: &str, args: &str) -> Vec<AssistantEvent> {
     tool_call_turn_with_stop(id, name, args, StopReason::Completed)
 }
 
+/// 指定 `stop_reason` 的 tool call turn（Task 040 Length 保护测试用）。
 pub fn tool_call_turn_with_stop(
     id: &str,
     name: &str,
@@ -61,10 +64,12 @@ pub fn tool_call_turn_with_stop(
     ]
 }
 
+/// 多工具调用 turn：所有 toolCall 的 Start/End 事件 + 末尾单个 `Done`。
 pub fn multi_tool_call_turn(calls: &[(&str, &str, &str)]) -> Vec<AssistantEvent> {
     multi_tool_call_turn_with_stop(calls, &[], StopReason::Completed)
 }
 
+/// 多工具调用 turn（指定 `stop_reason`）：支持指定调用走 delta 累积路径。
 pub fn multi_tool_call_turn_with_stop(
     calls: &[(&str, &str, &str)],
     delta_ids: &[&str],
@@ -74,6 +79,7 @@ pub fn multi_tool_call_turn_with_stop(
     let mut content = Vec::new();
     for (id, name, args) in calls {
         if delta_ids.contains(id) {
+            // delta 路径：Start（空参数）→ Delta（累积完整参数）→ End。
             events.push(AssistantEvent::ToolCallStart {
                 id: id.to_string(),
                 name: name.to_string(),
@@ -110,6 +116,7 @@ pub fn multi_tool_call_turn_with_stop(
     events
 }
 
+/// 构造测试用 `AgentConfig`。
 pub fn make_config() -> AgentConfig {
     AgentConfig {
         system_prompt: "test".to_string(),
@@ -118,6 +125,7 @@ pub fn make_config() -> AgentConfig {
     }
 }
 
+/// 构造 `AgentRuntime`：注入 provider + 工具 + loop 配置（测试用短退避）。
 pub fn make_runtime(
     provider: Arc<dyn ModelProvider>,
     tools: Vec<Arc<dyn Tool>>,
@@ -139,6 +147,7 @@ pub fn make_runtime(
     }
 }
 
+/// 构造 User 文本消息（测试用）。
 pub fn user_msg(text: &str) -> Message {
     Message::User(UserMessage {
         content: vec![UserContent::Text {
@@ -148,6 +157,7 @@ pub fn user_msg(text: &str) -> Message {
     })
 }
 
+/// 序列化 entry 为 JSONL 一行（含行尾换行，测试用）。
 pub fn line(id: u64, parent: Option<u64>, text: &str) -> String {
     let entry = SessionEntry {
         id,
@@ -157,6 +167,7 @@ pub fn line(id: u64, parent: Option<u64>, text: &str) -> String {
     format!("{}\n", serde_json::to_string(&entry).unwrap())
 }
 
+/// 从 transcript 提取所有 ToolResult 的文本内容（按顺序）。
 pub fn tool_result_texts(messages: &[Arc<Message>]) -> Vec<String> {
     messages
         .iter()
@@ -170,6 +181,7 @@ pub fn tool_result_texts(messages: &[Arc<Message>]) -> Vec<String> {
         .collect()
 }
 
+/// 接收事件直到 AgentEnd，带 5s 超时兜底。
 pub async fn collect_until_agent_end(
     rx: &mut tokio::sync::broadcast::Receiver<guigu::core::event::AgentEvent>,
 ) -> Vec<guigu::core::event::AgentEvent> {
@@ -197,6 +209,7 @@ pub async fn collect_until_agent_end(
     }
 }
 
+/// 从 broadcast 接收事件直到匹配 predicate，带 5s 超时兜底。
 pub async fn wait_event(
     rx: &mut tokio::sync::broadcast::Receiver<guigu::core::event::AgentEvent>,
     mut predicate: impl FnMut(&guigu::core::event::AgentEvent) -> bool,

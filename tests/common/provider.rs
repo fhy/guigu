@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
+/// 脚本化 provider：按 turn 顺序回放 `AssistantEvent`；可模拟建立失败与 gate。
 pub struct FakeProvider {
     pub turns: Vec<Vec<AssistantEvent>>,
     pub call_index: AtomicUsize,
@@ -15,12 +16,14 @@ pub struct FakeProvider {
     pub fail_next: AtomicUsize,
     pub scripted_errors: Mutex<VecDeque<ProviderError>>,
     pub last_context_size: AtomicUsize,
+    /// 首次 stream() 前等待的信号（用于确定性地在 run 进行中注入命令）。
     pub gate: Mutex<Option<oneshot::Receiver<()>>>,
 }
 impl FakeProvider {
     pub fn new(turns: Vec<Vec<AssistantEvent>>) -> Arc<Self> {
         Self::with(turns, 0, None)
     }
+    /// `fail_next`：前 N 次 stream() 建立失败；`gate`：首次 stream() 前等待。
     pub fn with(
         turns: Vec<Vec<AssistantEvent>>,
         fail_next: usize,
@@ -80,6 +83,7 @@ impl ModelProvider for FakeProvider {
     }
 }
 
+/// 永不结束的 provider：用于建流取消测试。
 pub struct HangingProvider {
     pub call_count: AtomicUsize,
 }
