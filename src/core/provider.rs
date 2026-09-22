@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
+use std::time::Duration;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
@@ -51,6 +52,22 @@ pub struct ProviderRequest {
     pub signal: CancellationToken,
 }
 
+/// provider 错误的可判定重试类别（Task 042）。
+///
+/// runtime 重试循环据此决定是否退避重试：
+/// - `Transient`：网络瞬断 / 5xx / 超时 → 指数退避重试
+/// - `RateLimited`：429 → 可重试，尊重 `Retry-After`（封顶）
+/// - `Permanent`：认证 / 参数 / 解析 / 构造 → 不重试，立即传播
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryClass {
+    /// 网络瞬断 / 5xx / 超时 → 指数退避重试。
+    Transient,
+    /// 429 限流 → 可重试，尊重 `Retry-After`（封顶）。
+    RateLimited,
+    /// 认证 / 参数 / 解析 / 构造 → 不重试，立即传播。
+    Permanent,
+}
+
 /// provider 错误（仅"建立请求失败"这一外层阶段）。
 ///
 /// 四类语义（007 补齐，保留既有 `Request`/`Aborted`）：
@@ -62,6 +79,9 @@ pub struct ProviderRequest {
 /// 040 补齐（additive）：
 /// - `Aborted`：建流阶段被取消（runtime 不重试，立即传播 abort 终态）
 /// - `Timeout`：建流阶段超过 `LoopConfig::request_timeout`（可重试，分类见 042）
+///
+/// 042 补齐（additive）：`HttpStatus` 增 `retry_after` 字段（`Retry-After` 头解析结果）；
+/// 重试分类见 [`ProviderError::retry_class`]。
 #[derive(Error, Debug)]
 pub enum ProviderError {
     #[error("Provider request failed: {0}")]
@@ -73,11 +93,56 @@ pub enum ProviderError {
     #[error("Network error: {0}")]
     Network(String),
     #[error("HTTP status {status}: {body}")]
-    HttpStatus { status: u16, body: String },
+    HttpStatus {
+        status: u16,
+        body: String,
+        /// Task 042：`Retry-After` 响应头解析结果（仅 429 有意义，additive）。
+        retry_after: Option<Duration>,
+    },
     #[error("Parse error: {0}")]
     Parse(String),
     #[error("Build error: {0}")]
     Build(String),
+}
+
+impl ProviderError {
+    /// 可判定重试类别（Task 042）。
+    ///
+    /// 映射表：
+    /// - `Network` / `Timeout` / `Request` → `Transient`
+    ///   （`Request` 为通用建流失败，规格表未单列，按可重试处理以保留既有重试契约）
+    /// - `Aborted` / `Parse` / `Build` → `Permanent`
+    /// - `HttpStatus`：429 → `RateLimited`；5xx → `Transient`；4xx → `Permanent`；
+    ///   其余非 2xx（1xx / 3xx / 6xx+）→ `Transient`
+    pub fn retry_class(&self) -> RetryClass {
+        match self {
+            ProviderError::Network(_) | ProviderError::Timeout | ProviderError::Request(_) => {
+                RetryClass::Transient
+            }
+            ProviderError::Aborted | ProviderError::Parse(_) | ProviderError::Build(_) => {
+                RetryClass::Permanent
+            }
+            ProviderError::HttpStatus { status, .. } => match status {
+                429 => RetryClass::RateLimited,
+                500..=599 => RetryClass::Transient,
+                400..=499 => RetryClass::Permanent,
+                // 其余非 2xx（1xx / 3xx / 6xx+）→ Transient；2xx 理论上不会成为错误。
+                _ => RetryClass::Transient,
+            },
+        }
+    }
+
+    /// `Retry-After` 延迟（Task 042）。仅 `RateLimited`（429）可能返回 `Some`。
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            ProviderError::HttpStatus {
+                status,
+                retry_after,
+                ..
+            } if *status == 429 => *retry_after,
+            _ => None,
+        }
+    }
 }
 
 /// assistant 流：provider 返回的增量事件流。

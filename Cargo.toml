@@ -29,7 +29,7 @@ include = [
 # 参数 schema 从类型 derive（零手工漂移）+ 暴露 `RootSchema` 给上层，且嵌入方
 # `default-features = false` 可剥离。与 `config`（toml，轻 + 开箱即用）同策略。
 default = ["providers-http", "config", "schema"]
-providers-http = ["dep:reqwest"]
+providers-http = ["dep:reqwest", "dep:httpdate"]
 # Task 022：TOML 配置文件解析（`Config::load`/`resolve`）。数据结构
 # （`ModelConfig`/`Protocol`/`GuiguConfig`）不 gate，仅 TOML 解析 gate 在此。
 config = ["dep:toml"]
@@ -59,6 +59,9 @@ clap = { version = "4", features = ["derive"] }
 # 嵌入方 `default-features = false` 可剥离 reqwest，得到纯核心库。
 # 本构建环境无 OpenSSL 头文件，故用 rustls（纯 Rust）替代默认 native-tls。
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
+# Task 042：解析 `Retry-After` 响应头的 HTTP-date 形式（纯 Rust、零依赖，已在
+# reqwest/wiremock 依赖树中）。仅 `providers-http` 适配器需要，故 optional。
+httpdate = { version = "1.0", optional = true }
 # Task 025：ACP SSE+HTTP 传输（feature `acp-sse`，非 default）。axum 提供 HTTP
 # server + SSE 响应；tokio-stream 提供 mpsc → Stream 适配（axum `Sse` 需要）。
 axum = { version = "0.8", optional = true }

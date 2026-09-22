@@ -59,16 +59,23 @@ async fn stream_with_retry(
             Ok(stream) => return Ok(stream),
             Err(e) => {
                 // Aborted（含 provider 自身返回）不重试，立即传播 abort 终态。
-                if matches!(e, ProviderError::Aborted) || signal.is_cancelled() {
+                if matches!(
+                    e.retry_class(),
+                    crate::core::provider::RetryClass::Permanent
+                ) {
+                    return Err(e);
+                }
+                if signal.is_cancelled() {
                     return Err(ProviderError::Aborted);
                 }
                 if attempt >= config.max_retries {
                     return Err(e);
                 }
                 let factor = 2f64.powi(attempt as i32);
-                let delay = config
-                    .retry_base_delay
-                    .mul_f64(factor)
+                let exponential = config.retry_base_delay.mul_f64(factor);
+                let delay = e
+                    .retry_after()
+                    .unwrap_or(exponential)
                     .min(config.retry_max_delay);
                 tokio::select! {
                     _ = tokio::time::sleep(delay) => {}

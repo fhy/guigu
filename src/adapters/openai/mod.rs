@@ -7,6 +7,7 @@ mod request;
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use std::time::Duration;
 
 use crate::core::provider::{AssistantStream, ModelProvider, ProviderError, ProviderRequest};
 
@@ -68,11 +69,17 @@ impl ModelProvider for OpenAiProvider {
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
+            let retry_after =
+                parse_retry_after(response.headers().get(reqwest::header::RETRY_AFTER));
             let body = response
                 .text()
                 .await
                 .map_err(|e| ProviderError::Network(e.to_string()))?;
-            return Err(ProviderError::HttpStatus { status, body });
+            return Err(ProviderError::HttpStatus {
+                status,
+                body,
+                retry_after,
+            });
         }
 
         let body = response.bytes_stream().map(|r| r.map(|b| b.to_vec()));
@@ -83,4 +90,13 @@ impl ModelProvider for OpenAiProvider {
             events::map_event,
         ))
     }
+}
+
+fn parse_retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<Duration> {
+    let raw = value?.to_str().ok()?.trim();
+    if let Ok(seconds) = raw.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let date = httpdate::parse_http_date(raw).ok()?;
+    date.duration_since(std::time::SystemTime::now()).ok()
 }

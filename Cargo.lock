@@ -572,6 +572,7 @@ dependencies = [
  "crossterm",
  "fs2",
  "futures",
+ "httpdate",
  "ratatui",
  "reqwest",
  "schemars",

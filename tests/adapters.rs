@@ -286,7 +286,7 @@ async fn openai_http_401_returns_http_status_error() {
         .stream(make_request(CancellationToken::new()))
         .await;
     match result {
-        Err(ProviderError::HttpStatus { status, body }) => {
+        Err(ProviderError::HttpStatus { status, body, .. }) => {
             assert_eq!(status, 401);
             assert_eq!(body, "invalid api key");
         }

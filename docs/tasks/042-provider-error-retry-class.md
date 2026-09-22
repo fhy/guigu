@@ -35,6 +35,7 @@ impl ProviderError {
 | ProviderError 变体 | 分类 |
 |---|---|
 | `Network(_)` | Transient |
+| `Request(_)` | Transient（语义等同 `Network`：请求发送/传输层失败，可重试） |
 | `Timeout`（040 新增） | Transient |
 | `Aborted`（040 新增） | Permanent（且 runtime 必须立即传播，不重试） |
 | `HttpStatus { status, .. }` | 401/403/400/404/422 → Permanent；429 → RateLimited；500..=599 → Transient；其余 4xx → Permanent；其余非 2xx → Transient |
@@ -54,7 +55,7 @@ impl ProviderError {
 ### 3. 与既有契约关系
 
 - 003 定稿「仅重试 provider 请求，不重试工具」不变；本任务只细化「哪些 provider 错误值得重试、退避多久」。
-- 007 定稿 `ProviderError` 四类语义（Network/HttpStatus/Parse/Build）不变，`retry_class` 是叠加在其上的纯函数，不改变体含义。
+- 007 定稿 `ProviderError` 语义（Network/HttpStatus/Parse/Build）不变，`retry_class` 是叠加在其上的纯函数，不改变体含义。实现中若存在 `Request(_)` 独立变体（请求发送/传输层失败），归 `Transient`，与 `Network` 同义（见映射表）。
 - 040 的 `Aborted`/`Timeout` 需本任务在 `retry_class` 中给出分类（见上表），故 042 依赖 040 先落地（或同批实现，Developer 需保证两个任务的 `ProviderError` 改动合并一致）。
 
 ## Files
@@ -70,7 +71,7 @@ impl ProviderError {
 - [ ] cargo clippy --all-targets --all-features -D warnings passes
 - [ ] cargo test --all-targets passes
 - [ ] cargo fmt --check passes
-- [ ] `retry_class` 映射表逐条单测（Network/Timeout→Transient；Aborted/Parse/Build/401/400→Permanent；429→RateLimited；5xx→Transient）
+- [ ] `retry_class` 映射表逐条单测（Network/Request/Timeout→Transient；Aborted/Parse/Build/401/400→Permanent；429→RateLimited；5xx→Transient）
 - [ ] 重试循环：`Permanent`/`Aborted` 不重试（计数 0）；`Transient` 指数退避重试（计数可断言）；`RateLimited` 用 `retry_after` 作为延迟且封顶
 - [ ] adapter 端到端（wiremock）：429 + `Retry-After: 5` → `HttpStatus { retry_after: Some(5s) }`；401 → `HttpStatus`（分类 Permanent）
 - [ ] 退避等待可取消（`signal.cancel()` 打断退避）
@@ -80,3 +81,4 @@ impl ProviderError {
 ## 修订记录
 
 - v1.0（2026-09-13，Architect）：初稿。依据维护审查次要项 #2：`ProviderError::retry_class()` 区分 transient/rate-limited/permanent，`HttpStatus` 增 `retry_after`（additive），runtime 只对可重试类别退避并尊重 Retry-After（封顶）；`Aborted`/`Timeout` 分类协同 040。
+- v1.1（2026-09-19，Architect）：响应 Reviewer 规格未覆盖项——`ProviderError::Request(_)`（实现中独立变体，请求发送/传输层失败）明确归 `Transient`，映射表与 AC 单测补列。理由：语义等同 `Network`；既有重试契约已按可重试处理，042 不得改变行为。
