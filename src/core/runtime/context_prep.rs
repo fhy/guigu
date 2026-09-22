@@ -41,6 +41,7 @@ fn apply_final_projection(
             .tools
             .iter()
             .map(|tool| {
+                // 仅作 token 粗估输入：这里是近似拼接，并非严格 JSON 序列化。
                 format!(
                     "{}{}{:?}",
                     tool.name(),

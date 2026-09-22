@@ -22,6 +22,8 @@ use crate::core::message::{
 };
 
 /// 粗估一段文本的 token 数（字节数 / 4 + 1 开销）。
+// 空串也估算为 1；因此空 system/tools 会产生非零 fixed_overhead，这是
+// chars/4 粗估的已知近似，不影响压缩触发正确性。
 pub fn estimate_tokens(text: &str) -> u32 {
     text.len() as u32 / 4 + 1
 }
@@ -93,6 +95,7 @@ fn estimate_total(messages: &[Arc<Message>], fixed_overhead: u32) -> u64 {
 /// 上下文预算：按模型 `context_window` 判断与裁剪。
 #[derive(Debug, Clone, Copy)]
 pub struct ContextBudget {
+    /// 模型上下文窗口，作为硬上限口径的基数。
     pub context_window: u32,
     /// 固定上下文开销：system prompt、工具 schema 与协议包装的估算总和。
     pub fixed_overhead: u32,
@@ -109,11 +112,12 @@ impl ContextBudget {
         }
     }
 
-    /// Creates a budget including fixed request overhead and reserved output space.
+    /// 创建包含固定请求开销和输出预留空间的预算。
     ///
-    /// `tool_schemas` should be the serialized schema representation used in the
-    /// provider request; `protocol_wrapper_tokens` covers the request envelope and
-    /// role/type wrappers.
+    /// 构造带固定开销的上下文预算。
+    ///
+    /// `fixed_overhead` 仅叠加进无 usage 基线的估算路径；
+    /// `protocol_wrapper_tokens` 覆盖请求信封及 role/type 包装。
     pub fn with_overhead(
         context_window: u32,
         system_prompt: &str,
@@ -148,7 +152,7 @@ impl ContextBudget {
         truncate_to_budget_with_overhead(messages, self.available() as usize, self.fixed_overhead)
     }
 
-    /// 返回可用于消息正文的 token 数。
+    /// 返回输入可用 token 上限（`context_window - reserve_output_tokens`）。
     pub fn available(&self) -> u32 {
         self.context_window
             .saturating_sub(self.reserve_output_tokens)
@@ -285,6 +289,9 @@ pub async fn plan_context(
 }
 
 /// 拓扑安全截断：按 turn/user boundary 丢弃整 turn，保证 tool call/result 成组。
+///
+/// 公开入口固定开销为 0（`fixed_overhead = 0`）；带固定开销的内部路径由
+/// `truncate_to_budget_with_overhead` 使用。
 ///
 /// 1. `estimate_total(messages, fixed_overhead) <= max_tokens` → 原样返回。
 /// 2. 否则从头部整 turn 丢弃（切点推进到下一条 `User` 边界），直到满足预算。
