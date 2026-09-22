@@ -196,6 +196,12 @@ fn test_usage_baseline_is_preferred_for_compaction_budget() {
         protocol_wrapper_tokens: 0,
     };
     assert!(estimate_total(&transcript) > policy.budget_tokens as u64);
+    let budget = ContextBudget::new(110);
+    assert_eq!(
+        budget.estimate(&transcript),
+        estimate_total(&transcript) as u32
+    );
+    assert!(!budget.fits(&transcript));
 }
 
 // ---------- default_convert_to_llm ----------

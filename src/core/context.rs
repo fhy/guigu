@@ -90,7 +90,9 @@ fn estimate_total(messages: &[Arc<Message>]) -> u64 {
 #[derive(Debug, Clone, Copy)]
 pub struct ContextBudget {
     pub context_window: u32,
+    /// 固定上下文开销：system prompt、工具 schema 与协议包装的估算总和。
     pub fixed_overhead: u32,
+    /// 为模型输出预留的 token 数，不用于消息正文。
     pub reserve_output_tokens: u32,
 }
 
@@ -103,6 +105,11 @@ impl ContextBudget {
         }
     }
 
+    /// Creates a budget including fixed request overhead and reserved output space.
+    ///
+    /// `tool_schemas` should be the serialized schema representation used in the
+    /// provider request; `protocol_wrapper_tokens` covers the request envelope and
+    /// role/type wrappers.
     pub fn with_overhead(
         context_window: u32,
         system_prompt: &str,
@@ -120,12 +127,12 @@ impl ContextBudget {
         }
     }
 
-    /// 粗估消息列表的总 token 数。
+    /// 粗估消息列表的总 token 数，优先使用最近一次 provider usage 基线。
     pub fn estimate(&self, messages: &[Arc<Message>]) -> u32 {
-        messages.iter().map(|m| estimate_message_tokens(m)).sum()
+        estimate_total(messages).min(u32::MAX as u64) as u32
     }
 
-    /// 消息列表是否在预算内。
+    /// 消息列表是否在扣除固定开销和输出预留后的预算内。
     pub fn fits(&self, messages: &[Arc<Message>]) -> bool {
         self.estimate(messages) <= self.available()
     }
@@ -137,6 +144,7 @@ impl ContextBudget {
         truncate_to_budget(messages, self.available() as usize)
     }
 
+    /// 返回可用于消息正文的 token 数。
     pub fn available(&self) -> u32 {
         self.context_window
             .saturating_sub(self.reserve_output_tokens)
@@ -150,7 +158,7 @@ impl ContextBudget {
 /// 与一期行为兼容。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactionPolicy {
-    /// 触发压缩的 token 阈值（粗估）。
+    /// 消息正文可用 token 预算；总窗口还包括输出预留和固定请求开销。
     pub budget_tokens: usize,
     /// 保留最近完整 turn 数（不压缩）。
     ///
@@ -158,7 +166,9 @@ pub struct CompactionPolicy {
     /// 一个 turn = 一条 `User` 消息 + 其后的所有 `Assistant`/`ToolResult` 消息，
     /// 直到下一条 `User`（不含）。
     pub keep_recent: usize,
+    /// 为模型输出预留的 token 数。
     pub reserve_output_tokens: usize,
+    /// 请求体骨架及消息 role/type 包装的固定 token 开销。
     pub protocol_wrapper_tokens: usize,
 }
 
