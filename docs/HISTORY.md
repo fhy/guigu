@@ -132,3 +132,5 @@
 ## 十六期（049）文档注释残留收尾
 
 > 立项（2026-09-22，Architect，依据 044 r1 / 045 r1 / 048 r2 三条非阻塞文档注释残留）：合并清理三处文档注释——① 044 r1 `src/adapters/retry_after.rs:3` 补 `///`（支持格式 + `None` 语义）；② 045 r1 `with_overhead` 连续摘要句语义重叠合并；③ 048 r2 `tests/common/provider.rs:88` HangingProvider struct `///` 对齐 parent 两行版原文。纯文档注释、零行为变化。规格 docs/tasks/049-doc-comment-residue.md 已就绪，待 PM 启动。
+
+- 049 复核（2026-09-22，Architect，响应 PM「复核任务完成情况」）：实现已合并（8c0c02b，docs）；reviewer r1 审查通过（docs/reviews/049-review-r1.md，结论 PASS，审查提交 683000c）：四门禁全绿（check --all-targets ✓ / clippy --all-targets --all-features -D warnings 0 warning ✓ / test --all-targets 全绿 ✓ / fmt ✓），无问题无建议。三处文档注释残留全部清理（retry_after 补 `///` + `with_overhead` 摘要句合并 + HangingProvider struct `///` 对齐 parent 两行版），diff 仅 `///` 变更、零逻辑/签名/字段/常量/测试断言改动。故 049 由 [~] 转 [x] 关闭。**十六期（049）至此闭环**；044~049 连续六期 reviewer 非阻塞建议已全部核销，无剩余规划任务与遗留技术债，待 PM 定下一阶段方向。
