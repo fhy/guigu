@@ -54,4 +54,4 @@
 - [x] 047 tests/common helper 去重 + runtime_loop 切 mod common（十四期）
 - [x] 048 tests/common 文档注释补回 + 冗余 re-export 清理（十五期）
 - [x] 049 文档注释残留收尾（十六期）
-- [~] 050 发布 v0.3.0（十二~十六期正确性/稳健性修复）
+- [x] 050 发布 v0.3.0（十二~十六期正确性/稳健性修复）
